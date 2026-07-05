@@ -13,9 +13,12 @@
 
 #![allow(dead_code)]
 
+use std::sync::Arc;
+
 use axum::body::Body;
 use axum::http::{Request, Response, StatusCode};
 use axum::Router;
+use fluxfang_api::capture::CapturerFactory;
 use fluxfang_api::{app, AppState};
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
@@ -23,6 +26,10 @@ use sqlx::{Executor, PgPool};
 use tokio::sync::OnceCell;
 use tower::ServiceExt;
 use uuid::Uuid;
+
+/// Fixed test key for `AppState::with_capture` — this crate's integration
+/// tests never exercise alert dispatch decryption, so any 32 bytes will do.
+const TEST_SECRET_KEY: [u8; 32] = [0x33u8; 32];
 
 static SWEEP_DONE: OnceCell<()> = OnceCell::const_new();
 
@@ -145,6 +152,20 @@ pub async fn test_app() -> Router {
     app(AppState::new(fresh_pool().await))
 }
 
+/// Same as [`test_app`], but with a caller-supplied `CapturerFactory` (e.g.
+/// `fluxfang_api::capture::MockCapturerFactory`) wired into the
+/// `CaptureSupervisor` instead of the real, hardware-touching one --
+/// `data_sources.rs`'s start/stop tests need this so `POST
+/// /api/data-sources/:id/start` never touches real wifi/gps hardware.
+/// Returns the pool alongside the app so tests can assert directly against
+/// the DB (e.g. `EmissionRepo::query`, `LocationRepo::list_for_session`)
+/// without threading a second connection through `AppState`.
+pub async fn test_app_with_factory(factory: Arc<dyn CapturerFactory>) -> (Router, PgPool) {
+    let pool = fresh_pool().await;
+    let state = AppState::with_capture(pool.clone(), TEST_SECRET_KEY, factory);
+    (app(state), pool)
+}
+
 /// Run a request against the app via `tower::ServiceExt::oneshot`.
 pub async fn call(app: &Router, req: Request<Body>) -> Response<Body> {
     app.clone().oneshot(req).await.expect("request failed")
@@ -202,6 +223,51 @@ pub async fn post_json_with_cookie(
             .header("content-type", "application/json")
             .header("cookie", cookie)
             .body(Body::from(body.to_string()))
+            .unwrap(),
+    )
+    .await
+}
+
+pub async fn patch_json_with_cookie(
+    app: &Router,
+    uri: &str,
+    body: &str,
+    cookie: &str,
+) -> Response<Body> {
+    call(
+        app,
+        Request::builder()
+            .method("PATCH")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("cookie", cookie)
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+    )
+    .await
+}
+
+pub async fn delete_with_cookie(app: &Router, uri: &str, cookie: &str) -> Response<Body> {
+    call(
+        app,
+        Request::builder()
+            .method("DELETE")
+            .uri(uri)
+            .header("cookie", cookie)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+}
+
+pub async fn post_with_cookie(app: &Router, uri: &str, cookie: &str) -> Response<Body> {
+    call(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("cookie", cookie)
+            .body(Body::empty())
             .unwrap(),
     )
     .await

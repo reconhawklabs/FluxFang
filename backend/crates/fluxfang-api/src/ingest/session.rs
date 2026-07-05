@@ -83,7 +83,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex as StdMutex, RwLock};
 use std::time::Duration;
 
 use fluxfang_capture::{GpsFix, GpsSource};
@@ -136,7 +136,16 @@ pub struct SessionManager {
     pool: PgPool,
     session_id: Arc<RwLock<Option<Uuid>>>,
     latest_fix: Arc<RwLock<Option<GpsFix>>>,
-    handle: Option<JoinHandle<()>>,
+    /// `std::sync::Mutex`, not a bare field: Task 6.2's `CaptureSupervisor`
+    /// shares one `Arc<SessionManager>` between every ingest task reading
+    /// it (via `IngestCtx::sessions`) and the supervisor itself, which needs
+    /// to be able to call [`close`](SessionManager::close) through that same
+    /// `Arc` — i.e. through a shared `&SessionManager`, not an exclusive
+    /// `&mut SessionManager` (which `Arc::get_mut` could only give if there
+    /// were no other outstanding clones, and there always are). Interior
+    /// mutability here is what lets `close`/`join` take `&self`/`&mut self`
+    /// respectively while still being reachable through the shared `Arc`.
+    handle: StdMutex<Option<JoinHandle<()>>>,
 }
 
 impl SessionManager {
@@ -184,7 +193,7 @@ impl SessionManager {
             pool,
             session_id,
             latest_fix,
-            handle: Some(handle),
+            handle: StdMutex::new(Some(handle)),
         })
     }
 
@@ -211,15 +220,23 @@ impl SessionManager {
     ///
     /// [`close`]: SessionManager::close
     pub async fn join(&mut self) {
-        if let Some(handle) = self.handle.take() {
+        let handle = self.handle.lock().expect("handle mutex poisoned").take();
+        if let Some(handle) = handle {
             let _ = handle.await;
         }
     }
 
     /// Stop capture: abort the background loop (if still running, a
     /// no-op otherwise) and close the active session.
-    pub async fn close(&mut self) -> Result<(), sqlx::Error> {
-        if let Some(handle) = self.handle.take() {
+    ///
+    /// Takes `&self`, not `&mut self` — see the `handle` field's doc
+    /// comment for why (Task 6.2's `CaptureSupervisor` calls this through a
+    /// shared `Arc<SessionManager>`). Idempotent: calling it more than once
+    /// is safe (the second call's `handle.take()` is a no-op, and
+    /// `SessionRepo::close_active` is itself idempotent).
+    pub async fn close(&self) -> Result<(), sqlx::Error> {
+        let handle = self.handle.lock().expect("handle mutex poisoned").take();
+        if let Some(handle) = handle {
             handle.abort();
         }
         SessionRepo::close_active(&self.pool).await?;
@@ -611,7 +628,7 @@ mod tests {
         let (_tx, rx) = mpsc::unbounded_channel();
         let gps = ChannelGps(rx);
 
-        let mut manager = SessionManager::open(
+        let manager = SessionManager::open(
             pool.clone(),
             gps,
             SessionManagerConfig::default(),

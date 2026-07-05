@@ -1,4 +1,8 @@
+use std::sync::Arc;
+
+use fluxfang_api::capture::RealCapturerFactory;
 use fluxfang_api::AppState;
+use fluxfang_core::secrets::key_from_base64;
 
 #[tokio::main]
 async fn main() {
@@ -12,7 +16,17 @@ async fn main() {
         .await
         .expect("run database migrations");
 
-    let state = AppState::new(pool);
+    // Task 6.2: the CaptureSupervisor's `IngestCtx` needs this to decrypt
+    // `alert_method.config_encrypted` when dispatching a fired alert (Task
+    // 5.3's `alerts::fire_rule`). Loaded once here, not lazily, so a
+    // misconfigured key fails fast at startup rather than surfacing as a
+    // mysterious decrypt failure the first time an alert fires.
+    let secret_key_raw = std::env::var("FLUXFANG_SECRET_KEY")
+        .expect("FLUXFANG_SECRET_KEY must be set (see .env.example)");
+    let secret_key = key_from_base64(&secret_key_raw)
+        .expect("FLUXFANG_SECRET_KEY must be valid base64-encoded 32 bytes");
+
+    let state = AppState::with_capture(pool, secret_key, Arc::new(RealCapturerFactory));
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
     axum::serve(listener, fluxfang_api::app(state))

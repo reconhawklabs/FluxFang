@@ -24,7 +24,12 @@ use crate::{GpsFix, GpsSource};
 /// Baud rates this source accepts. Anything else is rejected by
 /// [`SerialGpsSource::open`] before touching the device, rather than
 /// silently passing an unsupported rate down to the OS driver.
-const ALLOWED_BAUD_RATES: [u32; 6] = [4800, 9600, 19200, 38400, 57600, 115200];
+///
+/// `pub` (re-exported at `gps::ALLOWED_BAUD_RATES`) so Task 6.2's
+/// `fluxfang-api` data-source config validation can check a proposed serial
+/// baud rate against this exact list instead of hand-duplicating it and
+/// risking the two lists drifting apart.
+pub const ALLOWED_BAUD_RATES: [u32; 6] = [4800, 9600, 19200, 38400, 57600, 115200];
 
 /// How long a single blocking `read_line` may block before returning a
 /// timeout error, so the reader thread wakes up often enough to notice

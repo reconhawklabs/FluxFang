@@ -6,6 +6,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use sqlx::PgPool;
+use tokio::sync::broadcast;
+
+use crate::capture::{CaptureSupervisor, CapturerFactory, RealCapturerFactory};
+use crate::ingest::Event;
 
 /// How many failed `/api/login` attempts are tolerated inside
 /// [`LOGIN_RATE_LIMIT_WINDOW`] before further attempts get `429 Too Many
@@ -77,6 +81,19 @@ fn prune(failures: &mut VecDeque<Instant>) {
     }
 }
 
+/// Placeholder AES-256-GCM key used by [`AppState::new`] (test/dev
+/// convenience only — see its doc comment). Never used in production:
+/// `main.rs` always goes through [`AppState::with_capture`] with a real key
+/// loaded from `FLUXFANG_SECRET_KEY` via `fluxfang_core::secrets::key_from_base64`.
+const PLACEHOLDER_SECRET_KEY: [u8; 32] = [0u8; 32];
+
+/// Capacity of [`AppState`]'s `ingest::Event` broadcast channel (Task 7.1's
+/// WebSocket handler is the eventual real subscriber). Sized generously
+/// relative to this single-admin app's expected emission rate; a slow or
+/// absent subscriber just misses old events (`broadcast::Sender::send`
+/// never blocks), it doesn't back-pressure ingest.
+const EVENTS_CHANNEL_CAPACITY: usize = 256;
+
 /// Application-wide state threaded through handlers via `State<AppState>`.
 ///
 /// Kept intentionally minimal for Task 2.2 — just what setup/login/logout
@@ -87,13 +104,46 @@ fn prune(failures: &mut VecDeque<Instant>) {
 pub struct AppState {
     pub pool: PgPool,
     pub login_limiter: Arc<LoginLimiter>,
+    /// Task 6.2's data-source start/stop orchestrator. See `crate::capture`
+    /// module docs for the full design.
+    pub capture: Arc<CaptureSupervisor>,
 }
 
 impl AppState {
+    /// Convenience constructor for callers that don't care about capture
+    /// (most of this crate's existing tests: health/auth/catalog). Builds a
+    /// [`CaptureSupervisor`] wired to the real, hardware-touching
+    /// [`RealCapturerFactory`] and a placeholder (all-zero) secret key —
+    /// fine as long as nothing actually calls `start`/`stop` or dispatches
+    /// an alert notification, which none of those tests do. Production
+    /// (`main.rs`) and this crate's own data-source tests use
+    /// [`AppState::with_capture`] instead, supplying a real key and/or a
+    /// `MockCapturerFactory`.
     pub fn new(pool: PgPool) -> Self {
+        Self::with_capture(pool, PLACEHOLDER_SECRET_KEY, Arc::new(RealCapturerFactory))
+    }
+
+    /// Full constructor: `secret_key` is the parsed 32-byte
+    /// `FLUXFANG_SECRET_KEY` (production) or a fixed test key (tests), and
+    /// `factory` is the `CapturerFactory` the `CaptureSupervisor` uses to
+    /// build capturers on `start` — `RealCapturerFactory` in production,
+    /// `MockCapturerFactory` in `tests/data_sources.rs`.
+    pub fn with_capture(
+        pool: PgPool,
+        secret_key: [u8; 32],
+        factory: Arc<dyn CapturerFactory>,
+    ) -> Self {
+        let (events_tx, _events_rx) = broadcast::channel::<Event>(EVENTS_CHANNEL_CAPACITY);
+        let capture = Arc::new(CaptureSupervisor::new(
+            pool.clone(),
+            events_tx,
+            secret_key,
+            factory,
+        ));
         Self {
             pool,
             login_limiter: Arc::new(LoginLimiter::default()),
+            capture,
         }
     }
 }

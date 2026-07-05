@@ -41,7 +41,9 @@
 //! whichever future task adds a persistent, signed/private-cookie store.
 
 pub mod auth_routes;
+pub mod capture;
 pub mod catalog_routes;
+pub mod data_sources;
 pub mod dto;
 pub mod ingest;
 pub mod middleware;
@@ -76,6 +78,7 @@ pub fn app(state: AppState) -> Router {
         .route("/api/entities", get(|| async { Json(json!([])) }))
         .merge(auth_routes::protected_routes())
         .merge(catalog_routes::protected_routes())
+        .merge(data_sources::protected_routes())
         .route_layer(axum::middleware::from_fn(middleware::require_auth));
 
     Router::new()

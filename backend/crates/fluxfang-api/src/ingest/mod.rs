@@ -87,9 +87,33 @@ pub enum Event {
 }
 
 /// Shared dependencies for [`ingest`].
+///
+/// `#[derive(Clone)]` (Task 6.2): every field is itself cheaply `Clone`
+/// (`PgPool` is an internally-`Arc`'d pool handle, `Option<Arc<SessionManager>>`
+/// and `broadcast::Sender` are reference-counted, `[u8; 32]` is `Copy`), so
+/// deriving `Clone` on the whole struct costs nothing beyond what callers
+/// already pay when they clone individual fields — and it's exactly what
+/// lets `CaptureSupervisor` (`crate::capture`) hand every spawned
+/// wifi-ingest task, and the host-zone hook, its own owned copy instead of
+/// juggling a `&IngestCtx` with a lifetime tied to the supervisor.
+#[derive(Clone)]
 pub struct IngestCtx {
     pub pool: PgPool,
-    pub sessions: Arc<SessionManager>,
+    /// The `SessionManager` currently bounding capture, if any.
+    ///
+    /// `Option`, not a bare `Arc<SessionManager>` (Task 6.2): a
+    /// `SessionManager` doesn't exist until `SessionManager::open` returns,
+    /// but building the `HostZoneHook` passed *into* `open` needs an
+    /// `IngestCtx` up front (see `crate::ingest::zones::update_host_zones`'s
+    /// signature) — a chicken-and-egg problem `CaptureSupervisor` resolves
+    /// by building the hook's `IngestCtx` with `sessions: None` (that call
+    /// path never reads this field; `update_host_zones`/`update_subject_zones`
+    /// only touch `pool`/`events`/`secret_key`) and only setting
+    /// `Some(session_manager)` on the "full" `IngestCtx` used for actual
+    /// emission ingest, built after the `SessionManager` exists. [`ingest`]
+    /// itself still requires a session (`None` here behaves exactly like a
+    /// closed/absent one — see "No active session" above).
+    pub sessions: Option<Arc<SessionManager>>,
     pub events: broadcast::Sender<Event>,
     /// AES-256-GCM key used to decrypt `alert_method.config_encrypted` when
     /// [`alerts::fire_rule`] dispatches a fired alert's notification (Task
@@ -154,13 +178,21 @@ pub async fn ingest(
     data_source_id: Uuid,
     obs: RawObservation,
 ) -> anyhow::Result<Emission> {
-    let session_id = ctx.sessions.current_session_id().ok_or_else(|| {
-        anyhow::anyhow!(
-            "ingest called with no active survey_session -- capture must only run while a \
-             SessionManager-bounded session is open (see this module's docs)"
-        )
-    })?;
-    let location = ctx.sessions.latest_fix().map(|fix| (fix.lon, fix.lat));
+    let session_id = ctx
+        .sessions
+        .as_ref()
+        .and_then(|sessions| sessions.current_session_id())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "ingest called with no active survey_session -- capture must only run while a \
+                 SessionManager-bounded session is open (see this module's docs)"
+            )
+        })?;
+    let location = ctx
+        .sessions
+        .as_ref()
+        .and_then(|sessions| sessions.latest_fix())
+        .map(|fix| (fix.lon, fix.lat));
 
     let new = NewEmission {
         data_source_id: Some(data_source_id),
@@ -311,7 +343,7 @@ mod tests {
         let (events_tx, mut events_rx) = broadcast::channel(8);
         let ctx = IngestCtx {
             pool: pool.clone(),
-            sessions: Arc::new(manager),
+            sessions: Some(Arc::new(manager)),
             events: events_tx,
             secret_key: [0x11u8; 32],
         };
@@ -366,7 +398,7 @@ mod tests {
         let (events_tx, _rx) = broadcast::channel(8);
         let ctx = IngestCtx {
             pool,
-            sessions: Arc::new(manager),
+            sessions: Some(Arc::new(manager)),
             events: events_tx,
             secret_key: [0x11u8; 32],
         };
@@ -410,7 +442,7 @@ mod tests {
         let (events_tx, _rx) = broadcast::channel(8);
         let ctx = IngestCtx {
             pool: pool.clone(),
-            sessions: Arc::new(manager),
+            sessions: Some(Arc::new(manager)),
             events: events_tx,
             secret_key: [0x11u8; 32],
         };
@@ -487,7 +519,7 @@ mod tests {
         let (events_tx, _rx) = broadcast::channel(8);
         let ctx = IngestCtx {
             pool: pool.clone(),
-            sessions: Arc::new(manager),
+            sessions: Some(Arc::new(manager)),
             events: events_tx,
             secret_key: [0x11u8; 32],
         };
@@ -549,7 +581,7 @@ mod tests {
         let (events_tx, _rx) = broadcast::channel(8);
         let ctx = IngestCtx {
             pool: pool.clone(),
-            sessions: Arc::new(manager),
+            sessions: Some(Arc::new(manager)),
             events: events_tx,
             secret_key: [0x11u8; 32],
         };

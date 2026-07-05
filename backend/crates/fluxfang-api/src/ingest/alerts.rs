@@ -380,7 +380,7 @@ mod tests {
         let (events_tx, events_rx) = broadcast::channel(16);
         let ctx = IngestCtx {
             pool,
-            sessions: Arc::new(manager),
+            sessions: Some(Arc::new(manager)),
             events: events_tx,
             secret_key: test_key(),
         };

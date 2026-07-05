@@ -13,4 +13,4 @@ pub mod serial;
 
 pub use gpsd::GpsdSource;
 pub use nmea::parse_nmea;
-pub use serial::SerialGpsSource;
+pub use serial::{SerialGpsSource, ALLOWED_BAUD_RATES};

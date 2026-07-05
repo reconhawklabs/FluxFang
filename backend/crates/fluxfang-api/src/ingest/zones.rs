@@ -442,7 +442,7 @@ mod tests {
         let (events_tx, events_rx) = broadcast::channel(16);
         let ctx = IngestCtx {
             pool,
-            sessions: Arc::new(manager),
+            sessions: Some(Arc::new(manager)),
             events: events_tx,
             secret_key: test_key(),
         };
@@ -604,7 +604,8 @@ mod tests {
         tx.send(outside_fix.clone())
             .expect("send second fix over ChannelGps");
         tokio::time::timeout(Duration::from_secs(5), async {
-            while ctx.sessions.latest_fix().as_ref() != Some(&outside_fix) {
+            while ctx.sessions.as_ref().and_then(|s| s.latest_fix()).as_ref() != Some(&outside_fix)
+            {
                 tokio::time::sleep(Duration::from_millis(2)).await;
             }
         })
@@ -710,7 +711,7 @@ mod tests {
         let (events_tx, _events_rx) = broadcast::channel(16);
         let ctx = IngestCtx {
             pool: pool.clone(),
-            sessions: Arc::new(
+            sessions: Some(Arc::new(
                 SessionManager::open(
                     pool.clone(),
                     ChannelGps(mpsc::unbounded_channel().1),
@@ -719,7 +720,7 @@ mod tests {
                 )
                 .await
                 .unwrap(),
-            ),
+            )),
             events: events_tx,
             secret_key: test_key(),
         };
