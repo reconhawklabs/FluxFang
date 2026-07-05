@@ -205,6 +205,124 @@ async fn gps_data_source_start_opens_session_and_writes_fixes_then_stop_closes_i
     );
 }
 
+/// Regression test for the session-leak review finding on Task 6.2:
+/// `ensure_wifi_session` used to open (and record in `self.session`) a
+/// fresh `survey_session` *before* `capturer.start(tx)` ran, with nothing
+/// rolling it back if `start()` then failed (the realistic hardware
+/// failure -- bad interface, no monitor mode, permissions). That left
+/// `self.session` permanently `Some(...)` with nothing in the running map:
+/// the DB's `survey_session` row never closed, and every subsequent gps
+/// start was wrongly rejected by `ensure_gps_session` ("session already
+/// open"). This test starts a wifi source whose mock capturer is
+/// configured to fail `start()`, then proves the session wasn't left
+/// stuck: no orphaned open `survey_session`, and a gps source can still be
+/// started (and actually writes fixes) right afterward. Fails against the
+/// pre-fix code (the gps start below is rejected); passes once
+/// `start_wifi` rolls back a session it just opened on a failed
+/// `capturer.start`.
+#[tokio::test]
+async fn failed_wifi_capturer_start_does_not_leak_session_or_block_gps() {
+    let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+    let fixes = vec![GpsFix {
+        at: base,
+        lon: -122.4,
+        lat: 37.7,
+        altitude: None,
+        speed: None,
+        heading: None,
+        quality: 1,
+    }];
+    // One factory serving both: wifi builds always fail `start()`, gps
+    // builds replay `fixes`.
+    let factory = Arc::new(MockCapturerFactory::with_gps_fixes(fixes).failing_wifi_start());
+    let (app, pool) = test_app_with_factory(factory).await;
+    let cookie = login(&app).await;
+
+    // Create + start a wifi source. Its capturer's `start()` always
+    // errors, so the endpoint (which never surfaces capture errors as an
+    // HTTP error -- see `data_sources.rs`'s `start_data_source`) should
+    // still return 200 with the row now `error`.
+    let resp = post_json_with_cookie(
+        &app,
+        "/api/data-sources",
+        r#"{"kind":"wifi","mode":"monitor","interface":"wlan0","config":{}}"#,
+        &cookie,
+    )
+    .await;
+    assert_status(&resp, StatusCode::CREATED);
+    let wifi_created = body_json(resp).await;
+    let wifi_id = wifi_created["id"].as_str().unwrap().to_string();
+
+    let resp = post_with_cookie(&app, &format!("/api/data-sources/{wifi_id}/start"), &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let after_failed_start = body_json(resp).await;
+    assert_eq!(
+        after_failed_start["status"], "error",
+        "body: {after_failed_start}"
+    );
+    assert!(
+        after_failed_start["last_error"].as_str().is_some(),
+        "body: {after_failed_start}"
+    );
+
+    // The failed start must not have left a dangling `survey_session` --
+    // there's no running source, so nothing should be open.
+    assert!(
+        SessionRepo::active(&pool).await.unwrap().is_none(),
+        "a failed capturer start must not leave an orphaned open survey_session"
+    );
+
+    // Proof this wasn't just luck: a gps source must be able to start
+    // right afterward. Under the pre-fix bug, `ensure_gps_session` would
+    // reject this ("cannot start a gps source while a session is already
+    // open...") because the wifi start's session was never rolled back.
+    let resp = post_json_with_cookie(
+        &app,
+        "/api/data-sources",
+        r#"{"kind":"gps","mode":"gpsd","config":{"host":"127.0.0.1","port":2947}}"#,
+        &cookie,
+    )
+    .await;
+    assert_status(&resp, StatusCode::CREATED);
+    let gps_created = body_json(resp).await;
+    let gps_id = gps_created["id"].as_str().unwrap().to_string();
+
+    let resp = post_with_cookie(&app, &format!("/api/data-sources/{gps_id}/start"), &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let gps_started = body_json(resp).await;
+    assert_eq!(
+        gps_started["status"], "running",
+        "gps start should succeed once the failed wifi start's session is rolled back; \
+         body: {gps_started}"
+    );
+
+    let opened = wait_until(Duration::from_secs(5), || {
+        let pool = pool.clone();
+        async move { SessionRepo::active(&pool).await.unwrap().is_some() }
+    })
+    .await;
+    assert!(
+        opened,
+        "expected a fresh active survey_session for the gps start"
+    );
+
+    let session_id = SessionRepo::active(&pool).await.unwrap().unwrap().id;
+    let wrote_fixes = wait_until(Duration::from_secs(5), || {
+        let pool = pool.clone();
+        async move {
+            !LocationRepo::list_for_session(&pool, session_id)
+                .await
+                .unwrap()
+                .is_empty()
+        }
+    })
+    .await;
+    assert!(
+        wrote_fixes,
+        "expected the gps source's fix to actually be written"
+    );
+}
+
 /// (c) Config validation: an invalid serial baud rate is rejected at
 /// create-time with 400, without ever reaching the database's own CHECK
 /// constraint.

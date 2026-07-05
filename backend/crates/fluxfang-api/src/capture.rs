@@ -189,6 +189,10 @@ impl CapturerFactory for RealCapturerFactory {
 pub struct MockCapturerFactory {
     wifi_observations: std::sync::Mutex<Vec<RawObservation>>,
     gps_fixes: std::sync::Mutex<Vec<GpsFix>>,
+    /// When set, every wifi `build()` call's `MockCapturer` is configured
+    /// via [`MockCapturer::failing`] so its `start()` always errors —
+    /// see [`Self::failing_wifi_start`].
+    fail_wifi_start: std::sync::atomic::AtomicBool,
 }
 
 impl MockCapturerFactory {
@@ -198,6 +202,7 @@ impl MockCapturerFactory {
         Self {
             wifi_observations: std::sync::Mutex::new(Vec::new()),
             gps_fixes: std::sync::Mutex::new(Vec::new()),
+            fail_wifi_start: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -214,6 +219,17 @@ impl MockCapturerFactory {
         let factory = Self::new();
         *factory.gps_fixes.lock().expect("mutex poisoned") = fixes;
         factory
+    }
+
+    /// Chainable: make every wifi `build()` call's `MockCapturer` fail its
+    /// `start()` — used to test `CaptureSupervisor::start`'s failure path
+    /// (status flips to `error`, and — the regression this guards — no
+    /// dangling `survey_session` is left behind) without real broken
+    /// hardware.
+    pub fn failing_wifi_start(self) -> Self {
+        self.fail_wifi_start
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self
     }
 }
 
@@ -233,10 +249,14 @@ impl CapturerFactory for MockCapturerFactory {
                     .lock()
                     .expect("mutex poisoned")
                     .clone();
-                Ok(BuiltCapture::Wifi(Box::new(MockCapturer::new(
-                    observations,
-                    Duration::from_millis(5),
-                ))))
+                let mut capturer = MockCapturer::new(observations, Duration::from_millis(5));
+                if self
+                    .fail_wifi_start
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    capturer = capturer.failing();
+                }
+                Ok(BuiltCapture::Wifi(Box::new(capturer)))
             }
             "gps" => {
                 let fixes = self.gps_fixes.lock().expect("mutex poisoned").clone();
@@ -449,10 +469,19 @@ impl CaptureSupervisor {
     /// Ensure a session is open for a **wifi** start, opening one backed by
     /// [`InertGps`] if none exists yet. Reuses whatever session is already
     /// open (gps-backed or not) otherwise.
-    async fn ensure_wifi_session(&self) -> anyhow::Result<IngestCtx> {
+    ///
+    /// Returns `(ctx, opened_fresh)`: `opened_fresh` is `true` only when
+    /// *this* call was the one that opened a brand-new session (as opposed
+    /// to reusing one already open from another running source). Callers
+    /// that can still fail *after* this returns (see `start_wifi`) need that
+    /// bit to know whether they're the one responsible for rolling the
+    /// session back on such a failure — rolling back a session some other
+    /// still-running source legitimately opened would incorrectly yank it
+    /// out from under that source.
+    async fn ensure_wifi_session(&self) -> anyhow::Result<(IngestCtx, bool)> {
         let mut guard = self.session.lock().await;
         if let Some(shared) = guard.as_ref() {
-            return Ok(self.ctx_for(shared.manager.clone()));
+            return Ok((self.ctx_for(shared.manager.clone()), false));
         }
         let hook = self.host_zone_hook();
         let manager = SessionManager::open(
@@ -470,7 +499,33 @@ impl CaptureSupervisor {
             manager: manager.clone(),
             has_real_gps: false,
         });
-        Ok(self.ctx_for(manager))
+        Ok((self.ctx_for(manager), true))
+    }
+
+    /// Close and clear a session *this call itself* just opened via
+    /// [`Self::ensure_wifi_session`], because the capturer it was opened for
+    /// then failed to actually start. Without this, a failed wifi start
+    /// would leave `self.session` permanently `Some(...)` with nothing in
+    /// the running map: the DB's `survey_session` row would stay open
+    /// forever (no last-stop to close it), and every subsequent gps start
+    /// would be wrongly rejected by [`Self::ensure_gps_session`] ("session
+    /// already open").
+    ///
+    /// Only ever called when the caller knows *it* opened the session this
+    /// call (`ensure_wifi_session`'s `opened_fresh` was `true`) — `start`
+    /// holds `self.running`'s lock for its entire call (see that field's
+    /// doc comment), so nothing else can have raced in and touched
+    /// `self.session` between opening it and this rollback.
+    async fn rollback_freshly_opened_session(&self) {
+        let mut guard = self.session.lock().await;
+        if let Some(shared) = guard.take() {
+            if let Err(err) = shared.manager.close().await {
+                eprintln!(
+                    "CaptureSupervisor: failed to close session while rolling back a failed \
+                     capturer start: {err:#}"
+                );
+            }
+        }
     }
 
     /// Ensure a session is open for a **gps** start, opening one backed by
@@ -488,6 +543,11 @@ impl CaptureSupervisor {
     async fn ensure_gps_session(&self, gps: Box<dyn GpsSource + Send>) -> anyhow::Result<()> {
         let mut guard = self.session.lock().await;
         if let Some(shared) = guard.as_ref() {
+            // Rejected here, `gps` is simply never wired into anything and
+            // is dropped when this function returns; that runs its own
+            // `Drop` impl (e.g. `SerialGpsSource` explicitly stops its
+            // reader thread, `GpsdSource`'s socket halves close via their
+            // own default `Drop`) with no extra teardown needed here.
             if shared.has_real_gps {
                 anyhow::bail!(
                     "a gps source is already driving the active session; only one \
@@ -520,9 +580,22 @@ impl CaptureSupervisor {
         data_source_id: Uuid,
         mut capturer: Box<dyn Capturer>,
     ) -> anyhow::Result<RunningHandle> {
-        let ctx = self.ensure_wifi_session().await?;
+        let (ctx, opened_session) = self.ensure_wifi_session().await?;
         let (tx, mut rx) = mpsc::channel::<RawObservation>(256);
-        capturer.start(tx)?;
+        if let Err(err) = capturer.start(tx) {
+            // The capturer failed to actually start (bad interface, no
+            // monitor mode, permissions -- a realistic hardware failure).
+            // If this call was the one that just opened the shared session,
+            // it must not linger: `start`'s caller will mark this source
+            // `error` and never reach the `running.insert` below, so
+            // nothing would ever close it otherwise. A session that was
+            // already open before this call (from another running source)
+            // is left untouched.
+            if opened_session {
+                self.rollback_freshly_opened_session().await;
+            }
+            return Err(err);
+        }
 
         let reader = tokio::spawn(async move {
             while let Some(obs) = rx.recv().await {
@@ -545,6 +618,11 @@ impl CaptureSupervisor {
     }
 
     async fn start_gps(&self, gps: Box<dyn GpsSource + Send>) -> anyhow::Result<RunningHandle> {
+        // No rollback needed here, unlike `start_wifi`: `ensure_gps_session`
+        // only ever sets `self.session` *after* `SessionManager::open`
+        // already succeeded, and there is no further fallible step in this
+        // function afterward -- so a failure from the line below always
+        // means no session was opened at all, nothing to roll back.
         self.ensure_gps_session(gps).await?;
         Ok(RunningHandle::Gps)
     }

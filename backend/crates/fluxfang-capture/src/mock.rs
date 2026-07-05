@@ -43,6 +43,7 @@ pub struct MockCapturer {
     loop_playback: bool,
     running: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
+    fail_start: bool,
 }
 
 impl MockCapturer {
@@ -55,6 +56,7 @@ impl MockCapturer {
             loop_playback: false,
             running: Arc::new(AtomicBool::new(false)),
             handle: None,
+            fail_start: false,
         }
     }
 
@@ -64,10 +66,24 @@ impl MockCapturer {
         self.loop_playback = loop_playback;
         self
     }
+
+    /// Configure this capturer so every `start()` call fails immediately
+    /// with an `Err` (never spawns a task, never flips `running`) instead of
+    /// succeeding — simulates the realistic hardware failure a real
+    /// `Capturer::start` can hit (bad interface, no monitor mode,
+    /// permissions), so callers (e.g. `CaptureSupervisor::start_wifi`) can be
+    /// tested against a failed start without needing real broken hardware.
+    pub fn failing(mut self) -> Self {
+        self.fail_start = true;
+        self
+    }
 }
 
 impl Capturer for MockCapturer {
     fn start(&mut self, tx: mpsc::Sender<RawObservation>) -> anyhow::Result<()> {
+        if self.fail_start {
+            anyhow::bail!("mock capturer configured to fail start");
+        }
         if self.handle.is_some() {
             anyhow::bail!("capturer already running");
         }
