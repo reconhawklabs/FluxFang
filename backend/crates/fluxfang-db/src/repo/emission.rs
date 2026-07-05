@@ -56,7 +56,7 @@
 use std::fmt;
 
 use chrono::{DateTime, Utc};
-use fluxfang_core::{catalog_for, conditions_to_sql_checked, Condition, MatchMode, Op, RuleSqlError};
+use fluxfang_core::{catalog_for, conditions_to_sql_checked, Condition, MatchMode, RuleSqlError};
 use sqlx::postgres::PgArguments;
 use sqlx::query::QueryAs;
 use sqlx::{PgPool, Postgres};
@@ -298,42 +298,31 @@ impl EmissionRepo {
             clauses.push(frag);
 
             // `conditions_to_sql_checked` returns one text-coerced
-            // `Value::String` bind per condition, in the same order as
-            // `field_conditions` -- except `Op::In`, which expands to one
-            // bind per array element (see fluxfang_core::rule_sql).
-            //
-            // Gte/Lte compare against a `(payload->>'field')::numeric` LHS.
-            // Binding those as plain text (`String`) would declare the
-            // parameter's Postgres wire type as `text`, and Postgres's
-            // `>=`/`<=` operator resolution does *not* implicitly cast an
-            // explicitly-`text`-typed parameter to `numeric` (only
-            // untyped/`unknown` literals get that treatment) -- it would
-            // fail at execution with "operator does not exist: numeric >=
-            // text" despite the SQL text itself being correct. So those
-            // binds are parsed back to `f64` here and bound as such
-            // (`checked` already guarantees the value is a JSON number,
-            // and `text_bind`'s canonical decimal text for a JSON number
-            // always parses). Every other op compares as plain text
-            // (`payload->>'field' = $n` / `IN (...)`), so those stay
-            // `BindVal::Text`.
-            let mut cond_binds = cond_binds.into_iter();
-            for cond in &filter.field_conditions {
-                let count = match cond.op {
-                    Op::In => cond.value.as_array().map(|a| a.len()).unwrap_or(0),
-                    _ => 1,
+            // `Value::String` bind per condition (N per `Op::In`'s N array
+            // elements), in the same order the SQL fragment's `$n`
+            // placeholders expect. Every bind is appended here as plain
+            // text, uniformly, with no per-condition op inspection: the
+            // `Gte`/`Lte` SQL arms now cast *both* sides to `numeric`
+            // (`(payload->>'field')::numeric >= $n::numeric`, see
+            // fluxfang_core::rule_sql), so a text bind works there too --
+            // there is no need to (and, critically, no reliable way to)
+            // re-derive which binds are "numeric" from `field_conditions`
+            // after the fact. (A prior version of this code re-walked
+            // `field_conditions` guessing Gte/Lte -> numeric bind by
+            // op/field-shape; that walk could desync from the translator's
+            // actual bind count whenever a condition's op didn't match its
+            // field's type, since `condition_clause` silently drops such a
+            // condition to a bindless `FALSE` while the re-walk still
+            // counted it as consuming a bind. `conditions_to_sql_checked`
+            // now rejects that mismatch outright (`RuleSqlError::InvalidOp`),
+            // so every condition that reaches here is guaranteed to
+            // contribute exactly the binds it appears to.)
+            for v in cond_binds {
+                let text = match v {
+                    serde_json::Value::String(s) => s,
+                    other => other.to_string(),
                 };
-                let is_numeric_cmp = matches!(cond.op, Op::Gte | Op::Lte);
-                for _ in 0..count {
-                    let Some(v) = cond_binds.next() else {
-                        break;
-                    };
-                    let text = v.as_str().unwrap_or_default().to_string();
-                    if is_numeric_cmp {
-                        binds.push(BindVal::F64(text.parse().unwrap_or(0.0)));
-                    } else {
-                        binds.push(BindVal::Text(text));
-                    }
-                }
+                binds.push(BindVal::Text(text));
             }
         }
 

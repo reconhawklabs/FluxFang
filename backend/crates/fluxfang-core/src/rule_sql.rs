@@ -42,13 +42,17 @@
 //!   [`crate::catalog::FieldType`] (see below) and rejects a type mismatch
 //!   with [`RuleSqlError::InvalidValueType`] rather than translating it.
 //!
-//! For [`Op::Gte`]/[`Op::Lte`] the SQL casts the *column* side to
-//! `numeric` (`(payload->>'field')::numeric >= $N`); Postgres then infers
-//! the parameter's type from that context and parses the bound text back
-//! into a `numeric`, so `'6'` compared as numeric still behaves like the
-//! number `6`. This is exactly the sketch given in the task brief:
-//! `(payload->>'channel')::numeric >= $2`, no cast needed on the bind
-//! itself.
+//! For [`Op::Gte`]/[`Op::Lte`] the SQL casts *both* the column side and the
+//! parameter side to `numeric`: `(payload->>'field')::numeric >= $N::numeric`.
+//! Every bind this module returns is a `Value::String` (see above), and an
+//! explicitly-`text`-typed bind parameter does **not** get an implicit cast
+//! to `numeric` from Postgres's operator resolution (only untyped/`unknown`
+//! literals get that treatment) — without the `$N::numeric` cast on the
+//! parameter, binding the text `"6"` against the comparison
+//! `(payload->>'channel')::numeric >= $N` fails at execution with a
+//! Postgres `operator does not exist: numeric >= text` error. Casting the
+//! parameter too makes every bind uniformly bindable as plain text,
+//! regardless of which op produced it.
 //!
 //! # Injection safety
 //!
@@ -100,6 +104,14 @@ pub enum RuleSqlError {
     /// isn't the JSON type expected by the field's `FieldType` (JSON
     /// number for `FieldType::Number`, JSON string for `Text`/`Mac`/`Enum`).
     InvalidValueType { field: String, expected: &'static str },
+    /// `condition.op` isn't in the matched field's [`FieldDef::ops`] (e.g.
+    /// `Gte`/`Lte` on a `Text` field, or `Matches` on a `Number` field).
+    /// Without this check, an op/field-type mismatch would otherwise pass
+    /// [`value_matches_type`]'s value-vs-field-type check and only get
+    /// caught later by [`condition_clause`] silently collapsing to a
+    /// bindless `FALSE` clause — which desyncs the bind list from a caller
+    /// (like `EmissionRepo::query`) that assumes one bind per condition.
+    InvalidOp { field: String, op: Op },
 }
 
 impl fmt::Display for RuleSqlError {
@@ -113,6 +125,9 @@ impl fmt::Display for RuleSqlError {
                     f,
                     "invalid value type for field {field:?}: expected a JSON {expected}"
                 )
+            }
+            RuleSqlError::InvalidOp { field, op } => {
+                write!(f, "operator {op:?} is not valid for field {field:?}")
             }
         }
     }
@@ -166,6 +181,20 @@ pub fn conditions_to_sql_checked(
         let Some(field_def) = catalog.iter().find(|f| f.key == c.field) else {
             return Err(RuleSqlError::UnknownField(c.field.clone()));
         };
+
+        // Require the operator to be one the field actually declares as
+        // valid (`FieldDef::ops`), e.g. reject `Gte`/`Lte` on a `Text`
+        // field or `Matches` on a `Number` field. Without this, such a
+        // condition would pass the value-type check below (its JSON value
+        // can still be well-typed for the field) but then
+        // `condition_clause` would silently collapse it to a bindless
+        // `FALSE`, desyncing the bind count callers expect.
+        if !field_def.ops.contains(&c.op) {
+            return Err(RuleSqlError::InvalidOp {
+                field: c.field.clone(),
+                op: c.op,
+            });
+        }
 
         // Fix 3: validate condition.value's JSON type against the field's
         // FieldType, closing the Eq/Neq (and Gte/Lte/In) gap where SQL
@@ -307,7 +336,7 @@ fn condition_clause(condition: &Condition, bind_idx: &mut usize) -> (String, Vec
             }
             let bind = next_param(bind_idx);
             (
-                format!("({path})::numeric >= {bind}"),
+                format!("({path})::numeric >= {bind}::numeric"),
                 vec![text_bind(&condition.value)],
             )
         }
@@ -317,7 +346,7 @@ fn condition_clause(condition: &Condition, bind_idx: &mut usize) -> (String, Vec
             }
             let bind = next_param(bind_idx);
             (
-                format!("({path})::numeric <= {bind}"),
+                format!("({path})::numeric <= {bind}::numeric"),
                 vec![text_bind(&condition.value)],
             )
         }
@@ -386,7 +415,7 @@ mod tests {
         let (sql, binds) = conditions_to_sql(&conds, MatchMode::All, 1);
         assert_eq!(
             sql,
-            "(payload->>'bssid' = $1 AND (payload->>'channel')::numeric >= $2)"
+            "(payload->>'bssid' = $1 AND (payload->>'channel')::numeric >= $2::numeric)"
         );
         assert_eq!(binds.len(), 2);
         assert_eq!(binds[0], json!("aa:bb:cc:dd:ee:ff"));
@@ -458,7 +487,7 @@ mod tests {
         let (sql, _binds) = conditions_to_sql(&conds, MatchMode::Any, 1);
         assert_eq!(
             sql,
-            "(payload->>'ssid' ~ $1 OR (payload->>'channel')::numeric >= $2)"
+            "(payload->>'ssid' ~ $1 OR (payload->>'channel')::numeric >= $2::numeric)"
         );
     }
 
@@ -481,7 +510,7 @@ mod tests {
         let (sql, binds) = conditions_to_sql(&conds, MatchMode::All, 5);
         assert_eq!(
             sql,
-            "(payload->>'bssid' = $5 AND (payload->>'channel')::numeric <= $6)"
+            "(payload->>'bssid' = $5 AND (payload->>'channel')::numeric <= $6::numeric)"
         );
         assert_eq!(binds.len(), 2);
     }
@@ -521,7 +550,7 @@ mod tests {
         }];
         let (sql, binds) =
             conditions_to_sql_checked(&conds, MatchMode::All, 1, &catalog_for("wifi")).unwrap();
-        assert_eq!(sql, "((payload->>'channel')::numeric >= $1)");
+        assert_eq!(sql, "((payload->>'channel')::numeric >= $1::numeric)");
         assert_eq!(binds, vec![json!("6")]);
     }
 
@@ -659,6 +688,79 @@ mod tests {
         assert_eq!(binds.len(), 4);
     }
 
+    // --- Fix 6: conditions_to_sql_checked validates op ∈ field.ops ---
+    //
+    // Before this check, a condition like `ssid gte "z"` passed the
+    // value-type check (its value is a JSON string, and `ssid` is
+    // `FieldType::Text`, so `value_matches_type` was satisfied) but then
+    // `condition_clause`'s `Gte` arm rejects non-number values and collapses
+    // to a bindless `FALSE` -- silently consuming zero binds despite having
+    // passed the checked variant. A caller like `EmissionRepo::query` that
+    // assumes one bind per condition would then desync every later bind by
+    // one slot. Rejecting the op/field mismatch up front makes that
+    // impossible: every condition that survives `conditions_to_sql_checked`
+    // is guaranteed to produce a live (non-`FALSE`) clause with exactly one
+    // bind (N for `Op::In`'s N array elements).
+
+    #[test]
+    fn checked_rejects_gte_on_a_text_field() {
+        let conds = vec![Condition {
+            field: "ssid".into(),
+            op: Op::Gte,
+            value: json!("z"),
+        }];
+        let err =
+            conditions_to_sql_checked(&conds, MatchMode::All, 1, &catalog_for("wifi")).unwrap_err();
+        assert_eq!(
+            err,
+            RuleSqlError::InvalidOp {
+                field: "ssid".into(),
+                op: Op::Gte,
+            }
+        );
+    }
+
+    #[test]
+    fn checked_rejects_matches_on_a_number_field() {
+        let conds = vec![Condition {
+            field: "channel".into(),
+            op: Op::Matches,
+            value: json!("^1"),
+        }];
+        let err =
+            conditions_to_sql_checked(&conds, MatchMode::All, 1, &catalog_for("wifi")).unwrap_err();
+        assert_eq!(
+            err,
+            RuleSqlError::InvalidOp {
+                field: "channel".into(),
+                op: Op::Matches,
+            }
+        );
+    }
+
+    #[test]
+    fn checked_still_accepts_valid_op_field_combos() {
+        let conds = vec![
+            Condition {
+                field: "channel".into(),
+                op: Op::Gte,
+                value: json!(6),
+            },
+            Condition {
+                field: "ssid".into(),
+                op: Op::Matches,
+                value: json!("^Free"),
+            },
+        ];
+        let (sql, binds) =
+            conditions_to_sql_checked(&conds, MatchMode::All, 1, &catalog_for("wifi")).unwrap();
+        assert_eq!(
+            sql,
+            "((payload->>'channel')::numeric >= $1::numeric AND payload->>'ssid' ~ $2)"
+        );
+        assert_eq!(binds.len(), 2);
+    }
+
     // --- Fix 5: empty-conditions literal (documents current behavior) ---
 
     #[test]
@@ -715,6 +817,6 @@ mod tests {
         // text ("6"), so `11 >= 6` and `1 >= 6` resolve the same way
         // numerically in SQL as `eval`'s `f64` comparison does.
         assert_eq!(binds[1], json!("6"));
-        assert!(sql.contains("(payload->>'channel')::numeric >= $2"));
+        assert!(sql.contains("(payload->>'channel')::numeric >= $2::numeric"));
     }
 }

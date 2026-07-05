@@ -209,6 +209,114 @@ async fn query_field_conditions_numeric_gte_filters_correctly() {
     assert_ne!(rows[0].id, low.id);
 }
 
+// --- Regression: mixed `field_conditions` bind-order desync (Task 1.3b fix) ---
+//
+// `EmissionRepo::query` used to re-walk `field_conditions` after translation
+// to decide (by op alone) which of `conditions_to_sql_checked`'s returned
+// binds were "numeric". That re-walk could desync from the translator's
+// actual bind count/order whenever a condition passed the checked variant's
+// value-type check but still produced a bindless `FALSE` clause in
+// `condition_clause` (e.g. `Gte` on a `Text` field: the value can be a JSON
+// string, which is what `Text` expects, but `Gte` still rejects non-numbers
+// downstream) -- the re-walk still counted such a condition as consuming one
+// bind, so every subsequent bind was applied one `$n` short of where it
+// belonged. With 2+ `field_conditions` this could bind the wrong value to
+// the wrong placeholder (wrong results, or a Postgres type error). The fix
+// makes this impossible in two ways: (1) `conditions_to_sql_checked` now
+// rejects an op/field mismatch outright (`RuleSqlError::InvalidOp`) instead
+// of letting it reach `condition_clause`'s silent `FALSE` fallback, and (2)
+// `EmissionRepo::query` no longer re-derives bind types at all -- it just
+// appends every returned bind as text, relying on the translator's own
+// `$n::numeric` casts (fluxfang_core::rule_sql) for `Gte`/`Lte`.
+
+#[tokio::test]
+async fn query_mixed_field_conditions_filters_correctly_without_bind_desync() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+
+    async fn insert(pool: &PgPool, ds: Uuid, session: Uuid, bssid: &str, ssid: &str, channel: i64) -> Emission {
+        EmissionRepo::insert(
+            pool,
+            NewEmission::wifi(
+                ds,
+                session,
+                serde_json::json!({"bssid": bssid, "ssid": ssid, "channel": channel}),
+            ),
+        )
+        .await
+        .unwrap()
+    }
+
+    // Matches both conditions: ssid starts with "Free" AND channel >= 6.
+    let both = insert(&pool, ds, session, "aa:aa:aa:aa:aa:aa", "FreeWifi", 11).await;
+    // ssid matches, channel doesn't.
+    insert(&pool, ds, session, "bb:bb:bb:bb:bb:bb", "FreePublicWifi", 1).await;
+    // channel matches, ssid doesn't.
+    insert(&pool, ds, session, "cc:cc:cc:cc:cc:cc", "HomeNetwork", 11).await;
+
+    let filter = EmissionFilter {
+        kind: Some("wifi".to_string()),
+        field_conditions: vec![
+            Condition {
+                field: "ssid".to_string(),
+                op: Op::Matches,
+                value: serde_json::json!("^Free"),
+            },
+            Condition {
+                field: "channel".to_string(),
+                op: Op::Gte,
+                value: serde_json::json!(6),
+            },
+        ],
+        match_mode: MatchMode::All,
+        ..EmissionFilter::default()
+    };
+
+    let (rows, total) = EmissionRepo::query(&pool, filter).await.unwrap();
+    assert_eq!(
+        total, 1,
+        "only the FreeWifi/channel=11 row should satisfy both conditions"
+    );
+    assert_eq!(rows[0].id, both.id);
+}
+
+#[tokio::test]
+async fn query_rejects_mistyped_op_field_condition_instead_of_desyncing_binds() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+    insert_wifi(&pool, ds, session, "aa:aa:aa:aa:aa:aa", 1).await;
+
+    // `ssid` is FieldType::Text, so `Gte` is not a valid op for it (only
+    // Number fields support ordering). Before the fix, this combination
+    // (mistyped op, followed by a second, well-typed condition) was the
+    // shape that produced silent bind desync rather than an error.
+    let filter = EmissionFilter {
+        kind: Some("wifi".to_string()),
+        field_conditions: vec![
+            Condition {
+                field: "ssid".to_string(),
+                op: Op::Gte,
+                value: serde_json::json!("z"),
+            },
+            Condition {
+                field: "channel".to_string(),
+                op: Op::Eq,
+                value: serde_json::json!(1),
+            },
+        ],
+        match_mode: MatchMode::All,
+        ..EmissionFilter::default()
+    };
+
+    let err = EmissionRepo::query(&pool, filter).await.unwrap_err();
+    assert!(
+        matches!(err, EmissionQueryError::Rule(_)),
+        "expected a clean Rule error, not wrong results or a DB error, got: {err:?}"
+    );
+}
+
 #[tokio::test]
 async fn query_text_substring_matches_payload() {
     let pool = fresh_pool().await;
