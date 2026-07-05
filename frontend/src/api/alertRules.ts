@@ -1,11 +1,13 @@
-// `GET/POST /api/alert-rules` (Task 6.6 backend, `fluxfang-api::alert_rules`).
-// Task 9.6's Entities page uses these to list an entity's existing rules
-// (client-side filtered to `target_id === entity.id`) and to create a new
-// entity-scoped rule from its "add alert" form. `PATCH`/`DELETE
-// /api/alert-rules/:id` aren't needed by this slice (no rule editing/
-// deletion UI here yet) — YAGNI.
+// `GET/POST/DELETE /api/alert-rules[/:id]` (Task 6.6 backend,
+// `fluxfang-api::alert_rules`). Task 9.6's Entities page uses `list`/
+// `create` to list an entity's existing rules (client-side filtered to
+// `target_id === entity.id`) and to create a new entity-scoped rule from
+// its "add alert" form. `delete` is added for this task's (9.9) Alerts
+// page's read-only rules list, which offers a delete button as a
+// nice-to-have. `PATCH /api/alert-rules/:id` still isn't needed by any
+// slice (no rule *editing* UI exists yet) — YAGNI.
 import type { Rule } from '../types/rule';
-import { get, post } from './client';
+import { del, get, post } from './client';
 
 /** The subset of the backend's `trigger.on` values this page's UI offers —
  * see `fluxfang-api::alert_rules`'s module doc comment for the full
@@ -57,4 +59,8 @@ export function listAlertRules(): Promise<AlertRule[]> {
 
 export function createAlertRule(input: CreateAlertRuleInput): Promise<AlertRule> {
   return post<AlertRule>('/api/alert-rules', input);
+}
+
+export function deleteAlertRule(id: string): Promise<void> {
+  return del<void>(`/api/alert-rules/${id}`);
 }

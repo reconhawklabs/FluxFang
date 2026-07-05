@@ -2,9 +2,20 @@
 //
 // This is a *live* counter — it bumps immediately when `useLiveEvents` sees
 // a `{"type":"notification"}` WS frame, independent of (and faster than)
-// the authoritative `unread_count` a later task's `GET /api/notifications`
-// query will show. It's reset via `reset()`, which the Notifications page
-// (Task 9.9) should call once the user has viewed/acknowledged the list.
+// the authoritative `unread_count` `GET /api/notifications` reports. Two
+// ways it gets reconciled back to that authoritative value, both added by
+// Task 9.9's Notifications page:
+//
+// - `setUnread(n)`: called with the server's `unread_count` whenever that
+//   page's `GET /api/notifications` query (re)settles — on mount, on
+//   refetch (e.g. a live WS `notification` frame invalidating
+//   `queryKeys.notifications`), and after `POST .../:id/read` succeeds.
+//   This is the general-purpose sync: the badge always ends up showing
+//   exactly what the server thinks is unread, regardless of how many WS
+//   frames did or didn't arrive in between.
+// - `reset()`: a plain zero-out, kept for the case where the count is
+//   known to be zero outright (e.g. tests, or a future "mark all read"
+//   affordance) without needing a server round-trip's number in hand.
 //
 // Implemented as a plain module-level pub/sub rather than a dependency
 // (no zustand/redux in package.json) — `useUnreadCount` bridges it into
@@ -27,6 +38,13 @@ export const notificationStore = {
   },
   reset(): void {
     unread = 0;
+    emit();
+  },
+  /** Reconcile the badge to the server's authoritative `unread_count` (see
+   * module doc comment). Clamped to >= 0 defensively — the server should
+   * never report negative, but a badge can't sensibly show one either. */
+  setUnread(count: number): void {
+    unread = Math.max(0, count);
     emit();
   },
   getUnread(): number {
