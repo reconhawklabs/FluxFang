@@ -1,0 +1,57 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    # Host networking is required so the backend can capture raw wifi/gps
+    # traffic on host network interfaces, and so it can reach Postgres at
+    # 127.0.0.1:5432 (the `db` service's published port) without relying on
+    # Docker's bridge DNS.
+    network_mode: host
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      FLUXFANG_SESSION_KEY: ${FLUXFANG_SESSION_KEY}
+      FLUXFANG_SECRET_KEY: ${FLUXFANG_SECRET_KEY}
+      WIFI_DEVICE: ${WIFI_DEVICE:-}
+      GPS_DEVICE: ${GPS_DEVICE:-}
+    # Real wifi/GPS hardware is not required to boot the health skeleton, so
+    # device passthrough is left commented until Phase 1+ needs it. Uncomment
+    # and set WIFI_DEVICE/GPS_DEVICE in `.env` once hardware is attached.
+    # devices:
+    #   - "${WIFI_DEVICE}:${WIFI_DEVICE}"
+    #   - "${GPS_DEVICE}:${GPS_DEVICE}"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    # Same reasoning as backend: host networking lets nginx proxy /api and /ws
+    # to the backend at 127.0.0.1:8080 without depending on Docker DNS.
+    network_mode: host
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
