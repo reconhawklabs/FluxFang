@@ -7,21 +7,40 @@
 //! layer) is responsible for actually binding those values and running the
 //! query.
 //!
-//! # Bind representation
+//! # Bind representation and agreement with `eval`
 //!
 //! `payload->>'field'` always yields **TEXT** in Postgres (the `->>`
 //! operator), regardless of what type the JSON value underneath actually
-//! is. To keep the generated SQL predicate consistent with
-//! [`crate::rule::eval`] (which compares the *same* stored field value,
-//! just via typed JSON comparison instead of text), every bind value is
-//! coerced to its canonical **text** form and returned as
-//! `serde_json::Value::String(..)`:
+//! is. Every bind value is coerced to its canonical **text** form and
+//! returned as `serde_json::Value::String(..)`:
 //!
 //! - a JSON string binds as itself (`"home"` -> `"home"`)
 //! - a JSON number binds as its canonical decimal text (`6` -> `"6"`,
 //!   `1.5` -> `"1.5"`) — this matches `eval`'s numeric ops, which parse
 //!   both sides as `f64` before comparing.
 //! - a JSON bool binds as `"true"`/`"false"`.
+//!
+//! This text-bind representation on its own does **not** guarantee the SQL
+//! predicate agrees with [`crate::rule::eval`] for every input — `eval` is
+//! typed (it compares/parses the *JSON* value), while the SQL side compares
+//! *text*. The two translation functions close that gap to different
+//! degrees:
+//!
+//! - [`Op::Gte`]/[`Op::Lte`]/[`Op::Matches`] are guarded in *both*
+//!   [`conditions_to_sql`] and [`conditions_to_sql_checked`]: exactly like
+//!   `eval_numeric`/`eval_matches`, a `condition.value` of the wrong JSON
+//!   type (non-number for `Gte`/`Lte`, non-string for `Matches`) is never
+//!   text-bound into a live comparison — it becomes a guaranteed-false
+//!   `FALSE` clause instead.
+//! - [`Op::Eq`]/[`Op::Neq`] have **no such guard in [`conditions_to_sql`]**:
+//!   because `->>` always yields text, a text-bind of e.g. the *number* `6`
+//!   (`"6"`) and the *string* `"6"` are indistinguishable to SQL, so an
+//!   `Eq`/`Neq` condition can text-match a value whose JSON type wouldn't
+//!   have satisfied `eval`'s typed `==`/`!=`. This divergence is closed
+//!   only by [`conditions_to_sql_checked`], which validates each
+//!   `condition.value`'s JSON type against the matched field's
+//!   [`crate::catalog::FieldType`] (see below) and rejects a type mismatch
+//!   with [`RuleSqlError::InvalidValueType`] rather than translating it.
 //!
 //! For [`Op::Gte`]/[`Op::Lte`] the SQL casts the *column* side to
 //! `numeric` (`(payload->>'field')::numeric >= $N`); Postgres then infers
@@ -50,11 +69,17 @@
 //!   it just makes that one condition unsatisfiable.
 //! - [`conditions_to_sql_checked`] additionally takes the `kind`'s
 //!   catalog (`&[FieldDef]`, from [`crate::catalog::catalog_for`]) and
-//!   returns `Err(RuleSqlError::UnknownField)` for any field not present
-//!   in it. This is the variant real callers (query building, the
-//!   emissions API) should prefer, since it rejects rules that reference
-//!   fields the data source doesn't actually expose, rather than silently
-//!   translating them to an always-false clause.
+//!   is the *type-safe boundary*: it returns `Err(RuleSqlError::UnknownField)`
+//!   for any field not present in the catalog (also re-checking the
+//!   allow-list, so a hypothetical unsafe catalog key can't reach
+//!   interpolation either), and `Err(RuleSqlError::InvalidValueType)` when
+//!   `condition.value` (or, for `Op::In`, any array element) doesn't match
+//!   the field's declared `FieldType` (JSON number for `FieldType::Number`;
+//!   JSON string for `Text`/`Mac`/`Enum`). This is the variant real callers
+//!   (query building, the emissions API) should use, since it both rejects
+//!   rules referencing fields the data source doesn't expose *and* closes
+//!   the `Eq`/`Neq` text-vs-typed divergence described above — the
+//!   unchecked [`conditions_to_sql`] alone does not.
 //!
 //! Operators and the `payload->>'...'`/`::numeric` SQL fragments used per
 //! [`Op`] are fixed, hard-coded strings selected from the closed `Op` enum
@@ -66,10 +91,15 @@ use serde_json::Value;
 use std::fmt;
 
 /// Error returned by [`conditions_to_sql_checked`] when a condition
-/// references a field that isn't in the supplied catalog.
+/// references a field that isn't in the supplied catalog, or supplies a
+/// `value` whose JSON type doesn't match that field's [`FieldType`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuleSqlError {
     UnknownField(String),
+    /// `condition.value` (or, for `Op::In`, one of its array elements)
+    /// isn't the JSON type expected by the field's `FieldType` (JSON
+    /// number for `FieldType::Number`, JSON string for `Text`/`Mac`/`Enum`).
+    InvalidValueType { field: String, expected: &'static str },
 }
 
 impl fmt::Display for RuleSqlError {
@@ -77,6 +107,12 @@ impl fmt::Display for RuleSqlError {
         match self {
             RuleSqlError::UnknownField(field) => {
                 write!(f, "unknown or invalid field: {field:?}")
+            }
+            RuleSqlError::InvalidValueType { field, expected } => {
+                write!(
+                    f,
+                    "invalid value type for field {field:?}: expected a JSON {expected}"
+                )
             }
         }
     }
@@ -121,11 +157,53 @@ pub fn conditions_to_sql_checked(
     catalog: &[FieldDef],
 ) -> Result<(String, Vec<Value>), RuleSqlError> {
     for c in conds {
-        if !catalog.iter().any(|f| f.key == c.field) {
+        // Belt-and-suspenders (Fix 4): require the character allow-list
+        // *and* catalog membership, so a hypothetical future catalog
+        // containing an unsafe key still can't reach string interpolation.
+        if !is_safe_field_name(&c.field) {
             return Err(RuleSqlError::UnknownField(c.field.clone()));
+        }
+        let Some(field_def) = catalog.iter().find(|f| f.key == c.field) else {
+            return Err(RuleSqlError::UnknownField(c.field.clone()));
+        };
+
+        // Fix 3: validate condition.value's JSON type against the field's
+        // FieldType, closing the Eq/Neq (and Gte/Lte/In) gap where SQL
+        // would otherwise text-bind a value `eval` would reject outright
+        // for having the wrong JSON type.
+        let type_ok = match c.op {
+            Op::In => match c.value.as_array() {
+                Some(items) => items.iter().all(|item| value_matches_type(item, &field_def.ty)),
+                None => false,
+            },
+            _ => value_matches_type(&c.value, &field_def.ty),
+        };
+        if !type_ok {
+            return Err(RuleSqlError::InvalidValueType {
+                field: c.field.clone(),
+                expected: expected_type_name(&field_def.ty),
+            });
         }
     }
     Ok(build(conds, mode, next_bind, Some(catalog)))
+}
+
+/// Does `value`'s JSON type match what `ty` expects a `condition.value` (or
+/// `Op::In` array element) to be?
+fn value_matches_type(value: &Value, ty: &crate::catalog::FieldType) -> bool {
+    use crate::catalog::FieldType;
+    match ty {
+        FieldType::Number => value.is_number(),
+        FieldType::Text | FieldType::Mac | FieldType::Enum(_) => value.is_string(),
+    }
+}
+
+fn expected_type_name(ty: &crate::catalog::FieldType) -> &'static str {
+    use crate::catalog::FieldType;
+    match ty {
+        FieldType::Number => "number",
+        FieldType::Text | FieldType::Mac | FieldType::Enum(_) => "string",
+    }
 }
 
 fn build(
@@ -209,6 +287,11 @@ fn condition_clause(condition: &Condition, bind_idx: &mut usize) -> (String, Vec
             )
         }
         Op::Matches => {
+            // Mirrors `eval_matches`: a non-string `condition.value` (the
+            // regex pattern) is never a match, for any field value.
+            if !condition.value.is_string() {
+                return ("FALSE".to_string(), Vec::new());
+            }
             let bind = next_param(bind_idx);
             (
                 format!("{path} ~ {bind}"),
@@ -216,6 +299,12 @@ fn condition_clause(condition: &Condition, bind_idx: &mut usize) -> (String, Vec
             )
         }
         Op::Gte => {
+            // Mirrors `eval_numeric`: a non-number `condition.value` can
+            // never satisfy a numeric comparison, regardless of what
+            // Postgres's `::numeric` cast would otherwise accept as text.
+            if !condition.value.is_number() {
+                return ("FALSE".to_string(), Vec::new());
+            }
             let bind = next_param(bind_idx);
             (
                 format!("({path})::numeric >= {bind}"),
@@ -223,6 +312,9 @@ fn condition_clause(condition: &Condition, bind_idx: &mut usize) -> (String, Vec
             )
         }
         Op::Lte => {
+            if !condition.value.is_number() {
+                return ("FALSE".to_string(), Vec::new());
+            }
             let bind = next_param(bind_idx);
             (
                 format!("({path})::numeric <= {bind}"),
@@ -431,6 +523,154 @@ mod tests {
             conditions_to_sql_checked(&conds, MatchMode::All, 1, &catalog_for("wifi")).unwrap();
         assert_eq!(sql, "((payload->>'channel')::numeric >= $1)");
         assert_eq!(binds, vec![json!("6")]);
+    }
+
+    // --- Fix 1: Gte/Lte numeric guard ---
+    //
+    // These reproduce a real bug found in review: `eval_numeric` (rule.rs)
+    // returns false whenever `condition.value` isn't a JSON number, but the
+    // pre-fix SQL `Gte`/`Lte` arms text-bound *any* value and relied on
+    // Postgres's `::numeric` cast, so e.g. `channel gte "10"` (a JSON
+    // *string* "10") produced a live, passing SQL comparison while `eval`
+    // said false. Confirmed RED against the pre-fix code (see the task
+    // report for the exact failing output) before the guard was added.
+
+    #[test]
+    fn gte_with_non_numeric_json_value_is_false_clause_and_binds_nothing() {
+        let conds = vec![Condition {
+            field: "channel".into(),
+            op: Op::Gte,
+            value: json!("10"),
+        }];
+        let (sql, binds) = conditions_to_sql(&conds, MatchMode::All, 1);
+        assert_eq!(sql, "(FALSE)");
+        assert!(binds.is_empty());
+    }
+
+    #[test]
+    fn lte_with_non_numeric_json_value_is_false_clause_and_binds_nothing() {
+        let conds = vec![Condition {
+            field: "channel".into(),
+            op: Op::Lte,
+            value: json!("10"),
+        }];
+        let (sql, binds) = conditions_to_sql(&conds, MatchMode::All, 1);
+        assert_eq!(sql, "(FALSE)");
+        assert!(binds.is_empty());
+    }
+
+    // --- Fix 2: Matches string guard ---
+
+    #[test]
+    fn matches_with_non_string_json_value_is_false_clause_and_binds_nothing() {
+        // `eval_matches` returns false when `condition.value` isn't a JSON
+        // string (it's the regex pattern). The SQL `Matches` arm must agree
+        // rather than text-binding e.g. the number `6` as the pattern `"6"`.
+        let conds = vec![Condition {
+            field: "ssid".into(),
+            op: Op::Matches,
+            value: json!(6),
+        }];
+        let (sql, binds) = conditions_to_sql(&conds, MatchMode::All, 1);
+        assert_eq!(sql, "(FALSE)");
+        assert!(binds.is_empty());
+    }
+
+    // --- Fix 3: conditions_to_sql_checked is the type-safe boundary ---
+    //
+    // `channel` is FieldType::Number and `ssid` is FieldType::Text in the
+    // wifi catalog (catalog.rs). Confirmed RED for the Number-field/
+    // string-value case against the pre-fix code (see the task report).
+
+    #[test]
+    fn checked_rejects_number_field_given_string_value() {
+        let conds = vec![Condition {
+            field: "channel".into(),
+            op: Op::Eq,
+            value: json!("6"),
+        }];
+        let err =
+            conditions_to_sql_checked(&conds, MatchMode::All, 1, &catalog_for("wifi")).unwrap_err();
+        assert_eq!(
+            err,
+            RuleSqlError::InvalidValueType {
+                field: "channel".into(),
+                expected: "number",
+            }
+        );
+    }
+
+    #[test]
+    fn checked_rejects_text_field_given_number_value() {
+        let conds = vec![Condition {
+            field: "ssid".into(),
+            op: Op::Eq,
+            value: json!(6),
+        }];
+        let err =
+            conditions_to_sql_checked(&conds, MatchMode::All, 1, &catalog_for("wifi")).unwrap_err();
+        assert_eq!(
+            err,
+            RuleSqlError::InvalidValueType {
+                field: "ssid".into(),
+                expected: "string",
+            }
+        );
+    }
+
+    #[test]
+    fn checked_rejects_in_with_a_mistyped_element() {
+        let conds = vec![Condition {
+            field: "channel".into(),
+            op: Op::In,
+            value: json!([1, "6", 11]),
+        }];
+        let err =
+            conditions_to_sql_checked(&conds, MatchMode::All, 1, &catalog_for("wifi")).unwrap_err();
+        assert_eq!(
+            err,
+            RuleSqlError::InvalidValueType {
+                field: "channel".into(),
+                expected: "number",
+            }
+        );
+    }
+
+    #[test]
+    fn checked_accepts_well_typed_values_including_in() {
+        let conds = vec![
+            Condition {
+                field: "channel".into(),
+                op: Op::In,
+                value: json!([1, 6, 11]),
+            },
+            Condition {
+                field: "ssid".into(),
+                op: Op::Eq,
+                value: json!("home-network"),
+            },
+        ];
+        let (sql, binds) =
+            conditions_to_sql_checked(&conds, MatchMode::All, 1, &catalog_for("wifi")).unwrap();
+        assert_eq!(
+            sql,
+            "(payload->>'channel' IN ($1, $2, $3) AND payload->>'ssid' = $4)"
+        );
+        assert_eq!(binds.len(), 4);
+    }
+
+    // --- Fix 5: empty-conditions literal (documents current behavior) ---
+
+    #[test]
+    fn empty_conditions_all_is_true_any_is_false() {
+        assert_eq!(
+            conditions_to_sql(&[], MatchMode::All, 1),
+            ("TRUE".to_string(), Vec::new())
+        );
+        assert_eq!(
+            conditions_to_sql(&[], MatchMode::Any, 1),
+            ("FALSE".to_string(), Vec::new())
+        );
     }
 
     /// Documents that the generated SQL predicate agrees "in spirit" with
