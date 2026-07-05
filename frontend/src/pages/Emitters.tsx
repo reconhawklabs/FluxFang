@@ -25,8 +25,16 @@ import type { Emitter } from '../api/emitters';
 import { listEmissions } from '../api/emissions';
 import type { Emission } from '../api/emissions';
 import type { Condition, Rule } from '../types/rule';
+import EmissionsHeatmap from '../components/EmissionsHeatmap';
+import type { HeatmapPoint } from '../components/mapData';
 
 const DETAIL_EMISSIONS_LIMIT = 20;
+// Task C (emitter auto-classification design doc): a separate, larger-limit
+// fetch backs the detection heatmap — the "Recent emissions" table above
+// only needs its own last-20 window, but "everywhere this emitter has been
+// heard" wants a much wider sample, same 500 cap `MapView.tsx`'s overview
+// heatmap uses.
+const HEATMAP_EMISSIONS_LIMIT = 500;
 // Name, Type, Attributes, First Seen, Last Seen, Entity, Rule, Actions.
 const TABLE_COLUMN_COUNT = 8;
 
@@ -186,6 +194,29 @@ function EmitterDetail({ emitter }: EmitterDetailProps) {
     queryFn: () => listEmissions(params),
   });
 
+  // Detection heatmap: "where this emitter has been heard" (design doc's
+  // Frontend > Map section) — a wider, separately-fetched sample than the
+  // "Recent emissions" table above, filtered client-side to only located
+  // rows (an emission with no GPS fix has null `lon`/`lat`).
+  const heatmapParams = useMemo(() => {
+    const p = new URLSearchParams();
+    p.set('emitter_id', emitter.id);
+    p.set('limit', String(HEATMAP_EMISSIONS_LIMIT));
+    return p;
+  }, [emitter.id]);
+
+  const heatmapQuery = useQuery({
+    queryKey: [...queryKeys.emissions, 'heatmap', emitter.id],
+    queryFn: () => listEmissions(heatmapParams),
+  });
+
+  const heatmapPoints = useMemo<HeatmapPoint[]>(() => {
+    const items = heatmapQuery.data?.items ?? [];
+    return items
+      .filter((item): item is Emission & { lon: number; lat: number } => item.lon !== null && item.lat !== null)
+      .map((item) => ({ lon: item.lon, lat: item.lat }));
+  }, [heatmapQuery.data]);
+
   const conditions = ruleConditions(emitter.match_criteria);
   const items = recentQuery.data?.items ?? [];
 
@@ -209,6 +240,14 @@ function EmitterDetail({ emitter }: EmitterDetailProps) {
                 </ul>
               </div>
             )}
+          </div>
+
+          <div>
+            <h3 className="text-xs font-medium uppercase tracking-wide text-slate-500">Detection heatmap</h3>
+            <p className="mt-1 text-xs text-slate-500">Where this emitter has been heard.</p>
+            <div className="mt-1">
+              <EmissionsHeatmap points={heatmapPoints} />
+            </div>
           </div>
 
           <div>

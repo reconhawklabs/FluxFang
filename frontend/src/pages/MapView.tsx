@@ -12,10 +12,18 @@
 // app's own API) render regardless of whether tiles load, they just draw on
 // a blank background if OSM is unreachable.
 //
-// Data sources for the three layers:
-//   - Heatmap: `GET /api/emissions` (scoped by this page's own filter row),
-//     shaped by `emissionsToHeatmapGeoJSON` (`components/mapData.ts`) —
-//     drops emissions with no location (`lon`/`lat` null).
+// Data sources for the layers:
+//   - "All emissions" heatmap: `GET /api/emissions` (scoped by this page's
+//     own filter row), shaped by `emissionsToHeatmapGeoJSON`
+//     (`components/mapData.ts`) — drops emissions with no location
+//     (`lon`/`lat` null).
+//   - Per-category heatmaps (Task C, emitter auto-classification design
+//     doc): one toggleable layer per distinct `Emitter.category` present in
+//     `GET /api/emitters` (e.g. `"wifi"` -> an "All WiFi" toggle), each
+//     backed by its own `GET /api/emissions?emitter_category=<cat>` query
+//     and its own source/layer (see `categoryHeatmapSourceId`/
+//     `categoryHeatmapLayerId`) — data-driven so a newly-classified category
+//     shows up with no code change here.
 //   - Entity markers: `GET /api/entities` for the id/name list, then
 //     `GET /api/entities/:id` per entity (parallel, via `useQueries`) for
 //     `recent_detections`; each entity's marker sits at its detection with
@@ -37,31 +45,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQueries, useQuery } from '@tanstack/react-query';
 import maplibregl from 'maplibre-gl';
-import type { GeoJSONSource, Map as MapLibreMap, StyleSpecification } from 'maplibre-gl';
+import type { GeoJSONSource, Map as MapLibreMap } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { queryKeys } from '../api/queryKeys';
 import { listEmissions } from '../api/emissions';
 import { getEntityDetail, listEntities } from '../api/entities';
 import { listZones } from '../api/zones';
 import { listDataSources } from '../api/dataSources';
+import { listEmitters } from '../api/emitters';
 import type { EntityMarker } from '../components/mapData';
 import { emissionsToHeatmapGeoJSON, entitiesToMarkerFeatures, zonesToCircleGeoJSON } from '../components/mapData';
-
-/** A keyless raster style: one raster source hitting OSM's standard tile
- * endpoint, one layer drawing it. See module doc comment for the runtime-
- * internet caveat. */
-const OSM_RASTER_STYLE: StyleSpecification = {
-  version: 8,
-  sources: {
-    osm: {
-      type: 'raster',
-      tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-      tileSize: 256,
-      attribution: '© OpenStreetMap contributors',
-    },
-  },
-  layers: [{ id: 'osm-tiles', type: 'raster', source: 'osm' }],
-};
+import { OSM_RASTER_STYLE } from '../components/osmRasterStyle';
 
 const EMISSIONS_SOURCE_ID = 'emissions-heatmap-source';
 const ENTITIES_SOURCE_ID = 'entity-markers-source';
@@ -74,6 +68,38 @@ const ZONE_LAYER_IDS = ['zone-fill-layer', 'zone-line-layer', 'zone-label-layer'
 const EMPTY_POINT_FC = { type: 'FeatureCollection' as const, features: [] };
 const EMPTY_POLYGON_FC = { type: 'FeatureCollection' as const, features: [] };
 
+/** Task C (emitter auto-classification design doc, "Map (reframed, scoped
+ * heatmaps)"): the overview's heatmap is split by emitter *category* (e.g.
+ * `"wifi"`) into its own toggleable layer, on top of the unfiltered
+ * "All emissions" layer this page already had. Source/layer ids are derived
+ * from the category string so this stays data-driven — a new category
+ * showing up in `GET /api/emitters` (e.g. once Bluetooth capture lands)
+ * gets its own layer with no code change here. */
+function categoryHeatmapSourceId(category: string): string {
+  return `category-heatmap-source-${category}`;
+}
+
+function categoryHeatmapLayerId(category: string): string {
+  return `category-heatmap-layer-${category}`;
+}
+
+/** Human label for a category toggle, e.g. `"wifi"` -> `"All WiFi"`. Known
+ * categories get a proper-cased label; anything else falls back to
+ * capitalizing the raw string so a not-yet-special-cased category still
+ * reads reasonably. */
+const CATEGORY_LABELS: Record<string, string> = { wifi: 'WiFi', bluetooth: 'Bluetooth' };
+
+function categoryLabel(category: string): string {
+  return CATEGORY_LABELS[category] ?? category.charAt(0).toUpperCase() + category.slice(1);
+}
+
+// 500 is a generous cap for a single map view — see task brief ("use
+// GET /api/emissions?limit=500 and filter to those with non-null lon/lat
+// client-side"). Located-only filtering happens in
+// `emissionsToHeatmapGeoJSON`, not here. Shared by the unfiltered
+// "All emissions" layer and (with `category` added) each per-category layer.
+const MAP_EMISSIONS_LIMIT = 500;
+
 interface LayerVisibility {
   heatmap: boolean;
   entities: boolean;
@@ -81,6 +107,25 @@ interface LayerVisibility {
 }
 
 const DEFAULT_VISIBILITY: LayerVisibility = { heatmap: true, entities: true, zones: true };
+
+/** `GET /api/emissions` params shared by the "All emissions" layer and each
+ * per-category layer — same data-source/time-range scoping, an optional
+ * `emitter_category` on top for the category layers. */
+function buildEmissionsParams(opts: {
+  limit: number;
+  dataSourceId: string;
+  timeFrom: string;
+  timeTo: string;
+  category?: string;
+}): URLSearchParams {
+  const params = new URLSearchParams();
+  params.set('limit', String(opts.limit));
+  if (opts.dataSourceId.length > 0) params.set('data_source_id', opts.dataSourceId);
+  if (opts.timeFrom.length > 0) params.set('time_from', new Date(opts.timeFrom).toISOString());
+  if (opts.timeTo.length > 0) params.set('time_to', new Date(opts.timeTo).toISOString());
+  if (opts.category) params.set('emitter_category', opts.category);
+  return params;
+}
 
 /** Adds every source/layer this page draws, once the style has finished
  * loading. Split out of the init effect so it's obvious this only ever
@@ -165,23 +210,49 @@ export default function MapView() {
 
   const dataSourcesQuery = useQuery({ queryKey: queryKeys.dataSources, queryFn: listDataSources });
 
-  const emissionsParams = useMemo(() => {
-    const params = new URLSearchParams();
-    // 500 is a generous cap for a single map view — see task brief ("use
-    // GET /api/emissions?limit=500 and filter to those with non-null
-    // lon/lat client-side"). Located-only filtering happens in
-    // `emissionsToHeatmapGeoJSON`, not here.
-    params.set('limit', '500');
-    if (dataSourceId.length > 0) params.set('data_source_id', dataSourceId);
-    if (timeFrom.length > 0) params.set('time_from', new Date(timeFrom).toISOString());
-    if (timeTo.length > 0) params.set('time_to', new Date(timeTo).toISOString());
-    return params;
-  }, [dataSourceId, timeFrom, timeTo]);
+  const emissionsParams = useMemo(
+    () => buildEmissionsParams({ limit: MAP_EMISSIONS_LIMIT, dataSourceId, timeFrom, timeTo }),
+    [dataSourceId, timeFrom, timeTo],
+  );
 
   const emissionsQuery = useQuery({
     queryKey: [...queryKeys.emissions, 'map', emissionsParams.toString()],
     queryFn: () => listEmissions(emissionsParams),
   });
+
+  // Task C: the emitter-category layer toggles ("All WiFi", …) are derived
+  // from whatever categories are actually present in `GET /api/emitters` —
+  // data-driven so a new category (e.g. Bluetooth) needs no code change
+  // here, just a new classification-registry entry on the backend.
+  const emittersQuery = useQuery({ queryKey: queryKeys.emitters, queryFn: listEmitters });
+
+  const categories = useMemo(() => {
+    const seen = new Set<string>();
+    for (const emitter of emittersQuery.data ?? []) {
+      if (emitter.category) seen.add(emitter.category);
+    }
+    return Array.from(seen).sort();
+  }, [emittersQuery.data]);
+
+  const categoryEmissionsQueries = useQueries({
+    queries: categories.map((category) => {
+      const params = buildEmissionsParams({ limit: MAP_EMISSIONS_LIMIT, dataSourceId, timeFrom, timeTo, category });
+      return {
+        queryKey: [...queryKeys.emissions, 'map-category', category, params.toString()],
+        queryFn: () => listEmissions(params),
+      };
+    }),
+  });
+
+  const [categoryVisibility, setCategoryVisibility] = useState<Record<string, boolean>>({});
+
+  function isCategoryVisible(category: string): boolean {
+    return categoryVisibility[category] ?? true;
+  }
+
+  function toggleCategory(category: string): void {
+    setCategoryVisibility((prev) => ({ ...prev, [category]: !isCategoryVisible(category) }));
+  }
 
   const entitiesQuery = useQuery({ queryKey: queryKeys.entities, queryFn: listEntities });
 
@@ -245,6 +316,43 @@ export default function MapView() {
     source?.setData(emissionsToHeatmapGeoJSON(emissionsQuery.data?.items ?? []));
   }, [styleLoaded, emissionsQuery.data]);
 
+  // Adds a source+heatmap layer for each category as it becomes known
+  // (`categories` resolves asynchronously from `GET /api/emitters`, so this
+  // can't happen inside the once-only `addLayers` on the style's `'load'`
+  // event). Guarded by `getSource` so it's a no-op for categories whose
+  // layer already exists — this effect can re-run as `categories` grows.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleLoaded) return;
+    for (const category of categories) {
+      const sourceId = categoryHeatmapSourceId(category);
+      if (map.getSource(sourceId)) continue;
+      map.addSource(sourceId, { type: 'geojson', data: EMPTY_POINT_FC });
+      map.addLayer({
+        id: categoryHeatmapLayerId(category),
+        type: 'heatmap',
+        source: sourceId,
+        paint: {
+          'heatmap-weight': 1,
+          'heatmap-intensity': 1,
+          'heatmap-radius': 20,
+          'heatmap-opacity': 0.75,
+        },
+      });
+    }
+  }, [styleLoaded, categories]);
+
+  // Push each category layer's own emissions data once its source exists.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleLoaded) return;
+    categories.forEach((category, index) => {
+      const source = map.getSource<GeoJSONSource>(categoryHeatmapSourceId(category));
+      const items = categoryEmissionsQueries[index]?.data?.items ?? [];
+      source?.setData(emissionsToHeatmapGeoJSON(items));
+    });
+  }, [styleLoaded, categories, categoryEmissionsQueries]);
+
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !styleLoaded) return;
@@ -271,7 +379,10 @@ export default function MapView() {
     apply(HEATMAP_LAYER_IDS, visibility.heatmap);
     apply(ENTITY_LAYER_IDS, visibility.entities);
     apply(ZONE_LAYER_IDS, visibility.zones);
-  }, [styleLoaded, visibility]);
+    for (const category of categories) {
+      apply([categoryHeatmapLayerId(category)], categoryVisibility[category] ?? true);
+    }
+  }, [styleLoaded, visibility, categories, categoryVisibility]);
 
   function toggle(layer: keyof LayerVisibility): void {
     setVisibility((prev) => ({ ...prev, [layer]: !prev[layer] }));
@@ -292,8 +403,19 @@ export default function MapView() {
               onChange={() => toggle('heatmap')}
               className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
             />
-            Heatmap
+            All emissions
           </label>
+          {categories.map((category) => (
+            <label key={category} className="flex items-center gap-2 text-sm text-slate-300">
+              <input
+                type="checkbox"
+                checked={isCategoryVisible(category)}
+                onChange={() => toggleCategory(category)}
+                className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
+              />
+              All {categoryLabel(category)}
+            </label>
+          ))}
           <label className="flex items-center gap-2 text-sm text-slate-300">
             <input
               type="checkbox"

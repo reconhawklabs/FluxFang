@@ -15,6 +15,7 @@ import type { Emission, EmissionsPage } from '../api/emissions';
 import type { Entity, EntityDetail } from '../api/entities';
 import type { Zone } from '../api/zones';
 import type { DataSource } from '../api/dataSources';
+import type { Emitter } from '../api/emitters';
 
 vi.mock('maplibre-gl', () => {
   class FakeMap {
@@ -112,10 +113,33 @@ const ZONE_1: Zone = {
   created_at: '2026-01-01T00:00:00Z',
 };
 
+/** An auto-classified WiFi client emitter — used to give `categories` (the
+ * overview map's category-layer derivation, Task C) a `"wifi"` entry so the
+ * "All WiFi" toggle test below has something to find. Most existing tests
+ * in this file don't care about emitters at all (`baseRoutes` defaults
+ * `GET /api/emitters` to an empty list), so no category toggles render for
+ * them. */
+const EMITTER_WIFI: Emitter = {
+  id: 'emitter-1',
+  name: 'WiFi Client aa:bb:cc:dd:ee:ff',
+  type: null,
+  emitter_type: 'wifi_client',
+  attributes: { src_mac: 'aa:bb:cc:dd:ee:ff' },
+  match_enabled: true,
+  type_label: 'WiFi Client',
+  category: 'wifi',
+  entity_id: null,
+  match_criteria: { match: 'all', conditions: [] },
+  first_seen_at: '2026-07-05T00:00:00Z',
+  last_seen_at: '2026-07-05T01:00:00Z',
+  created_at: '2026-07-05T00:00:00Z',
+};
+
 function baseRoutes(overrides: Record<string, (url: URL, init?: RequestInit) => unknown> = {}) {
   return {
     'GET /api/data-sources': () => [DATA_SOURCE_1],
     'GET /api/emissions': () => EMISSIONS_PAGE,
+    'GET /api/emitters': () => [] as Emitter[],
     'GET /api/entities': () => [ENTITY_1],
     'GET /api/entities/entity-1': () => ENTITY_1_DETAIL,
     'GET /api/zones': () => [ZONE_1],
@@ -123,13 +147,13 @@ function baseRoutes(overrides: Record<string, (url: URL, init?: RequestInit) => 
   };
 }
 
-test('renders the Heatmap/Entities/Zones layer toggles without crashing', async () => {
+test('renders the All emissions/Entities/Zones layer toggles without crashing', async () => {
   const fetchMock = mockRoutes(baseRoutes());
   vi.stubGlobal('fetch', fetchMock);
 
   render(<MapView />, { wrapper });
 
-  expect(await screen.findByLabelText('Heatmap')).toBeInTheDocument();
+  expect(await screen.findByLabelText('All emissions')).toBeInTheDocument();
   expect(screen.getByLabelText('Entities')).toBeInTheDocument();
   expect(screen.getByLabelText('Zones')).toBeInTheDocument();
   expect(screen.getByTestId('maplibre-container')).toBeInTheDocument();
@@ -153,11 +177,50 @@ test('toggling a layer checkbox does not crash the page', async () => {
 
   render(<MapView />, { wrapper });
 
-  const heatmapToggle = await screen.findByLabelText('Heatmap');
+  const heatmapToggle = await screen.findByLabelText('All emissions');
   expect(heatmapToggle).toBeChecked();
   fireEvent.click(heatmapToggle);
   expect(heatmapToggle).not.toBeChecked();
 
   fireEvent.click(screen.getByLabelText('Entities'));
   fireEvent.click(screen.getByLabelText('Zones'));
+});
+
+test('a distinct emitter category ("wifi") drives an "All WiFi" toggle, backed by its own emitter_category-filtered query', async () => {
+  const fetchMock = mockRoutes(baseRoutes({ 'GET /api/emitters': () => [EMITTER_WIFI] }));
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<MapView />, { wrapper });
+
+  const wifiToggle = await screen.findByLabelText('All WiFi');
+  expect(wifiToggle).toBeChecked();
+
+  // The category layer's own `GET /api/emissions?...emitter_category=wifi`
+  // query fires (fetching data for the layer, regardless of its current
+  // visibility toggle state — same convention as the existing "All
+  // emissions" heatmap, whose query isn't gated on `visibility.heatmap`
+  // either).
+  await waitFor(() => {
+    const categoryCall = fetchMock.mock.calls.find(([url]) => {
+      const parsed = new URL(String(url), 'http://localhost');
+      return parsed.pathname === '/api/emissions' && parsed.searchParams.get('emitter_category') === 'wifi';
+    });
+    expect(categoryCall).toBeDefined();
+  });
+
+  // Toggling it off flips its checked state without crashing the page —
+  // the layer's visibility, not its data fetch, is what the toggle drives.
+  fireEvent.click(wifiToggle);
+  expect(wifiToggle).not.toBeChecked();
+});
+
+test('an emitter with no category (plain user-made emitter) contributes no category toggle', async () => {
+  const plainEmitter: Emitter = { ...EMITTER_WIFI, id: 'emitter-2', emitter_type: null, category: null };
+  const fetchMock = mockRoutes(baseRoutes({ 'GET /api/emitters': () => [plainEmitter] }));
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<MapView />, { wrapper });
+
+  await screen.findByLabelText('All emissions');
+  expect(screen.queryByLabelText(/^All (?!emissions)/)).not.toBeInTheDocument();
 });

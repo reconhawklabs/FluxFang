@@ -8,6 +8,7 @@ import { expect, test } from 'vitest';
 import {
   emissionsToHeatmapGeoJSON,
   entitiesToMarkerFeatures,
+  pointsToHeatmapGeoJSON,
   zoneToCircleFeature,
   zonesToCircleGeoJSON,
 } from './mapData';
@@ -75,6 +76,23 @@ test('entitiesToMarkerFeatures places one point feature per marker at its last l
     observed_at: '2026-07-04T12:00:00Z',
   });
   expect(features.features[1].geometry.coordinates).toEqual([-1.1, 5.5]);
+});
+
+test('pointsToHeatmapGeoJSON turns bare {lon,lat} points into one Point feature each, no filtering', () => {
+  const geojson = pointsToHeatmapGeoJSON([
+    { lon: 2.5, lat: 1.5 },
+    { lon: -1.1, lat: 5.5 },
+  ]);
+
+  expect(geojson.type).toBe('FeatureCollection');
+  expect(geojson.features).toHaveLength(2);
+  expect(geojson.features[0].geometry).toEqual({ type: 'Point', coordinates: [2.5, 1.5] });
+  expect(geojson.features[1].geometry).toEqual({ type: 'Point', coordinates: [-1.1, 5.5] });
+});
+
+test('pointsToHeatmapGeoJSON on an empty list yields an empty FeatureCollection', () => {
+  const geojson = pointsToHeatmapGeoJSON([]);
+  expect(geojson).toEqual({ type: 'FeatureCollection', features: [] });
 });
 
 function distanceMeters(lon1: number, lat1: number, lon2: number, lat2: number): number {

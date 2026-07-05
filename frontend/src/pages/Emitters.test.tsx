@@ -6,6 +6,36 @@ import Emitters from './Emitters';
 import { jsonResponse } from '../test-utils/fetchMocks';
 import type { Emitter } from '../api/emitters';
 import type { Entity } from '../api/entities';
+import type { Emission } from '../api/emissions';
+
+// `EmitterDetail` embeds `EmissionsHeatmap` (Task C), which inits a real
+// MapLibre map whenever it's given non-empty points — mocked wholesale here
+// (same convention as `MapView.test.tsx`) so that never touches a real
+// WebGL canvas jsdom doesn't have.
+vi.mock('maplibre-gl', () => {
+  class FakeMap {
+    constructor(_options: unknown) {}
+    addControl(): void {}
+    on(event: string, cb: () => void): void {
+      if (event === 'load') cb();
+    }
+    remove(): void {}
+    addSource(): void {}
+    addLayer(): void {}
+    getSource() {
+      return { setData: vi.fn() };
+    }
+    getLayer() {
+      return true;
+    }
+    setLayoutProperty(): void {}
+    fitBounds(): void {}
+  }
+
+  class FakeNavigationControl {}
+
+  return { default: { Map: FakeMap, NavigationControl: FakeNavigationControl } };
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -389,4 +419,54 @@ test('expanded detail shows the match_criteria rule for an auto-classified emitt
 
   const detail = await screen.findByTestId('emitter-detail-emitter-3');
   expect(within(detail).getByText(/src_mac eq aa:bb:cc:dd:ee:ff/i)).toBeInTheDocument();
+});
+
+const LOCATED_EMISSION: Emission = {
+  id: 'em-1',
+  data_source_id: 'ds-1',
+  emitter_id: 'emitter-3',
+  session_id: null,
+  observed_at: '2026-07-05T00:00:00Z',
+  signal_strength: -40,
+  lon: 2.5,
+  lat: 1.5,
+  kind: 'wifi',
+  payload: {},
+};
+
+const UNLOCATED_EMISSION: Emission = { ...LOCATED_EMISSION, id: 'em-2', lon: null, lat: null };
+
+test('expanded detail renders a detection heatmap fed by located emissions for that emitter', async () => {
+  const fetchMock = mockRoutes({
+    'GET /api/emitters': () => [EMITTER_CLIENT],
+    'GET /api/entities': () => [],
+    'GET /api/emissions': () => ({ items: [LOCATED_EMISSION, UNLOCATED_EMISSION], total: 2 }),
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Emitters />, { wrapper });
+  await waitFor(() => expect(screen.getByTestId('emitter-row-emitter-3')).toBeInTheDocument());
+
+  fireEvent.click(screen.getByRole('button', { name: 'WiFi Client aa:bb:cc:dd:ee:ff' }));
+
+  const detail = await screen.findByTestId('emitter-detail-emitter-3');
+  expect(within(detail).getByText('Detection heatmap')).toBeInTheDocument();
+  expect(await within(detail).findByTestId('emissions-heatmap-container')).toBeInTheDocument();
+});
+
+test('expanded detail shows the heatmap empty state when the emitter has no located emissions', async () => {
+  const fetchMock = mockRoutes({
+    'GET /api/emitters': () => [EMITTER_CLIENT],
+    'GET /api/entities': () => [],
+    'GET /api/emissions': () => ({ items: [], total: 0 }),
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Emitters />, { wrapper });
+  await waitFor(() => expect(screen.getByTestId('emitter-row-emitter-3')).toBeInTheDocument());
+
+  fireEvent.click(screen.getByRole('button', { name: 'WiFi Client aa:bb:cc:dd:ee:ff' }));
+
+  const detail = await screen.findByTestId('emitter-detail-emitter-3');
+  expect(await within(detail).findByText('No located detections yet.')).toBeInTheDocument();
 });

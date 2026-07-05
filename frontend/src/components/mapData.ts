@@ -51,6 +51,36 @@ export function emissionsToHeatmapGeoJSON(
   return { type: 'FeatureCollection', features };
 }
 
+/** A bare located point — what `EmissionsHeatmap.tsx` (Task C's reusable
+ * per-emitter/per-entity detail heatmap) takes: its callers have already
+ * filtered/derived located points out of their own source data (an
+ * emitter's `GET /api/emissions?emitter_id=…` items, or an entity's already-
+ * located `recent_detections`), so this shaper doesn't need — and shouldn't
+ * assume — the full `Emission` shape `emissionsToHeatmapGeoJSON` above
+ * works with. */
+export interface HeatmapPoint {
+  lon: number;
+  lat: number;
+}
+
+/**
+ * `points` -> a GeoJSON `FeatureCollection<Point>` for a compact heatmap
+ * layer. No filtering (every point is assumed already-located) and no
+ * properties beyond the geometry — this is deliberately the minimal shape
+ * `EmissionsHeatmap` needs, not a re-fit of `emissionsToHeatmapGeoJSON`'s
+ * richer per-feature properties.
+ */
+export function pointsToHeatmapGeoJSON(points: HeatmapPoint[]): FeatureCollection<Point, Record<string, never>> {
+  return {
+    type: 'FeatureCollection',
+    features: points.map((point) => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [point.lon, point.lat] },
+      properties: {},
+    })),
+  };
+}
+
 /** One entity's last known location — the caller (`MapView`) derives this
  * per entity from `GET /api/entities/:id`'s `recent_detections` (see that
  * component's doc comment for exactly how "last" is chosen), so this module

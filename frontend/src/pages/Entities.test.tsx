@@ -17,6 +17,36 @@ import type { Zone } from '../api/zones';
 import type { AlertMethod } from '../api/alertMethods';
 import type { AlertRule } from '../api/alertRules';
 
+// `EntityDetail` embeds `EmissionsHeatmap` (Task C), which inits a real
+// MapLibre map whenever it's given non-empty points (this file's own
+// `ENTITY_1_DETAIL.recent_detections` fixture is located) — mocked
+// wholesale here (same convention as `MapView.test.tsx`) so that never
+// touches a real WebGL canvas jsdom doesn't have.
+vi.mock('maplibre-gl', () => {
+  class FakeMap {
+    constructor(_options: unknown) {}
+    addControl(): void {}
+    on(event: string, cb: () => void): void {
+      if (event === 'load') cb();
+    }
+    remove(): void {}
+    addSource(): void {}
+    addLayer(): void {}
+    getSource() {
+      return { setData: vi.fn() };
+    }
+    getLayer() {
+      return true;
+    }
+    setLayoutProperty(): void {}
+    fitBounds(): void {}
+  }
+
+  class FakeNavigationControl {}
+
+  return { default: { Map: FakeMap, NavigationControl: FakeNavigationControl } };
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -125,6 +155,34 @@ test('expanding an entity shows its emitters and aggregate last_seen', async () 
 
   const lastSeen = within(detail).getByTestId('entity-last-seen-entity-1');
   expect(lastSeen).toHaveTextContent(new Date('2026-07-04T12:00:00Z').toLocaleString());
+});
+
+test('expanding an entity renders a detection heatmap fed by its located recent_detections', async () => {
+  const fetchMock = mockRoutes(baseRoutes());
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Entities />, { wrapper });
+
+  await waitFor(() => expect(screen.getByTestId('entity-row-entity-1')).toBeInTheDocument());
+  fireEvent.click(screen.getByRole('button', { name: 'Bob' }));
+
+  const detail = await screen.findByTestId('entity-detail-entity-1');
+  expect(await within(detail).findByText('Detection heatmap')).toBeInTheDocument();
+  expect(await within(detail).findByTestId('emissions-heatmap-container')).toBeInTheDocument();
+});
+
+test('an entity with no recent_detections shows the heatmap empty state', async () => {
+  const noDetections: EntityDetail = { ...ENTITY_1_DETAIL, recent_detections: [] };
+  const fetchMock = mockRoutes(baseRoutes({ 'GET /api/entities/entity-1': () => noDetections }));
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Entities />, { wrapper });
+
+  await waitFor(() => expect(screen.getByTestId('entity-row-entity-1')).toBeInTheDocument());
+  fireEvent.click(screen.getByRole('button', { name: 'Bob' }));
+
+  const detail = await screen.findByTestId('entity-detail-entity-1');
+  expect(await within(detail).findByText('No located detections yet.')).toBeInTheDocument();
 });
 
 test('"When detected" does not show or require a zone dropdown', async () => {

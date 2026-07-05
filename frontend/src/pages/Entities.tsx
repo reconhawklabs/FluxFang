@@ -17,7 +17,7 @@
 // can only validly contain table cells, and React's direct-DOM-API
 // insertion doesn't foster-parent stray children out the way the HTML
 // parser would.
-import { Fragment, useState } from 'react';
+import { Fragment, useMemo, useState } from 'react';
 import type { ChangeEvent, FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError } from '../api/client';
@@ -30,6 +30,8 @@ import { createAlertRule, listAlertRules } from '../api/alertRules';
 import type { AlertRuleTrigger, AlertRuleTriggerOn, CreateAlertRuleInput } from '../api/alertRules';
 import RuleBuilder from '../components/RuleBuilder';
 import type { Rule } from '../types/rule';
+import EmissionsHeatmap from '../components/EmissionsHeatmap';
+import type { HeatmapPoint } from '../components/mapData';
 
 const TABLE_COLUMN_COUNT = 3;
 
@@ -337,6 +339,15 @@ function EntityDetail({ entity, onDeleted, onAddAlert }: EntityDetailProps) {
   const detail = detailQuery.data;
   const rulesForEntity = (alertRulesQuery.data ?? []).filter((rule) => rule.target_id === entity.id);
 
+  // Detection heatmap: "where this entity's emitters have been heard"
+  // (design doc's Frontend > Map section) — `recent_detections` is already
+  // located (every row has non-null `lat`/`lon`, unlike a raw `Emission`),
+  // so this is a direct map with no filtering.
+  const heatmapPoints = useMemo<HeatmapPoint[]>(
+    () => (detail?.recent_detections ?? []).map((detection) => ({ lon: detection.lon, lat: detection.lat })),
+    [detail],
+  );
+
   return (
     <tr data-testid={`entity-detail-${entity.id}`} className="border-b border-slate-900 bg-slate-950/40">
       <td colSpan={TABLE_COLUMN_COUNT} className="px-4 py-3">
@@ -354,6 +365,14 @@ function EntityDetail({ entity, onDeleted, onAddAlert }: EntityDetailProps) {
                 <p className="mt-1 text-xs text-slate-500">
                   {detail.recent_detections.length} recent detection{detail.recent_detections.length === 1 ? '' : 's'}
                 </p>
+              </div>
+
+              <div>
+                <h3 className="text-xs font-medium uppercase tracking-wide text-slate-500">Detection heatmap</h3>
+                <p className="mt-1 text-xs text-slate-500">Where this entity's emitters have been heard.</p>
+                <div className="mt-1">
+                  <EmissionsHeatmap points={heatmapPoints} />
+                </div>
               </div>
 
               <div>
