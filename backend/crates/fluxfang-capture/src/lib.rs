@@ -15,6 +15,7 @@
 //! plus `index * interval`), so tests never depend on wall-clock time.
 
 pub mod mock;
+pub mod wifi;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
