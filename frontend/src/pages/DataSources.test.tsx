@@ -160,8 +160,72 @@ test('add source: wifi kind with enumerated interfaces shows a Mode dropdown and
     kind: 'wifi',
     mode: 'scan',
     interface: 'wlan2',
-    config: {},
+    config: { auto_create_emitters: false },
   });
+});
+
+test('add source: wifi kind — checking "Automatically create emitters" posts config.auto_create_emitters: true', async () => {
+  const created: DataSource = {
+    id: 'new-wifi-auto',
+    created_at: '2026-01-01T00:00:00Z',
+    kind: 'wifi',
+    mode: 'monitor',
+    interface: 'wlan0',
+    status: 'stopped',
+    config: { auto_create_emitters: true },
+    last_error: null,
+  };
+  const fetchMock = mockMethodRoutes({
+    'GET /api/data-sources': () => [],
+    'GET /api/system/capture-devices': () => captureDevices(['wlan0'], []),
+    'POST /api/data-sources': () => created,
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<DataSources />, { wrapper });
+  await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+
+  fireEvent.click(screen.getByRole('button', { name: /add data source/i }));
+  // wifi + monitor are the defaults
+
+  const ifaceField = await screen.findByLabelText(/interface/i);
+  fireEvent.change(ifaceField, { target: { value: 'wlan0' } });
+
+  const autoCreateCheckbox = screen.getByLabelText(/automatically create emitters/i);
+  expect(autoCreateCheckbox).not.toBeChecked();
+  fireEvent.click(autoCreateCheckbox);
+  expect(autoCreateCheckbox).toBeChecked();
+
+  fireEvent.click(screen.getByRole('button', { name: /^add$|^create$|^save$/i }));
+
+  await waitFor(() => expect(screen.queryByLabelText(/interface/i)).not.toBeInTheDocument());
+
+  const postCall = fetchMock.mock.calls.find(([, init]) => init?.method === 'POST');
+  expect(postCall).toBeDefined();
+  const [url, init] = postCall as [RequestInfo | URL, RequestInit];
+  expect(String(url)).toBe('/api/data-sources');
+  expect(JSON.parse(init.body as string)).toEqual({
+    kind: 'wifi',
+    mode: 'monitor',
+    interface: 'wlan0',
+    config: { auto_create_emitters: true },
+  });
+});
+
+test('add source: wifi kind — SSID Scan mode also shows the auto-create checkbox', async () => {
+  const fetchMock = mockMethodRoutes({
+    'GET /api/data-sources': () => [],
+    'GET /api/system/capture-devices': () => captureDevices(['wlan0'], []),
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<DataSources />, { wrapper });
+  await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+
+  fireEvent.click(screen.getByRole('button', { name: /add data source/i }));
+  fireEvent.change(await screen.findByLabelText(/^mode$/i), { target: { value: 'scan' } });
+
+  expect(screen.getByLabelText(/automatically create emitters/i)).toBeInTheDocument();
 });
 
 test('add source: wifi kind with NO enumerated interfaces shows "No compatible WiFi card found." and disables the Add button, with no text input fallback', async () => {

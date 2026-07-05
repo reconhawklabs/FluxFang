@@ -33,9 +33,17 @@ export interface SerialConfig {
   baud: BaudRate;
 }
 
-/** wifi's `config` is always `{}` — the interface lives on the top-level
- * `interface` field instead (see module doc comment). */
-export type DataSourceConfig = GpsdConfig | SerialConfig | Record<string, never>;
+/** wifi's `config` — the interface lives on the top-level `interface` field
+ * instead (see module doc comment); the only config key wifi sources carry
+ * is `auto_create_emitters` (Phase B, emitter auto-classification design
+ * doc's Frontend section) — the Add-Source form's "Automatically create
+ * emitters" checkbox, wired to backend `data_source.config.auto_create_emitters`
+ * (Phase A). Optional/omittable so existing sources without it still narrow. */
+export interface WifiConfig {
+  auto_create_emitters?: boolean;
+}
+
+export type DataSourceConfig = WifiConfig | GpsdConfig | SerialConfig | Record<string, never>;
 
 /** Mirrors `fluxfang_db::models::DataSource` exactly. */
 export interface DataSource {

@@ -2,16 +2,45 @@
 // backend, `fluxfang-api::emitters`). Originally only carried the two calls
 // Task 9.4's Emissions page needed (list + create); Task 9.5's Emitters page
 // grows this with `patchEmitter` (rename / associate-to-entity / detach) and
-// `deleteEmitter` — still YAGNI beyond that (no `/rule` or `/preview` calls
-// here; `RuleBuilder`/`Emissions.tsx` own those directly).
+// `deleteEmitter`. Phase B (emitter auto-classification design doc) adds the
+// classification fields (`emitter_type`/`attributes`/`match_enabled` +
+// derived `type_label`/`category`) and the matching `PatchEmitterInput`
+// fields — still YAGNI beyond that (no `/rule` or `/preview` calls here;
+// `RuleBuilder`/`Emissions.tsx` own those directly).
 import type { Rule } from '../types/rule';
 import { del, get, patch, post } from './client';
+
+/** Type-specific identifying info + metadata an auto-classified emitter
+ * carries (Phase A backend's `emitter.attributes jsonb`) — e.g.
+ * `{ssid, bssid}` for a `wifi_access_point`, `{src_mac, randomized_mac}` for
+ * a `wifi_client`. Left as a loose record (not a per-type union) since a
+ * plain user-made emitter has `{}` and future device kinds (bluetooth,
+ * sensors, …) add their own keys with no schema change — callers read
+ * specific keys out of it defensively, same convention as
+ * `Emission.payload`. */
+export type EmitterAttributes = Record<string, unknown>;
 
 /** Mirrors `fluxfang-api::dto::EmitterDto`. */
 export interface Emitter {
   id: string;
   name: string;
   type: string | null;
+  /** Machine classification key, e.g. `"wifi_access_point"` /
+   * `"wifi_client"` — `null` for a plain user-made emitter. */
+  emitter_type: string | null;
+  attributes: EmitterAttributes;
+  /** Whether this emitter's `match_criteria` rule auto-attaches new
+   * matching emissions. Toggled via `PATCH { match_enabled }`; when
+   * `false`, ingest leaves newly-matching emissions unassigned instead
+   * (and, for an auto-create rule, won't re-create the emitter either). */
+  match_enabled: boolean;
+  /** Derived human label for `emitter_type`, e.g. "WiFi Access Point" —
+   * `null` when `emitter_type` is `null`. */
+  type_label: string | null;
+  /** Derived grouping key for `emitter_type`, e.g. `"wifi"` — `null` when
+   * `emitter_type` is `null`. Reserved for the Phase C map's category-layer
+   * filter; not used by this phase's pages. */
+  category: string | null;
   entity_id: string | null;
   match_criteria: unknown;
   first_seen_at: string | null;
@@ -45,11 +74,20 @@ export interface CreateEmitterResult {
  * (associate) — see that struct's `some` deserializer doc comment. Callers
  * here only ever send the keys they mean to change (e.g. `{ entity_id:
  * null }` to detach, never a full object), so that distinction is
- * preserved on the wire. */
+ * preserved on the wire.
+ *
+ * `attributes` is a **full replace**, not a merge (per the design doc's API
+ * section) — the backend simply overwrites `emitter.attributes` with
+ * whatever's sent. A caller that wants to flip one key (e.g. the manual
+ * `randomized_mac` override, `Emitters.tsx`'s `handleToggleRandomized`)
+ * must read the emitter's current `attributes`, spread it, and override
+ * just that key before sending — never send a partial object. */
 export interface PatchEmitterInput {
   name?: string;
   type?: string | null;
   entity_id?: string | null;
+  match_enabled?: boolean;
+  attributes?: EmitterAttributes;
 }
 
 export function listEmitters(): Promise<Emitter[]> {

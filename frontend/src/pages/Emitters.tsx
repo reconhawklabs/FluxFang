@@ -27,7 +27,8 @@ import type { Emission } from '../api/emissions';
 import type { Condition, Rule } from '../types/rule';
 
 const DETAIL_EMISSIONS_LIMIT = 20;
-const TABLE_COLUMN_COUNT = 7;
+// Name, Type, Attributes, First Seen, Last Seen, Entity, Rule, Actions.
+const TABLE_COLUMN_COUNT = 8;
 
 const inputClassName =
   'w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 focus:border-amber-500 focus:outline-none';
@@ -92,6 +93,72 @@ function ruleMatchModeLabel(matchCriteria: unknown): string {
 function payloadText(payload: Record<string, unknown>, key: string): string {
   const value = payload[key];
   return typeof value === 'string' || typeof value === 'number' ? String(value) : '—';
+}
+
+/** Reads a string attribute out of an emitter's `attributes` bag (Phase A
+ * backend's `emitter.attributes jsonb`) — defensive same as `payloadText`,
+ * since `attributes`' shape depends on `emitter_type` and older/plain
+ * emitters carry `{}`. */
+function attributeText(attributes: Record<string, unknown>, key: string): string | null {
+  const value = attributes[key];
+  return typeof value === 'string' ? value : null;
+}
+
+function isRandomizedMac(attributes: Record<string, unknown>): boolean {
+  return attributes.randomized_mac === true;
+}
+
+/** The "type badge" (design doc's Frontend section): `type_label` when the
+ * emitter is auto-classified (e.g. "WiFi Access Point"), falling back to the
+ * free-text `type` a manually-created emitter carries, and finally "—" for
+ * neither. */
+function TypeBadge({ emitter }: { emitter: Emitter }) {
+  const label = emitter.type_label ?? emitter.type;
+  if (!label) return <span className="text-slate-500">—</span>;
+  return (
+    <span
+      data-testid={`emitter-type-badge-${emitter.id}`}
+      className="inline-block rounded bg-slate-800 px-2 py-0.5 text-xs font-medium text-slate-200"
+    >
+      {label}
+    </span>
+  );
+}
+
+/** Key identifying attributes shown per the domain rules (design doc): an
+ * AP shows its SSID (or "Hidden" for an empty one) plus BSSID; a client
+ * shows its source MAC plus a "Randomized MAC" badge when flagged. MAC/BSSID
+ * are rendered monospace, same convention as the emissions table's bssid
+ * column. Anything else (a plain/unclassified emitter) renders "—". */
+function AttributesSummary({ emitter }: { emitter: Emitter }) {
+  const attributes = emitter.attributes ?? {};
+
+  if (emitter.emitter_type === 'wifi_access_point') {
+    const ssid = attributeText(attributes, 'ssid');
+    const bssid = attributeText(attributes, 'bssid');
+    return (
+      <div className="space-y-0.5">
+        <div className="text-slate-300">{ssid && ssid.length > 0 ? ssid : 'Hidden'}</div>
+        {bssid && <div className="font-mono text-xs text-slate-400">{bssid}</div>}
+      </div>
+    );
+  }
+
+  if (emitter.emitter_type === 'wifi_client') {
+    const srcMac = attributeText(attributes, 'src_mac');
+    return (
+      <div className="space-y-1">
+        {srcMac && <div className="font-mono text-xs text-slate-300">{srcMac}</div>}
+        {isRandomizedMac(attributes) && (
+          <span className="inline-block rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-400">
+            Randomized MAC
+          </span>
+        )}
+      </div>
+    );
+  }
+
+  return <span className="text-slate-500">—</span>;
 }
 
 interface EmitterDetailProps {
@@ -302,6 +369,28 @@ export default function Emitters() {
     patchMutation.mutate({ id: emitterId, body: { entity_id: null } });
   }
 
+  // The rule enable/disable toggle (design doc's "Rules are visible +
+  // toggleable" section) — a plain `{ match_enabled }` PATCH, flipping
+  // whatever the emitter's current value is.
+  function handleToggleMatchEnabled(emitter: Emitter): void {
+    patchMutation.mutate({ id: emitter.id, body: { match_enabled: !emitter.match_enabled } });
+  }
+
+  // Manual randomized-MAC override (design doc's Frontend section) — since
+  // `PATCH .../attributes` is a full replace, not a merge (see
+  // `PatchEmitterInput`'s doc comment in `api/emitters.ts`), this reads the
+  // emitter's *already-loaded* `attributes` (no extra GET needed — it's the
+  // same object this row is rendering from `queryKeys.emitters`), spreads
+  // it, and flips just `randomized_mac` before sending the whole thing.
+  function handleToggleRandomized(emitter: Emitter): void {
+    const currentAttributes = emitter.attributes ?? {};
+    const currentlyRandomized = isRandomizedMac(currentAttributes);
+    patchMutation.mutate({
+      id: emitter.id,
+      body: { attributes: { ...currentAttributes, randomized_mac: !currentlyRandomized } },
+    });
+  }
+
   function handleCreateAndAssociate(emitterId: string, entityName: string): void {
     createAndAssociateMutation.mutate({ emitterId, entityName });
   }
@@ -349,6 +438,7 @@ export default function Emitters() {
             <tr className="border-b border-slate-800 text-xs uppercase tracking-wide text-slate-500">
               <th className="py-2 pr-4 font-medium">Name</th>
               <th className="py-2 pr-4 font-medium">Type</th>
+              <th className="py-2 pr-4 font-medium">Attributes</th>
               <th className="py-2 pr-4 font-medium">First Seen</th>
               <th className="py-2 pr-4 font-medium">Last Seen</th>
               <th className="py-2 pr-4 font-medium">Entity</th>
@@ -416,14 +506,50 @@ export default function Emitters() {
                         </button>
                       )}
                     </td>
-                    <td className="py-2 pr-4 text-slate-300">{emitter.type ?? '—'}</td>
+                    <td className="py-2 pr-4">
+                      <TypeBadge emitter={emitter} />
+                    </td>
+                    <td className="py-2 pr-4">
+                      <AttributesSummary emitter={emitter} />
+                      {emitter.emitter_type === 'wifi_client' && (
+                        <button
+                          type="button"
+                          disabled={rowBusy}
+                          onClick={() => handleToggleRandomized(emitter)}
+                          className="mt-1 block text-[10px] text-slate-500 underline decoration-dotted hover:text-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {isRandomizedMac(emitter.attributes ?? {})
+                            ? 'Mark as not randomized'
+                            : 'Mark as randomized'}
+                        </button>
+                      )}
+                    </td>
                     <td className="py-2 pr-4 text-slate-300">{formatTimestamp(emitter.first_seen_at)}</td>
                     <td className="py-2 pr-4 text-slate-300">{formatTimestamp(emitter.last_seen_at)}</td>
                     <td data-testid={`emitter-entity-${emitter.id}`} className="py-2 pr-4 text-slate-300">
                       {entityName}
                     </td>
-                    <td className="py-2 pr-4 font-mono text-xs text-slate-300">
-                      {summarizeRule(emitter.match_criteria)}
+                    <td className="py-2 pr-4">
+                      <div className="font-mono text-xs text-slate-300">
+                        {summarizeRule(emitter.match_criteria)}
+                      </div>
+                      <label className="mt-1 flex items-center gap-1.5 text-xs text-slate-400">
+                        <input
+                          type="checkbox"
+                          role="switch"
+                          aria-label={`Rule enabled for ${emitter.name}`}
+                          checked={emitter.match_enabled}
+                          disabled={rowBusy}
+                          onChange={() => handleToggleMatchEnabled(emitter)}
+                          className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
+                        />
+                        {emitter.match_enabled ? 'Enabled' : 'Disabled'}
+                      </label>
+                      {!emitter.match_enabled && (
+                        <p className="mt-1 max-w-[10rem] text-[10px] text-amber-400">
+                          Disabled — new matching emissions won&apos;t auto-attach.
+                        </p>
+                      )}
                     </td>
                     <td className="py-2 pr-4">
                       <div className="flex flex-wrap items-center gap-2">

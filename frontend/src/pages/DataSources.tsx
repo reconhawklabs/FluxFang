@@ -111,6 +111,11 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
   const [kind, setKind] = useState<FormKind>('wifi');
   const [wifiMode, setWifiMode] = useState<FormWifiMode>('monitor');
   const [iface, setIface] = useState('');
+  // Phase B (emitter auto-classification design doc's Frontend section):
+  // opt-in per source, defaults OFF. Applies to both wifi modes (monitor
+  // captures both beacons and probe requests; scan only surfaces APs) —
+  // either way the backend's ingest auto-create only fires when this is set.
+  const [autoCreateEmitters, setAutoCreateEmitters] = useState(false);
   const [gpsMode, setGpsMode] = useState<FormGpsMode>('gpsd');
   const [host, setHost] = useState('127.0.0.1');
   const [port, setPort] = useState('2947');
@@ -137,7 +142,12 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
     event.preventDefault();
 
     if (kind === 'wifi') {
-      onSubmit({ kind: 'wifi', mode: wifiMode, interface: iface, config: {} });
+      onSubmit({
+        kind: 'wifi',
+        mode: wifiMode,
+        interface: iface,
+        config: { auto_create_emitters: autoCreateEmitters },
+      });
       return;
     }
 
@@ -251,6 +261,23 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
               {!devicesLoading && !devicesErrored && !wifiHasDevices && (
                 <p className="text-sm text-amber-400">{NO_WIFI_MESSAGE}</p>
               )}
+            </div>
+
+            <div className="space-y-1">
+              <label className="flex items-center gap-2 text-sm text-slate-200">
+                <input
+                  id="ds-auto-create-emitters"
+                  type="checkbox"
+                  checked={autoCreateEmitters}
+                  onChange={(event) => setAutoCreateEmitters(event.target.checked)}
+                  className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
+                />
+                Automatically create emitters (by AP BSSID / client MAC)
+              </label>
+              <p className="text-xs text-slate-500">
+                When enabled, each new access point or client device seen on this source is
+                auto-registered as an emitter with a visible, toggleable match rule.
+              </p>
             </div>
           </>
         )}

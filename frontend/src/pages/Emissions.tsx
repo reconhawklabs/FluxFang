@@ -304,6 +304,7 @@ export default function Emissions() {
               <th className="py-2 pr-4 font-medium">Observed At</th>
               <th className="py-2 pr-4 font-medium">Kind</th>
               <th className="py-2 pr-4 font-medium">BSSID</th>
+              <th className="py-2 pr-4 font-medium">Src MAC</th>
               <th className="py-2 pr-4 font-medium">SSID</th>
               <th className="py-2 pr-4 font-medium">Channel</th>
               <th className="py-2 pr-4 font-medium">RSSI</th>
@@ -330,6 +331,9 @@ export default function Emissions() {
                 <td className="py-2 pr-4 text-slate-300">{formatObservedAt(emission.observed_at)}</td>
                 <td className="py-2 pr-4 capitalize text-slate-300">{emission.kind}</td>
                 <td className="py-2 pr-4 font-mono text-slate-300">{payloadText(emission.payload, 'bssid')}</td>
+                <td data-testid="emission-src-mac" className="py-2 pr-4 font-mono text-slate-300">
+                  {payloadText(emission.payload, 'src_mac')}
+                </td>
                 <td className="py-2 pr-4 text-slate-300">{payloadText(emission.payload, 'ssid')}</td>
                 <td className="py-2 pr-4 text-slate-300">{payloadText(emission.payload, 'channel')}</td>
                 <td className="py-2 pr-4 font-mono text-slate-300">

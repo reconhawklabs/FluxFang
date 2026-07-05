@@ -39,6 +39,11 @@ const EMITTER_UNASSIGNED: Emitter = {
   id: 'emitter-1',
   name: 'Unknown AP',
   type: 'wifi-ap',
+  emitter_type: null,
+  attributes: {},
+  match_enabled: true,
+  type_label: null,
+  category: null,
   entity_id: null,
   match_criteria: { match: 'all', conditions: [{ field: 'bssid', op: 'eq', value: 'aa:bb:cc:dd:ee:ff' }] },
   first_seen_at: '2026-07-01T00:00:00Z',
@@ -50,11 +55,52 @@ const EMITTER_ASSIGNED: Emitter = {
   id: 'emitter-2',
   name: "Neighbor's Router",
   type: 'wifi-ap',
+  emitter_type: null,
+  attributes: {},
+  match_enabled: true,
+  type_label: null,
+  category: null,
   entity_id: 'entity-1',
   match_criteria: { match: 'all', conditions: [] },
   first_seen_at: null,
   last_seen_at: null,
   created_at: '2026-07-01T00:00:00Z',
+};
+
+/** An auto-classified WiFi client emitter (Phase A backend / Phase B
+ * frontend, emitter auto-classification design doc) — has a randomized
+ * source MAC flagged, and its rule is currently enabled. */
+const EMITTER_CLIENT: Emitter = {
+  id: 'emitter-3',
+  name: 'WiFi Client aa:bb:cc:dd:ee:ff',
+  type: null,
+  emitter_type: 'wifi_client',
+  attributes: { src_mac: 'aa:bb:cc:dd:ee:ff', randomized_mac: true },
+  match_enabled: true,
+  type_label: 'WiFi Client',
+  category: 'wifi',
+  entity_id: null,
+  match_criteria: { match: 'all', conditions: [{ field: 'src_mac', op: 'eq', value: 'aa:bb:cc:dd:ee:ff' }] },
+  first_seen_at: '2026-07-05T00:00:00Z',
+  last_seen_at: '2026-07-05T01:00:00Z',
+  created_at: '2026-07-05T00:00:00Z',
+};
+
+/** An auto-classified WiFi access-point emitter with a visible SSID. */
+const EMITTER_AP: Emitter = {
+  id: 'emitter-4',
+  name: 'WiFi AP "CoffeeShop" (11:22:33:44:55:66)',
+  type: null,
+  emitter_type: 'wifi_access_point',
+  attributes: { ssid: 'CoffeeShop', bssid: '11:22:33:44:55:66' },
+  match_enabled: false,
+  type_label: 'WiFi Access Point',
+  category: 'wifi',
+  entity_id: null,
+  match_criteria: { match: 'all', conditions: [{ field: 'bssid', op: 'eq', value: '11:22:33:44:55:66' }] },
+  first_seen_at: '2026-07-05T00:00:00Z',
+  last_seen_at: '2026-07-05T01:00:00Z',
+  created_at: '2026-07-05T00:00:00Z',
 };
 
 const ENTITY_1: Entity = {
@@ -197,4 +243,150 @@ test('create entity & associate: entering a name creates the entity then PATCHes
     ).length;
     expect(getEmittersCallCountAfter).toBeGreaterThan(getEmittersCallCountBefore);
   });
+});
+
+// --- Phase B: emitter auto-classification display + rule toggle ---
+// (emitter auto-classification design doc's Frontend section)
+
+test('a wifi_client emitter renders its type badge, src_mac, and a "Randomized MAC" badge', async () => {
+  const fetchMock = mockRoutes({
+    'GET /api/emitters': () => [EMITTER_CLIENT],
+    'GET /api/entities': () => [],
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Emitters />, { wrapper });
+  await waitFor(() => expect(screen.getByTestId('emitter-row-emitter-3')).toBeInTheDocument());
+
+  const row = screen.getByTestId('emitter-row-emitter-3');
+  expect(within(row).getByText('WiFi Client')).toBeInTheDocument();
+  expect(within(row).getByText('aa:bb:cc:dd:ee:ff')).toHaveClass('font-mono');
+  expect(within(row).getByText(/randomized mac/i)).toBeInTheDocument();
+});
+
+test('a wifi_access_point emitter renders its type badge, SSID, and BSSID (monospace)', async () => {
+  const fetchMock = mockRoutes({
+    'GET /api/emitters': () => [EMITTER_AP],
+    'GET /api/entities': () => [],
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Emitters />, { wrapper });
+  await waitFor(() => expect(screen.getByTestId('emitter-row-emitter-4')).toBeInTheDocument());
+
+  const row = screen.getByTestId('emitter-row-emitter-4');
+  expect(within(row).getByText('WiFi Access Point')).toBeInTheDocument();
+  expect(within(row).getByText('CoffeeShop')).toBeInTheDocument();
+  expect(within(row).getByText('11:22:33:44:55:66')).toHaveClass('font-mono');
+});
+
+test('an AP emitter with no SSID shows "Hidden"', async () => {
+  const hidden: Emitter = { ...EMITTER_AP, attributes: { ssid: '', bssid: '11:22:33:44:55:66' } };
+  const fetchMock = mockRoutes({
+    'GET /api/emitters': () => [hidden],
+    'GET /api/entities': () => [],
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Emitters />, { wrapper });
+  await waitFor(() => expect(screen.getByTestId('emitter-row-emitter-4')).toBeInTheDocument());
+
+  expect(within(screen.getByTestId('emitter-row-emitter-4')).getByText('Hidden')).toBeInTheDocument();
+});
+
+test('toggling the rule switch PATCHes {match_enabled: false} and shows a disabled helper', async () => {
+  const disabled: Emitter = { ...EMITTER_CLIENT, match_enabled: false };
+  const fetchMock = mockRoutes({
+    'GET /api/emitters': () => [EMITTER_CLIENT],
+    'GET /api/entities': () => [],
+    'PATCH /api/emitters/emitter-3': () => disabled,
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Emitters />, { wrapper });
+  await waitFor(() => expect(screen.getByTestId('emitter-row-emitter-3')).toBeInTheDocument());
+
+  const row = screen.getByTestId('emitter-row-emitter-3');
+  const ruleSwitch = within(row).getByRole('switch', { name: /rule enabled/i });
+  expect(ruleSwitch).toBeChecked();
+
+  fireEvent.click(ruleSwitch);
+
+  await waitFor(() =>
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/emitters/emitter-3',
+      expect.objectContaining({ method: 'PATCH' }),
+    ),
+  );
+  const patchCall = fetchMock.mock.calls.find(
+    ([url, init]) => String(url) === '/api/emitters/emitter-3' && init?.method === 'PATCH',
+  );
+  expect(patchCall).toBeDefined();
+  const [, init] = patchCall as [RequestInfo | URL, RequestInit];
+  expect(JSON.parse(init.body as string)).toEqual({ match_enabled: false });
+});
+
+test('a disabled rule shows a helper explaining new matches will not auto-attach', async () => {
+  const fetchMock = mockRoutes({
+    'GET /api/emitters': () => [EMITTER_AP], // EMITTER_AP has match_enabled: false
+    'GET /api/entities': () => [],
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Emitters />, { wrapper });
+  await waitFor(() => expect(screen.getByTestId('emitter-row-emitter-4')).toBeInTheDocument());
+
+  const row = screen.getByTestId('emitter-row-emitter-4');
+  expect(within(row).getByText(/won.t auto-attach/i)).toBeInTheDocument();
+});
+
+test('manual randomized override: toggling it PATCHes the full attributes object with randomized_mac flipped', async () => {
+  const flipped: Emitter = {
+    ...EMITTER_CLIENT,
+    attributes: { ...EMITTER_CLIENT.attributes, randomized_mac: false },
+  };
+  const fetchMock = mockRoutes({
+    'GET /api/emitters': () => [EMITTER_CLIENT],
+    'GET /api/entities': () => [],
+    'PATCH /api/emitters/emitter-3': () => flipped,
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Emitters />, { wrapper });
+  await waitFor(() => expect(screen.getByTestId('emitter-row-emitter-3')).toBeInTheDocument());
+
+  const row = screen.getByTestId('emitter-row-emitter-3');
+  fireEvent.click(within(row).getByRole('button', { name: /mark as not randomized/i }));
+
+  await waitFor(() =>
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/emitters/emitter-3',
+      expect.objectContaining({ method: 'PATCH' }),
+    ),
+  );
+  const patchCall = fetchMock.mock.calls.find(
+    ([url, init]) => String(url) === '/api/emitters/emitter-3' && init?.method === 'PATCH',
+  );
+  expect(patchCall).toBeDefined();
+  const [, init] = patchCall as [RequestInfo | URL, RequestInit];
+  expect(JSON.parse(init.body as string)).toEqual({
+    attributes: { src_mac: 'aa:bb:cc:dd:ee:ff', randomized_mac: false },
+  });
+});
+
+test('expanded detail shows the match_criteria rule for an auto-classified emitter', async () => {
+  const fetchMock = mockRoutes({
+    'GET /api/emitters': () => [EMITTER_CLIENT],
+    'GET /api/entities': () => [],
+    'GET /api/emissions': () => ({ items: [], total: 0 }),
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Emitters />, { wrapper });
+  await waitFor(() => expect(screen.getByTestId('emitter-row-emitter-3')).toBeInTheDocument());
+
+  fireEvent.click(screen.getByRole('button', { name: 'WiFi Client aa:bb:cc:dd:ee:ff' }));
+
+  const detail = await screen.findByTestId('emitter-detail-emitter-3');
+  expect(within(detail).getByText(/src_mac eq aa:bb:cc:dd:ee:ff/i)).toBeInTheDocument();
 });

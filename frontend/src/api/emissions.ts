@@ -13,7 +13,11 @@ import { get } from './client';
  * `kind` (for `"wifi"`: `bssid`/`ssid`/`channel`, per
  * `fluxfang-core::catalog`'s wifi field list) — left as `Record<string,
  * unknown>` rather than a typed union since this page only ever reads a few
- * known-optional keys out of it defensively. */
+ * known-optional keys out of it defensively. Phase A's parser accuracy fix
+ * adds `src_mac` (the probing client's MAC) alongside `bssid` (the AP) —
+ * beacons populate `bssid` and leave `src_mac` absent; probe requests
+ * populate `src_mac` and leave `bssid` absent (see the emitter
+ * auto-classification design doc's "Parser accuracy fix" section). */
 export interface Emission {
   id: string;
   data_source_id: string | null;

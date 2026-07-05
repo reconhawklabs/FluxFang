@@ -91,11 +91,29 @@ const EMITTER_1: Emitter = {
   id: 'emitter-1',
   name: 'My Router',
   type: null,
+  emitter_type: null,
+  attributes: {},
+  match_enabled: true,
+  type_label: null,
+  category: null,
   entity_id: null,
   match_criteria: {},
   first_seen_at: null,
   last_seen_at: null,
   created_at: '2026-07-01T00:00:00Z',
+};
+
+const EMISSION_PROBE: Emission = {
+  id: 'e3',
+  data_source_id: 'ds1',
+  emitter_id: null,
+  session_id: null,
+  observed_at: '2026-07-05T12:10:00Z',
+  signal_strength: -60,
+  lon: null,
+  lat: null,
+  kind: 'wifi',
+  payload: { src_mac: 'de:ad:be:ef:00:01', frame_type: 'probe_request' },
 };
 
 test('renders emission rows (bssid/channel/rssi) and the total from a mocked response', async () => {
@@ -114,7 +132,8 @@ test('renders emission rows (bssid/channel/rssi) and the total from a mocked res
   expect(within(row1).getByText('aa:bb:cc:dd:ee:ff')).toHaveClass('font-mono');
   expect(within(row1).getByText('6')).toBeInTheDocument();
   expect(within(row1).getByText('-55')).toBeInTheDocument();
-  expect(within(row1).getByText('—')).toBeInTheDocument(); // unassigned emitter column
+  expect(within(row1).getByTestId('emission-src-mac')).toHaveTextContent('—'); // no src_mac in payload
+  expect(within(row1).getAllByText('—').length).toBeGreaterThanOrEqual(2); // src mac + unassigned emitter column
 
   const row2 = screen.getByTestId('emission-row-e2');
   expect(within(row2).getByText('My Router')).toBeInTheDocument();
@@ -222,4 +241,37 @@ test('a filter change (unassigned-only) refetches emissions with the matching qu
     });
     expect(call).toBeDefined();
   });
+});
+
+// --- Phase B: Src MAC column (emitter auto-classification design doc) ---
+
+test('a probe-request emission (payload.src_mac, no bssid) renders the Src MAC column monospace and BSSID as "—"', async () => {
+  const fetchMock = mockRoutes({
+    'GET /api/emissions': () => ({ items: [EMISSION_PROBE], total: 1 }),
+    'GET /api/emitters': () => [EMITTER_1],
+    'GET /api/catalog/wifi': () => WIFI_CATALOG,
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Emissions />, { wrapper });
+  await waitFor(() => expect(screen.getByTestId('emission-row-e3')).toBeInTheDocument());
+
+  const row = screen.getByTestId('emission-row-e3');
+  expect(within(row).getByText('de:ad:be:ef:00:01')).toHaveClass('font-mono');
+});
+
+test('a beacon emission (payload.bssid, no src_mac) renders "—" in the Src MAC column', async () => {
+  const fetchMock = mockRoutes({
+    'GET /api/emissions': () => ({ items: [EMISSION_1], total: 1 }),
+    'GET /api/emitters': () => [EMITTER_1],
+    'GET /api/catalog/wifi': () => WIFI_CATALOG,
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Emissions />, { wrapper });
+  await waitFor(() => expect(screen.getByTestId('emission-row-e1')).toBeInTheDocument());
+
+  const row = screen.getByTestId('emission-row-e1');
+  const srcMacCell = within(row).getByTestId('emission-src-mac');
+  expect(srcMacCell).toHaveTextContent('—');
 });
