@@ -25,10 +25,16 @@ fn parses_bssid_ssid_rssi_from_fixture() {
 
     let obs = parse_frame(pkt).expect("a management frame");
     assert_eq!(obs.frame_type, "beacon");
-    assert_eq!(obs.bssid, "00:11:22:33:44:55");
+    assert_eq!(obs.bssid, Some("00:11:22:33:44:55".to_string()));
+    assert_eq!(obs.src_mac, None);
     assert_eq!(obs.ssid, Some("FluxTest".to_string()));
     assert_eq!(obs.channel, Some(6));
     assert_eq!(obs.signal_strength, Some(-42));
+
+    let raw = obs.into_raw_observation(chrono::Utc::now());
+    assert_eq!(raw.payload["bssid"], "00:11:22:33:44:55");
+    assert!(raw.payload.get("src_mac").is_none() || raw.payload["src_mac"].is_null());
+    assert_eq!(raw.payload["frame_type"], "beacon");
 }
 
 #[test]
@@ -38,13 +44,20 @@ fn parses_probe_request_from_fixture() {
 
     let obs = parse_frame(pkt).expect("a management frame");
     assert_eq!(obs.frame_type, "probe_request");
-    // Probe requests have no BSSID of their own - `bssid` maps to the
-    // transmitter address (802.11 address 2) instead. See the module docs
-    // on `parse_frame` for why this differs from the beacon case.
-    assert_eq!(obs.bssid, "aa:bb:cc:dd:ee:ff");
+    // Probe requests have no BSSID of their own - the probing client's
+    // transmitter address (802.11 address 2) is the frame's actual identity
+    // and is stored in the distinct `src_mac` field, not overloaded onto
+    // `bssid`. See the module docs on `parse_frame`.
+    assert_eq!(obs.bssid, None);
+    assert_eq!(obs.src_mac, Some("aa:bb:cc:dd:ee:ff".to_string()));
     assert_eq!(obs.ssid, Some("ProbeTest".to_string()));
     assert_eq!(obs.channel, Some(1));
     assert_eq!(obs.signal_strength, Some(-60));
+
+    let raw = obs.into_raw_observation(chrono::Utc::now());
+    assert_eq!(raw.payload["src_mac"], "aa:bb:cc:dd:ee:ff");
+    assert!(raw.payload.get("bssid").is_none() || raw.payload["bssid"].is_null());
+    assert_eq!(raw.payload["frame_type"], "probe_request");
 }
 
 #[test]

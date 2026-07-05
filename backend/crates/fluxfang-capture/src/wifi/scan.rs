@@ -181,7 +181,10 @@ struct PartialBss {
 impl PartialBss {
     fn into_observation(self) -> WifiObservation {
         WifiObservation {
-            bssid: self.bssid,
+            bssid: Some(self.bssid),
+            // `iw scan` only ever surfaces APs (see the `frame_type` comment
+            // below), so there's no client `src_mac` to report here.
+            src_mac: None,
             ssid: self.ssid,
             // Scan results are built from what the adapter's firmware
             // heard from each AP (beacons and/or probe responses) while

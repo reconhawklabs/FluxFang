@@ -18,15 +18,16 @@
 //!   `0x80`): sent periodically by an AP. `bssid` comes from **address 3**
 //!   (bytes 16..22 of the 802.11 header), which for an AP-originated beacon
 //!   is the BSSID (address 2, the transmitter, is normally identical for a
-//!   beacon but address 3 is the canonical BSSID field per 802.11).
+//!   beacon but address 3 is the canonical BSSID field per 802.11). `src_mac`
+//!   is `None` for a beacon.
 //! - **Probe request** (type=0 management, subtype=4 -> first frame-control
 //!   byte `0x40`): sent by a client scanning for APs; it has no BSSID of its
-//!   own (address 3 is typically the wildcard/broadcast address). We use
-//!   **address 2** (the transmitter - the probing client's MAC) as the
-//!   `bssid` field instead, since that's the only stable per-device
-//!   identifier a probe request carries. This is documented as a
-//!   frame-type-dependent mapping, not a general "address 3 is always
-//!   bssid" rule.
+//!   own (address 3 is typically the wildcard/broadcast address). Its actual
+//!   identity is **address 2** (the transmitter - the probing client's MAC),
+//!   which is stored in the distinct **`src_mac`** field rather than
+//!   overloaded onto `bssid` - a probe request has no BSSID at all, so
+//!   `bssid` is `None` for it. This is documented as a frame-type-dependent
+//!   mapping, not a general "address 3 is always bssid" rule.
 //!
 //! Anything else (data frames, control frames, other management subtypes)
 //! returns `None`.
@@ -50,13 +51,19 @@ use serde_json::json;
 /// A single WiFi management-frame observation extracted by [`parse_frame`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct WifiObservation {
-    /// Lowercase colon-separated MAC (`aa:bb:cc:dd:ee:ff`). For a beacon this
-    /// is the AP's BSSID (802.11 address 3); for a probe request this is the
-    /// probing client's transmitter address (802.11 address 2) - see the
-    /// module docs for why the mapping differs by frame type.
-    pub bssid: String,
+    /// The AP's BSSID (802.11 address 3, lowercase colon-separated MAC),
+    /// present only for a beacon. `None` for a probe request, which has no
+    /// BSSID of its own - see the module docs.
+    pub bssid: Option<String>,
+    /// The probing client's transmitter address (802.11 address 2,
+    /// lowercase colon-separated MAC), present only for a probe request.
+    /// `None` for a beacon.
+    pub src_mac: Option<String>,
     /// Decoded SSID tag, if present. `Some("")` means a present-but-empty
-    /// (hidden) SSID; `None` means no SSID tag was found at all.
+    /// (hidden) SSID; `None` means no SSID tag was found at all. For a
+    /// probe request this is the SSID the client is probing *for*
+    /// (informational), not its own identity - the client's identity is
+    /// `src_mac`.
     pub ssid: Option<String>,
     /// `"beacon"` or `"probe_request"`.
     pub frame_type: String,
@@ -73,16 +80,32 @@ impl WifiObservation {
     /// capturer stamps `Utc::now()` at capture time; tests supply a fixed
     /// timestamp) - this function never reads the wall clock itself.
     pub fn into_raw_observation(self, observed_at: DateTime<Utc>) -> RawObservation {
+        // A beacon's payload carries `bssid` (its `src_mac` is always
+        // `None`, so it's simply omitted rather than serialized as an
+        // explicit `null` `src_mac` key); a probe request's payload carries
+        // `src_mac` instead, with no `bssid` key at all - the two frame
+        // types have distinct, non-overlapping identity fields (see module
+        // docs), so we build the payload per-variant rather than always
+        // emitting both keys.
+        let mut payload = json!({
+            "ssid": self.ssid,
+            "frame_type": self.frame_type,
+            "channel": self.channel,
+        });
+        let obj = payload
+            .as_object_mut()
+            .expect("payload is always a JSON object");
+        if let Some(bssid) = self.bssid {
+            obj.insert("bssid".to_string(), json!(bssid));
+        }
+        if let Some(src_mac) = self.src_mac {
+            obj.insert("src_mac".to_string(), json!(src_mac));
+        }
         RawObservation {
             kind: "wifi".to_string(),
             observed_at,
             signal_strength: self.signal_strength,
-            payload: json!({
-                "bssid": self.bssid,
-                "ssid": self.ssid,
-                "frame_type": self.frame_type,
-                "channel": self.channel,
-            }),
+            payload,
         }
     }
 }
@@ -137,13 +160,14 @@ pub fn parse_frame(bytes: &[u8]) -> Option<WifiObservation> {
     };
 
     // addr2 = transmitter (bytes 10..16), addr3 (bytes 16..22). Beacons use
-    // addr3 as the BSSID; probe requests carry no BSSID of their own, so we
-    // use addr2 (the probing client) instead - see the module docs.
+    // addr3 as the BSSID; probe requests carry no BSSID of their own - their
+    // actual identity is addr2 (the probing client), stored in the distinct
+    // `src_mac` field instead - see the module docs.
     let addr2 = &dot11[10..16];
     let addr3 = &dot11[16..22];
-    let bssid = match frame_type {
-        "beacon" => format_mac(addr3),
-        _ => format_mac(addr2),
+    let (bssid, src_mac) = match frame_type {
+        "beacon" => (Some(format_mac(addr3)), None),
+        _ => (None, Some(format_mac(addr2))),
     };
 
     let tagged_start = if frame_type == "beacon" {
@@ -155,6 +179,7 @@ pub fn parse_frame(bytes: &[u8]) -> Option<WifiObservation> {
 
     Some(WifiObservation {
         bssid,
+        src_mac,
         ssid,
         frame_type: frame_type.to_string(),
         channel,

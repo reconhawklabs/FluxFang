@@ -60,7 +60,7 @@ fn parses_all_bss_blocks_in_order() {
 fn parses_normal_24ghz_ap_with_visible_ssid() {
     let obs = parse_iw_scan(SAMPLE);
     let ap = &obs[0];
-    assert_eq!(ap.bssid, "aa:bb:cc:dd:ee:ff");
+    assert_eq!(ap.bssid, Some("aa:bb:cc:dd:ee:ff".to_string()));
     assert_eq!(ap.ssid, Some("FluxTest".to_string()));
     assert_eq!(ap.signal_strength, Some(-42));
     assert_eq!(ap.channel, Some(6));
@@ -71,7 +71,7 @@ fn parses_normal_24ghz_ap_with_visible_ssid() {
 fn parses_associated_5ghz_ap_ignoring_the_associated_suffix() {
     let obs = parse_iw_scan(SAMPLE);
     let ap = &obs[1];
-    assert_eq!(ap.bssid, "11:22:33:44:55:66");
+    assert_eq!(ap.bssid, Some("11:22:33:44:55:66".to_string()));
     assert_eq!(ap.ssid, Some("HomeNet5G".to_string()));
     assert_eq!(ap.signal_strength, Some(-55));
     assert_eq!(ap.channel, Some(36));
@@ -81,7 +81,7 @@ fn parses_associated_5ghz_ap_ignoring_the_associated_suffix() {
 fn hidden_network_with_blank_ssid_line_yields_none_ssid() {
     let obs = parse_iw_scan(SAMPLE);
     let ap = &obs[2];
-    assert_eq!(ap.bssid, "22:33:44:55:66:77");
+    assert_eq!(ap.bssid, Some("22:33:44:55:66:77".to_string()));
     assert_eq!(ap.ssid, None);
     assert_eq!(ap.signal_strength, Some(-71));
     assert_eq!(ap.channel, Some(11));
@@ -91,7 +91,7 @@ fn hidden_network_with_blank_ssid_line_yields_none_ssid() {
 fn unparseable_freq_and_signal_degrade_to_none_without_panicking() {
     let obs = parse_iw_scan(SAMPLE);
     let ap = &obs[3];
-    assert_eq!(ap.bssid, "ff:ff:ff:ff:ff:ff");
+    assert_eq!(ap.bssid, Some("ff:ff:ff:ff:ff:ff".to_string()));
     assert_eq!(ap.ssid, Some("NoFreqNet".to_string()));
     assert_eq!(ap.signal_strength, None);
     assert_eq!(ap.channel, None);
@@ -131,7 +131,7 @@ BSS aa:bb:cc:dd:ee:ff(on wlan0)
         1,
         "expected only the well-formed block: {obs:#?}"
     );
-    assert_eq!(obs[0].bssid, "aa:bb:cc:dd:ee:ff");
+    assert_eq!(obs[0].bssid, Some("aa:bb:cc:dd:ee:ff".to_string()));
     assert_eq!(obs[0].ssid, Some("Real".to_string()));
 }
 
