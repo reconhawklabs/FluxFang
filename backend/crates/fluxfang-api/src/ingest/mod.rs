@@ -49,6 +49,7 @@
 //! of rule "specificity"; see [`ingest`]'s doc comment for the full
 //! rationale and the regression test that pins this exact ordering.
 
+pub mod alerts;
 pub mod session;
 
 use std::sync::Arc;
@@ -70,9 +71,9 @@ use session::SessionManager;
 /// - `Emission` fires once per [`ingest`] call, carrying the emission in
 ///   its final state (i.e. *after* auto-attach has possibly set
 ///   `emitter_id`).
-/// - `Notification` is for Task 5.3's alert evaluation to publish when an
-///   alert fires; nothing in this task produces one, but the variant is
-///   defined now so 5.3 has a stable, already-wired channel to publish on.
+/// - `Notification` is published by Task 5.3's [`alerts::fire_rule`] once
+///   per `notification` row it persists, whenever an alert fires -- see
+///   that module for the full evaluation/dispatch/broadcast pipeline.
 ///
 /// Serde-tagged (`{"type": "emission", "data": {...}}`) so a WS client can
 /// dispatch on `type` without inspecting `data`'s shape — the same tagged-
@@ -89,6 +90,13 @@ pub struct IngestCtx {
     pub pool: PgPool,
     pub sessions: Arc<SessionManager>,
     pub events: broadcast::Sender<Event>,
+    /// AES-256-GCM key used to decrypt `alert_method.config_encrypted` when
+    /// [`alerts::fire_rule`] dispatches a fired alert's notification (Task
+    /// 5.3). Production wiring (loading `FLUXFANG_SECRET_KEY` via
+    /// `fluxfang_core::secrets::key_from_base64` into `AppState`/this
+    /// struct) is Task 6.2's job; this struct just needs the parsed 32
+    /// bytes, however the caller obtained them.
+    pub secret_key: [u8; 32],
 }
 
 /// Turn one capture-layer [`RawObservation`] into a persisted, auto-attached,
@@ -120,14 +128,16 @@ pub struct IngestCtx {
 ///    failing the whole ingest — one operator's malformed rule must not
 ///    break auto-attach for every other emitter/emission. No match leaves
 ///    the emission unassigned.
-/// 4. Seams for later tasks, both operating on the now-finalized emission:
-///    - Task 5.3: `evaluate_alerts(ctx, &emission).await?` — checks
-///      `alert_rule`s targeting this emission's emitter/entity (or a
-///      `detected` trigger) and dispatches+persists any resulting
-///      `Notification`s, publishing them via `Event::Notification` on
-///      `ctx.events` itself.
-///    - Task 5.4: `update_target_zones(ctx, &emission).await?` — zone-
-///      membership enter/leave transitions for the emission's subject.
+/// 4. `alerts::evaluate_alerts(ctx, &emission).await` (Task 5.3) — checks
+///    every enabled `alert_rule` with a `detected` trigger against this
+///    now-finalized emission's emitter/entity (+ optional `content_match`),
+///    dispatching+persisting+broadcasting any resulting `Notification`s
+///    itself (see that module for the full pipeline). Returns `()` and
+///    self-contains every error — a problem evaluating alerts must never
+///    prevent the emission itself from finishing its own insert/broadcast.
+///    Task 5.4's `update_target_zones(ctx, &emission).await` (zone-
+///    membership enter/leave transitions) will be added as a sibling call
+///    here, operating on the same finalized emission.
 /// 5. Broadcast `Event::Emission(emission)` on `ctx.events`. `send` returns
 ///    `Err` when there are currently no subscribers (nobody has a WS
 ///    connection open) — an expected, benign state, not a failure of
@@ -180,7 +190,7 @@ pub async fn ingest(
         }
     }
 
-    // Task 5.3: evaluate_alerts(ctx, &emission).await?;
+    alerts::evaluate_alerts(ctx, &emission).await;
     // Task 5.4: update_target_zones(ctx, &emission).await?;
 
     // No subscribers is a normal, expected state (see doc comment above) --
@@ -373,6 +383,7 @@ mod tests {
             pool: pool.clone(),
             sessions: Arc::new(manager),
             events: events_tx,
+            secret_key: [0x11u8; 32],
         };
 
         let obs = wifi_obs("aa:bb:cc:dd:ee:ff", base);
@@ -427,6 +438,7 @@ mod tests {
             pool,
             sessions: Arc::new(manager),
             events: events_tx,
+            secret_key: [0x11u8; 32],
         };
 
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
@@ -470,6 +482,7 @@ mod tests {
             pool: pool.clone(),
             sessions: Arc::new(manager),
             events: events_tx,
+            secret_key: [0x11u8; 32],
         };
 
         let emission = ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", base))
@@ -546,6 +559,7 @@ mod tests {
             pool: pool.clone(),
             sessions: Arc::new(manager),
             events: events_tx,
+            secret_key: [0x11u8; 32],
         };
 
         let emission = ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", base))
@@ -555,6 +569,68 @@ mod tests {
             emission.emitter_id,
             Some(first.id),
             "the earlier-created emitter must win even though the later one's rule is also a match"
+        );
+    }
+
+    /// Carried over from Task 5.2 (its report flagged this as "code correct,
+    /// untested"): a malformed `match_criteria` emitter sits alongside a
+    /// valid one -- `ingest` must still succeed overall and attach to the
+    /// valid emitter, not abort auto-attach (or the whole ingest) just
+    /// because one operator's rule fails to parse as a `Rule`.
+    #[tokio::test]
+    async fn ingest_skips_emitter_with_malformed_match_criteria_and_still_attaches_to_valid_one() {
+        let pool = fresh_pool().await;
+        let ds = seed_wifi_source(&pool).await;
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+
+        // Created first (and therefore listed/evaluated first by auto-
+        // attach's created_at ASC order) but its match_criteria isn't a
+        // valid `Rule` at all -- must be treated as non-matching, not a
+        // fatal error.
+        EmitterRepo::insert(
+            &pool,
+            NewEmitter {
+                name: "broken emitter".to_string(),
+                type_: Some("wifi".to_string()),
+                entity_id: None,
+                match_criteria: serde_json::json!({"this": "is not a Rule"}),
+            },
+        )
+        .await
+        .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let valid = EmitterRepo::insert(
+            &pool,
+            NewEmitter {
+                name: "valid emitter".to_string(),
+                type_: Some("wifi".to_string()),
+                entity_id: None,
+                match_criteria: serde_json::json!({
+                    "match": "all",
+                    "conditions": [{"field": "bssid", "op": "eq", "value": "aa:bb:cc:dd:ee:ff"}]
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+        let (events_tx, _rx) = broadcast::channel(8);
+        let ctx = IngestCtx {
+            pool: pool.clone(),
+            sessions: Arc::new(manager),
+            events: events_tx,
+            secret_key: [0x11u8; 32],
+        };
+
+        let emission = ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", base))
+            .await
+            .expect("ingest should succeed despite the malformed emitter rule");
+        assert_eq!(
+            emission.emitter_id,
+            Some(valid.id),
+            "auto-attach should skip the malformed rule and still attach to the valid emitter"
         );
     }
 }
