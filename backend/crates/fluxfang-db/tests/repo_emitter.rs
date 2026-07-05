@@ -2,6 +2,7 @@
 
 mod common;
 
+use chrono::{Duration, TimeZone, Utc};
 use common::{fresh_pool, seed_session, seed_wifi_source};
 use fluxfang_core::{Condition, MatchMode, Op, Rule};
 use fluxfang_db::models::{NewEmission, NewEmitter, NewEntity};
@@ -155,6 +156,56 @@ async fn attach_emissions_matching_assigns_only_matching_unassigned_wifi_emissio
     let refreshed = EmitterRepo::get(&pool, emitter.id).await.unwrap().unwrap();
     assert!(refreshed.first_seen_at.is_some());
     assert!(refreshed.last_seen_at.is_some());
+}
+
+#[tokio::test]
+async fn touch_seen_populates_both_columns_from_null() {
+    let pool = fresh_pool().await;
+    let emitter = EmitterRepo::insert(&pool, new_emitter("AP")).await.unwrap();
+    assert_eq!(emitter.first_seen_at, None);
+    assert_eq!(emitter.last_seen_at, None);
+
+    // A whole-second timestamp (not `Utc::now()`): `timestamptz` only has
+    // microsecond precision, while `DateTime<Utc>::now()` often carries
+    // sub-microsecond (nanosecond) precision that Postgres would silently
+    // truncate on round-trip, making an exact `==` comparison flaky.
+    let at = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+    let touched = EmitterRepo::touch_seen(&pool, emitter.id, at)
+        .await
+        .unwrap();
+    assert_eq!(touched.first_seen_at, Some(at));
+    assert_eq!(touched.last_seen_at, Some(at));
+}
+
+#[tokio::test]
+async fn touch_seen_widens_the_window_in_either_direction() {
+    let pool = fresh_pool().await;
+    let emitter = EmitterRepo::insert(&pool, new_emitter("AP")).await.unwrap();
+
+    // See the precision note above for why this uses a whole-second
+    // timestamp instead of `Utc::now()`.
+    let mid = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+    EmitterRepo::touch_seen(&pool, emitter.id, mid)
+        .await
+        .unwrap();
+
+    // A later observation advances last_seen_at but must not touch
+    // first_seen_at.
+    let later = mid + Duration::hours(1);
+    let after_later = EmitterRepo::touch_seen(&pool, emitter.id, later)
+        .await
+        .unwrap();
+    assert_eq!(after_later.first_seen_at, Some(mid));
+    assert_eq!(after_later.last_seen_at, Some(later));
+
+    // An earlier (e.g. out-of-order/backfilled) observation pulls
+    // first_seen_at back but must not touch last_seen_at.
+    let earlier = mid - Duration::hours(1);
+    let after_earlier = EmitterRepo::touch_seen(&pool, emitter.id, earlier)
+        .await
+        .unwrap();
+    assert_eq!(after_earlier.first_seen_at, Some(earlier));
+    assert_eq!(after_earlier.last_seen_at, Some(later));
 }
 
 #[tokio::test]

@@ -33,9 +33,20 @@
 //! A [`fluxfang_core::RuleSqlError`] from the translator (unknown field,
 //! mistyped value, or op/field mismatch) is surfaced as
 //! `Err(EmitterRuleError::Rule)` rather than silently skipping the backfill.
+//!
+//! ## Per-emission seen-window update (`touch_seen`)
+//!
+//! [`EmitterRepo::touch_seen`] is the single-row counterpart used by
+//! `fluxfang-api::ingest`'s auto-attach (Task 5.2): when one freshly-inserted
+//! emission is matched to an emitter (via in-process [`fluxfang_core::rule::eval`],
+//! not the SQL translator above), this widens that emitter's
+//! `first_seen_at`/`last_seen_at` by exactly that one emission's
+//! `observed_at`, with the same `LEAST`/`GREATEST`-against-`COALESCE` idiom
+//! `attach_emissions_matching` uses for its bulk `MIN`/`MAX` refresh.
 
 use std::fmt;
 
+use chrono::{DateTime, Utc};
 use fluxfang_core::{catalog_for, conditions_to_sql_checked, Rule, RuleSqlError};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -140,6 +151,33 @@ impl EmitterRepo {
         sqlx::query_as::<_, Emitter>(&sql)
             .bind(emitter_id)
             .bind(match_criteria)
+            .fetch_one(pool)
+            .await
+    }
+
+    /// Widen `emitter_id`'s `first_seen_at`/`last_seen_at` window to include
+    /// a single `observed_at` -- the per-emission counterpart to
+    /// `attach_emissions_matching`'s bulk `MIN`/`MAX` refresh, used by
+    /// `fluxfang-api::ingest`'s auto-attach right after one new emission is
+    /// assigned to this emitter. `LEAST`/`GREATEST` against
+    /// `COALESCE(first_seen_at/last_seen_at, $2)` widens the existing window
+    /// in either direction (an emission can arrive out of order) and also
+    /// handles the first-ever-attach case, where both columns start `NULL`,
+    /// in the same statement.
+    pub async fn touch_seen(
+        pool: &PgPool,
+        emitter_id: Uuid,
+        observed_at: DateTime<Utc>,
+    ) -> Result<Emitter, sqlx::Error> {
+        let sql = format!(
+            "UPDATE emitter SET \
+                 first_seen_at = LEAST(COALESCE(first_seen_at, $2), $2), \
+                 last_seen_at = GREATEST(COALESCE(last_seen_at, $2), $2) \
+             WHERE id = $1 RETURNING {EMITTER_COLUMNS}"
+        );
+        sqlx::query_as::<_, Emitter>(&sql)
+            .bind(emitter_id)
+            .bind(observed_at)
             .fetch_one(pool)
             .await
     }

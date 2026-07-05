@@ -50,6 +50,38 @@ async fn insert_and_get_emission_roundtrips() {
 }
 
 #[tokio::test]
+async fn set_emitter_assigns_and_persists() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+    let emission = insert_wifi(&pool, ds, session, "aa:bb:cc:dd:ee:ff", 6).await;
+    assert_eq!(emission.emitter_id, None);
+
+    let emitter = fluxfang_db::EmitterRepo::insert(
+        &pool,
+        fluxfang_db::models::NewEmitter {
+            name: "AP".to_string(),
+            type_: None,
+            entity_id: None,
+            match_criteria: serde_json::json!({}),
+        },
+    )
+    .await
+    .unwrap();
+
+    let updated = EmissionRepo::set_emitter(&pool, emission.id, emitter.id)
+        .await
+        .unwrap();
+    assert_eq!(updated.emitter_id, Some(emitter.id));
+
+    let got = EmissionRepo::get(&pool, emission.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.emitter_id, Some(emitter.id));
+}
+
+#[tokio::test]
 async fn get_returns_none_for_unknown_id() {
     let pool = fresh_pool().await;
     let got = EmissionRepo::get(&pool, Uuid::new_v4()).await.unwrap();

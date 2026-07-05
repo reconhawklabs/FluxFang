@@ -1,8 +1,560 @@
 //! Ingest: turns raw capture-layer data into stored, session-bounded rows.
 //!
-//! Task 5.1 adds [`session::SessionManager`] (session bounding + the
-//! host's own GPS trajectory log). Later tasks add the emission ingest
-//! pipeline (5.2), alert evaluation (5.3), and zone-membership tracking
-//! (5.4) alongside it.
+//! Task 5.1 added [`session::SessionManager`] (session bounding + the
+//! host's own GPS trajectory log). Task 5.2 (this module's top level) adds
+//! the emission ingest pipeline: [`ingest`] turns one
+//! `fluxfang_capture::RawObservation` into a persisted, auto-attached,
+//! broadcast [`fluxfang_db::models::Emission`]. Later tasks add alert
+//! evaluation (5.3) and zone-membership tracking (5.4) as calls inside
+//! [`ingest`] itself — see the seam comments in its body.
+//!
+//! ## `Event` and `IngestCtx`
+//!
+//! [`Event`] is the one type published on [`IngestCtx::events`]
+//! (a `tokio::sync::broadcast` channel) for every live pipeline occurrence
+//! this backend produces — an `Emission` from [`ingest`] itself, or (from
+//! Task 5.3, not implemented here) a `Notification` when an alert fires.
+//! It lives in this module (not a separate `events`/`ws` module) because
+//! nothing outside `fluxfang-api` needs it yet: Task 7.1's WebSocket
+//! handler is itself part of this crate and can reach it as
+//! `crate::ingest::Event`.
+//!
+//! [`IngestCtx`] bundles [`ingest`]'s dependencies (the pool, the active
+//! [`session::SessionManager`], and the broadcast sender). Kept minimal per
+//! this task's YAGNI scope — Task 5.3 will need to add a secret key here
+//! (to decrypt `alert_method.config_encrypted` when dispatching a fired
+//! alert's notification), not built now since nothing in this task needs
+//! it.
+//!
+//! ## No active session
+//!
+//! Capture is only ever meant to run while a `survey_session` is open —
+//! [`session::SessionManager::open`] is what starts a capture run in the
+//! first place (Task 5.1; Task 6.2 wires the actual start-capture
+//! endpoint). So "no active session" inside [`ingest`] means the caller
+//! invoked it outside that lifecycle, which is a caller bug, not a
+//! transient condition to paper over silently. [`ingest`] returns `Err`
+//! rather than inserting with a fabricated/absent session — see its own
+//! doc comment for the full rationale.
+//!
+//! ## Auto-attach: first match wins
+//!
+//! [`ingest`] loads every `emitter` via `EmitterRepo::list` (which orders
+//! `ORDER BY created_at ASC`) and evaluates each one's `match_criteria`
+//! (parsed as a [`fluxfang_core::rule::Rule`]) against the new emission's
+//! `payload` via [`fluxfang_core::rule::eval`], in that order, stopping at
+//! the **first** emitter whose rule matches — later emitters, even ones
+//! that would also match, are never evaluated. This is a deliberate,
+//! simple tie-break (oldest-created-emitter-wins) rather than any notion
+//! of rule "specificity"; see [`ingest`]'s doc comment for the full
+//! rationale and the regression test that pins this exact ordering.
 
 pub mod session;
+
+use std::sync::Arc;
+
+use fluxfang_capture::RawObservation;
+use fluxfang_core::rule::{eval, Rule};
+use fluxfang_db::models::{Emission, NewEmission, Notification};
+use fluxfang_db::{EmissionRepo, EmitterRepo};
+use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
+use tokio::sync::broadcast;
+use uuid::Uuid;
+
+use session::SessionManager;
+
+/// A live pipeline event, broadcast on [`IngestCtx::events`] for Task 7.1's
+/// WebSocket handler to fan out to connected clients.
+///
+/// - `Emission` fires once per [`ingest`] call, carrying the emission in
+///   its final state (i.e. *after* auto-attach has possibly set
+///   `emitter_id`).
+/// - `Notification` is for Task 5.3's alert evaluation to publish when an
+///   alert fires; nothing in this task produces one, but the variant is
+///   defined now so 5.3 has a stable, already-wired channel to publish on.
+///
+/// Serde-tagged (`{"type": "emission", "data": {...}}`) so a WS client can
+/// dispatch on `type` without inspecting `data`'s shape — the same tagged-
+/// enum convention `fluxfang_api::notify::DeliveryStatus` already uses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub enum Event {
+    Emission(Emission),
+    Notification(Notification),
+}
+
+/// Shared dependencies for [`ingest`].
+pub struct IngestCtx {
+    pub pool: PgPool,
+    pub sessions: Arc<SessionManager>,
+    pub events: broadcast::Sender<Event>,
+}
+
+/// Turn one capture-layer [`RawObservation`] into a persisted, auto-attached,
+/// broadcast [`Emission`].
+///
+/// `data_source_id` identifies which configured `data_source` produced
+/// `obs` — a `RawObservation` is hardware-agnostic and carries no such id
+/// itself (see `fluxfang_capture`'s module docs), so the caller (Task 6.2's
+/// start-capture, which owns the mapping from a running capturer to its
+/// `data_source` row) supplies it explicitly.
+///
+/// ## Steps
+///
+/// 1. Build a `NewEmission`: `session_id` from
+///    `ctx.sessions.current_session_id()` — required; see the module docs'
+///    "No active session" section for why a missing session is an `Err`,
+///    not a skip. `location` from `ctx.sessions.latest_fix()` (`None` if no
+///    fix has arrived yet this session). `observed_at`/`signal_strength`/
+///    `kind`/`payload` copied from `obs`. `emitter_id` starts `None`.
+/// 2. Insert it (`EmissionRepo::insert`).
+/// 3. **Auto-attach** (see module docs for the full first-match-wins
+///    rationale): load every emitter, evaluate each one's `match_criteria`
+///    rule against the emission's `payload` in `EmitterRepo::list`'s
+///    `created_at ASC` order, and on the first match, `EmissionRepo::set_emitter`
+///    stamps the emission's `emitter_id` and `EmitterRepo::touch_seen`
+///    widens that emitter's `first_seen_at`/`last_seen_at` to include this
+///    emission's `observed_at`. An emitter whose `match_criteria` fails to
+///    parse as a `Rule` is treated as non-matching (skipped) rather than
+///    failing the whole ingest — one operator's malformed rule must not
+///    break auto-attach for every other emitter/emission. No match leaves
+///    the emission unassigned.
+/// 4. Seams for later tasks, both operating on the now-finalized emission:
+///    - Task 5.3: `evaluate_alerts(ctx, &emission).await?` — checks
+///      `alert_rule`s targeting this emission's emitter/entity (or a
+///      `detected` trigger) and dispatches+persists any resulting
+///      `Notification`s, publishing them via `Event::Notification` on
+///      `ctx.events` itself.
+///    - Task 5.4: `update_target_zones(ctx, &emission).await?` — zone-
+///      membership enter/leave transitions for the emission's subject.
+/// 5. Broadcast `Event::Emission(emission)` on `ctx.events`. `send` returns
+///    `Err` when there are currently no subscribers (nobody has a WS
+///    connection open) — an expected, benign state, not a failure of
+///    `ingest` itself, so the result is deliberately discarded.
+/// 6. Return the stored (and possibly auto-attached) emission.
+pub async fn ingest(
+    ctx: &IngestCtx,
+    data_source_id: Uuid,
+    obs: RawObservation,
+) -> anyhow::Result<Emission> {
+    let session_id = ctx.sessions.current_session_id().ok_or_else(|| {
+        anyhow::anyhow!(
+            "ingest called with no active survey_session -- capture must only run while a \
+             SessionManager-bounded session is open (see this module's docs)"
+        )
+    })?;
+    let location = ctx.sessions.latest_fix().map(|fix| (fix.lon, fix.lat));
+
+    let new = NewEmission {
+        data_source_id: Some(data_source_id),
+        emitter_id: None,
+        session_id,
+        observed_at: obs.observed_at,
+        signal_strength: obs.signal_strength,
+        location,
+        kind: obs.kind,
+        payload: obs.payload,
+    };
+
+    let mut emission = EmissionRepo::insert(&ctx.pool, new).await?;
+
+    // Auto-attach: first match wins, in EmitterRepo::list's created_at ASC
+    // order (see module docs).
+    let emitters = EmitterRepo::list(&ctx.pool).await?;
+    for emitter in emitters {
+        let rule: Rule = match serde_json::from_value(emitter.match_criteria.clone()) {
+            Ok(rule) => rule,
+            // Malformed match_criteria: treat this emitter as non-matching
+            // rather than failing the whole ingest over one bad rule.
+            Err(_) => continue,
+        };
+        // `fluxfang_core::rule::eval` is pure, in-memory structural
+        // matching of a JSON payload against a `Rule`'s conditions -- it
+        // never parses or executes code (see that function's own doc
+        // comment's explicit NOTE). Not JS/Python `eval`.
+        if eval(&rule, &emission.payload) {
+            emission = EmissionRepo::set_emitter(&ctx.pool, emission.id, emitter.id).await?;
+            EmitterRepo::touch_seen(&ctx.pool, emitter.id, emission.observed_at).await?;
+            break;
+        }
+    }
+
+    // Task 5.3: evaluate_alerts(ctx, &emission).await?;
+    // Task 5.4: update_target_zones(ctx, &emission).await?;
+
+    // No subscribers is a normal, expected state (see doc comment above) --
+    // deliberately not propagated as an ingest failure.
+    let _ = ctx.events.send(Event::Emission(emission.clone()));
+
+    Ok(emission)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use fluxfang_capture::mock::MockGps;
+    use fluxfang_capture::{GpsFix, GpsSource};
+    use fluxfang_db::models::{NewDataSource, NewEmitter};
+    use fluxfang_db::DataSourceRepo;
+    use session::{no_op_hook, SessionManagerConfig};
+    use sqlx::postgres::PgPoolOptions;
+    use sqlx::Executor;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+    use tokio::sync::OnceCell;
+
+    /// A `GpsSource` backed by a channel, letting tests control exactly
+    /// when a fix arrives without racing the source's own exhaustion (a
+    /// finite `MockGps` track would close the session as soon as it drains,
+    /// which every test here needs to stay open through). Duplicated from
+    /// `session::tests::ChannelGps` rather than reused: that type is
+    /// private to `session`'s own test module.
+    struct ChannelGps(mpsc::UnboundedReceiver<GpsFix>);
+
+    #[async_trait]
+    impl GpsSource for ChannelGps {
+        async fn next_fix(&mut self) -> Option<GpsFix> {
+            self.0.recv().await
+        }
+    }
+
+    /// See `session::tests`' identical helper for the full isolation
+    /// rationale (one Postgres schema per test) -- duplicated here since
+    /// that module's test-only helpers are private to it.
+    static SWEEP_DONE: OnceCell<()> = OnceCell::const_new();
+
+    async fn sweep_leftover_test_schemas(database_url: &str) {
+        let Ok(admin) = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(database_url)
+            .await
+        else {
+            return;
+        };
+
+        let schemas: Result<Vec<(String,)>, _> = sqlx::query_as(
+            "SELECT schema_name FROM information_schema.schemata \
+             WHERE schema_name LIKE 'test\\_%' ESCAPE '\\'",
+        )
+        .fetch_all(&admin)
+        .await;
+
+        if let Ok(schemas) = schemas {
+            for (schema,) in schemas {
+                let _ = admin
+                    .execute(format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE"#).as_str())
+                    .await;
+            }
+        }
+        admin.close().await;
+    }
+
+    async fn fresh_pool() -> PgPool {
+        let database_url = std::env::var("DATABASE_URL")
+            .expect("DATABASE_URL must be set for fluxfang-api ingest tests");
+
+        SWEEP_DONE
+            .get_or_init(|| sweep_leftover_test_schemas(&database_url))
+            .await;
+
+        let schema = format!("test_{}", Uuid::new_v4().simple());
+
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .expect("connect to DATABASE_URL to create test schema");
+        admin
+            .execute(format!(r#"CREATE SCHEMA "{schema}""#).as_str())
+            .await
+            .expect("create isolated test schema");
+        admin.close().await;
+
+        let search_path = format!(r#""{schema}", public"#);
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .after_connect(move |conn, _meta| {
+                let search_path = search_path.clone();
+                Box::pin(async move {
+                    conn.execute(format!("SET search_path TO {search_path}").as_str())
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(&database_url)
+            .await
+            .expect("connect to DATABASE_URL with isolated search_path");
+
+        fluxfang_db::run_migrations(&pool)
+            .await
+            .expect("run migrations into isolated test schema");
+
+        pool
+    }
+
+    async fn seed_wifi_source(pool: &PgPool) -> Uuid {
+        DataSourceRepo::insert(pool, NewDataSource::wifi_monitor("wlan0"))
+            .await
+            .expect("seed wifi data_source")
+            .id
+    }
+
+    /// Open a `SessionManager` on a `ChannelGps`, send exactly one `fix`,
+    /// and poll (bounded) until `latest_fix()` reflects it. The sender is
+    /// returned (rather than dropped) so the channel -- and therefore the
+    /// session -- stays open for the rest of the test; only the gap timer
+    /// (5 minutes, never reached in a test) could otherwise close it.
+    async fn session_with_fix(
+        pool: PgPool,
+        fix: GpsFix,
+    ) -> (SessionManager, mpsc::UnboundedSender<GpsFix>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let gps = ChannelGps(rx);
+        let manager = SessionManager::open(
+            pool,
+            gps,
+            SessionManagerConfig {
+                inactivity_gap: Duration::from_secs(5 * 60),
+                write_interval: Duration::ZERO,
+            },
+            no_op_hook(),
+        )
+        .await
+        .expect("open SessionManager");
+
+        tx.send(fix.clone()).expect("send fix over ChannelGps");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while manager.latest_fix().as_ref() != Some(&fix) {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("latest_fix should reflect the sent fix");
+
+        (manager, tx)
+    }
+
+    fn wifi_obs(bssid: &str, observed_at: chrono::DateTime<Utc>) -> RawObservation {
+        RawObservation {
+            kind: "wifi".to_string(),
+            observed_at,
+            signal_strength: Some(-55),
+            payload: serde_json::json!({"bssid": bssid, "channel": 6}),
+        }
+    }
+
+    fn a_fix(at: chrono::DateTime<Utc>) -> GpsFix {
+        GpsFix {
+            at,
+            lon: -122.4,
+            lat: 37.7,
+            altitude: None,
+            speed: None,
+            heading: None,
+            quality: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn ingest_with_no_matching_emitter_persists_unassigned_stamps_session_location_and_broadcasts(
+    ) {
+        let pool = fresh_pool().await;
+        let ds = seed_wifi_source(&pool).await;
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let fix = a_fix(base);
+        let (manager, _tx) = session_with_fix(pool.clone(), fix.clone()).await;
+        let session_id = manager.current_session_id().unwrap();
+
+        let (events_tx, mut events_rx) = broadcast::channel(8);
+        let ctx = IngestCtx {
+            pool: pool.clone(),
+            sessions: Arc::new(manager),
+            events: events_tx,
+        };
+
+        let obs = wifi_obs("aa:bb:cc:dd:ee:ff", base);
+        let emission = ingest(&ctx, ds, obs).await.expect("ingest should succeed");
+
+        assert_eq!(
+            emission.emitter_id, None,
+            "no emitters exist, so unassigned"
+        );
+        assert_eq!(emission.session_id, Some(session_id));
+        assert_eq!(emission.lon, Some(fix.lon));
+        assert_eq!(emission.lat, Some(fix.lat));
+
+        // Persisted, not just returned in-memory.
+        let got = EmissionRepo::get(&pool, emission.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.id, emission.id);
+        assert_eq!(got.emitter_id, None);
+
+        let event = events_rx
+            .try_recv()
+            .expect("expected a broadcast Event::Emission");
+        match event {
+            Event::Emission(e) => assert_eq!(e.id, emission.id),
+            Event::Notification(_) => panic!("expected an Emission event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ingest_returns_err_when_no_session_is_active() {
+        let pool = fresh_pool().await;
+        let ds = seed_wifi_source(&pool).await;
+
+        // An empty, non-looping MockGps track exhausts (returns `None`)
+        // essentially immediately, closing the session -- `join` waits for
+        // exactly that deterministic point.
+        let mut manager = SessionManager::open(
+            pool.clone(),
+            MockGps::new(vec![]),
+            SessionManagerConfig::default(),
+            no_op_hook(),
+        )
+        .await
+        .unwrap();
+        manager.join().await;
+        assert!(manager.current_session_id().is_none());
+
+        let (events_tx, _rx) = broadcast::channel(8);
+        let ctx = IngestCtx {
+            pool,
+            sessions: Arc::new(manager),
+            events: events_tx,
+        };
+
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let err = ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", base))
+            .await
+            .expect_err("no active session must be an error, not a silent skip");
+        assert!(err.to_string().contains("no active survey_session"));
+    }
+
+    #[tokio::test]
+    async fn ingest_auto_attaches_to_matching_emitter_and_advances_last_seen_at() {
+        let pool = fresh_pool().await;
+        let ds = seed_wifi_source(&pool).await;
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+
+        let emitter = EmitterRepo::insert(
+            &pool,
+            NewEmitter {
+                name: "Bob's AP".to_string(),
+                type_: Some("wifi".to_string()),
+                entity_id: None,
+                match_criteria: serde_json::json!({
+                    "match": "all",
+                    "conditions": [{"field": "bssid", "op": "eq", "value": "aa:bb:cc:dd:ee:ff"}]
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Seed an existing, earlier last_seen_at so the ingest below has to
+        // actually *widen* the window, not merely populate it from NULL.
+        let earlier = base - ChronoDuration::days(1);
+        EmitterRepo::touch_seen(&pool, emitter.id, earlier)
+            .await
+            .unwrap();
+
+        let (events_tx, _rx) = broadcast::channel(8);
+        let ctx = IngestCtx {
+            pool: pool.clone(),
+            sessions: Arc::new(manager),
+            events: events_tx,
+        };
+
+        let emission = ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", base))
+            .await
+            .expect("ingest should succeed");
+        assert_eq!(emission.emitter_id, Some(emitter.id));
+
+        let updated = EmitterRepo::get(&pool, emitter.id).await.unwrap().unwrap();
+        assert_eq!(
+            updated.first_seen_at,
+            Some(earlier),
+            "first_seen_at should stay at the earlier timestamp"
+        );
+        assert_eq!(
+            updated.last_seen_at,
+            Some(base),
+            "last_seen_at should have advanced to this emission's observed_at"
+        );
+    }
+
+    #[tokio::test]
+    async fn ingest_first_match_wins_by_emitter_creation_order() {
+        let pool = fresh_pool().await;
+        let ds = seed_wifi_source(&pool).await;
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+
+        // Both emitters would match this observation (channel=6, and the
+        // exact bssid) -- `first` is created (and therefore listed) before
+        // `second`, and must win regardless of which rule looks more
+        // "specific".
+        let first = EmitterRepo::insert(
+            &pool,
+            NewEmitter {
+                name: "first".to_string(),
+                type_: None,
+                entity_id: None,
+                match_criteria: serde_json::json!({
+                    "match": "all",
+                    "conditions": [{"field": "channel", "op": "eq", "value": 6}]
+                }),
+            },
+        )
+        .await
+        .unwrap();
+        // A small real delay guarantees a distinct (later) `created_at` --
+        // `now()` inside a single fast statement could otherwise tie at
+        // microsecond resolution.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let second = EmitterRepo::insert(
+            &pool,
+            NewEmitter {
+                name: "second".to_string(),
+                type_: None,
+                entity_id: None,
+                match_criteria: serde_json::json!({
+                    "match": "all",
+                    "conditions": [{"field": "bssid", "op": "eq", "value": "aa:bb:cc:dd:ee:ff"}]
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Pin the ordering assumption this test relies on, so a clock-tie
+        // regression fails here with a clear message instead of silently
+        // asserting the wrong thing below.
+        let listed = EmitterRepo::list(&pool).await.unwrap();
+        assert_eq!(listed[0].id, first.id);
+        assert_eq!(listed[1].id, second.id);
+
+        let (events_tx, _rx) = broadcast::channel(8);
+        let ctx = IngestCtx {
+            pool: pool.clone(),
+            sessions: Arc::new(manager),
+            events: events_tx,
+        };
+
+        let emission = ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", base))
+            .await
+            .expect("ingest should succeed");
+        assert_eq!(
+            emission.emitter_id,
+            Some(first.id),
+            "the earlier-created emitter must win even though the later one's rule is also a match"
+        );
+    }
+}

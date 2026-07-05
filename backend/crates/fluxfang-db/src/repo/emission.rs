@@ -218,6 +218,28 @@ impl EmissionRepo {
             .await
     }
 
+    /// Assign `emitter_id` to emission `id` -- the single-row counterpart to
+    /// `EmitterRepo::attach_emissions_matching`'s bulk backfill, used by
+    /// `fluxfang-api::ingest`'s auto-attach: right after a fresh emission is
+    /// inserted, the first emitter whose rule matches it gets stamped here.
+    /// Unconditional (no `WHERE emitter_id IS NULL` guard): ingest always
+    /// calls this at most once per emission, immediately after insert,
+    /// before anything else could have raced to assign a different emitter.
+    pub async fn set_emitter(
+        pool: &PgPool,
+        id: Uuid,
+        emitter_id: Uuid,
+    ) -> Result<Emission, sqlx::Error> {
+        let sql = format!(
+            "UPDATE emission SET emitter_id = $2 WHERE id = $1 RETURNING {EMISSION_COLUMNS}"
+        );
+        sqlx::query_as::<_, Emission>(&sql)
+            .bind(id)
+            .bind(emitter_id)
+            .fetch_one(pool)
+            .await
+    }
+
     /// Filter/paginate emissions. Returns the requested page plus `total`,
     /// the count of matching rows ignoring `limit`/`offset` (for pagination
     /// UIs). See the module docs for the WHERE-building and catalog-scoping
