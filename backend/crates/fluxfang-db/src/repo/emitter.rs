@@ -43,6 +43,17 @@
 //! `first_seen_at`/`last_seen_at` by exactly that one emission's
 //! `observed_at`, with the same `LEAST`/`GREATEST`-against-`COALESCE` idiom
 //! `attach_emissions_matching` uses for its bulk `MIN`/`MAX` refresh.
+//!
+//! ## Task 6.4 additions: CRUD + atomic entity creation
+//!
+//! [`EmitterRepo::update_basic`] (name/type) and [`EmitterRepo::delete`]
+//! round out plain CRUD alongside the already-existing `insert`/`list`/`get`.
+//! [`EmitterRepo::create_with_entity`] is the one non-trivial addition: it
+//! creates a new `entity`, a new `emitter` associated to it, and (if a rule
+//! is given) runs the exact same backfill-and-refresh sequence as
+//! `attach_emissions_matching`, all inside a single transaction — see its
+//! own doc comment for why an invalid rule there rolls back the entity
+//! insert too, rather than leaving an orphaned `entity` row behind.
 
 use std::fmt;
 
@@ -51,7 +62,8 @@ use fluxfang_core::{catalog_for, conditions_to_sql_checked, Rule, RuleSqlError};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::models::{Emitter, NewEmitter};
+use crate::models::{Emitter, Entity, NewEmitter, NewEntity};
+use crate::repo::entity::ENTITY_COLUMNS;
 
 pub struct EmitterRepo;
 
@@ -137,6 +149,42 @@ impl EmitterRepo {
             .bind(entity_id)
             .fetch_one(pool)
             .await
+    }
+
+    /// Update `name`/`type` in place. `type_` is `Option<&str>` (not
+    /// `Option<Option<&str>>`): whenever a caller wants to change either
+    /// column, both are re-sent as the row's full desired value (`type_ =
+    /// None` clears it), same "PATCH re-sends the fields it's touching"
+    /// convention `data_sources::update_data_source` uses for `mode`. The
+    /// `fluxfang-api` handler is responsible for resolving "field omitted
+    /// from the request" against the existing row before calling this.
+    pub async fn update_basic(
+        pool: &PgPool,
+        id: Uuid,
+        name: &str,
+        type_: Option<&str>,
+    ) -> Result<Emitter, sqlx::Error> {
+        let sql = format!(
+            "UPDATE emitter SET name = $2, type = $3 WHERE id = $1 RETURNING {EMITTER_COLUMNS}"
+        );
+        sqlx::query_as::<_, Emitter>(&sql)
+            .bind(id)
+            .bind(name)
+            .bind(type_)
+            .fetch_one(pool)
+            .await
+    }
+
+    /// Delete an emitter, returning whether a row was actually removed.
+    /// `emission.emitter_id` is `ON DELETE SET NULL` (see
+    /// `migrations/0001_init.sql`), so its emissions survive, just
+    /// unassigned again.
+    pub async fn delete(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM emitter WHERE id = $1")
+            .bind(id)
+            .execute(pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// Persist a new `match_criteria` rule for `emitter_id`.
@@ -261,4 +309,110 @@ impl EmitterRepo {
         let (count,) = q.fetch_one(pool).await.map_err(EmitterRuleError::Sql)?;
         Ok(count)
     }
+
+    /// Atomically create a new `entity`, create a new `emitter` associated
+    /// to it, and (if `rule` is given) backfill-attach matching emissions —
+    /// all inside one transaction, so a failure at any step (in particular
+    /// an invalid `rule`) leaves neither row behind. Task 6.4's `POST
+    /// /api/emitters/with-entity`.
+    ///
+    /// Mirrors `attach_emissions_matching`'s catalog-check-then-`UPDATE`-
+    /// then-refresh sequence exactly, just run against `&mut *tx` instead of
+    /// `pool` directly so it shares the same transaction as the two
+    /// `INSERT`s. `fluxfang-api` is expected to have already validated
+    /// `rule` (e.g. via a throwaway `conditions_to_sql_checked` call) before
+    /// calling this, but the check here is real, not just defensive: it's
+    /// the same one `attach_emissions_matching` runs, so an invalid rule
+    /// still surfaces as `EmitterRuleError::Rule` and rolls back cleanly
+    /// (the transaction is simply dropped, never committed).
+    pub async fn create_with_entity(
+        pool: &PgPool,
+        new_entity: NewEntity,
+        emitter_name: String,
+        emitter_type: Option<String>,
+        match_criteria: serde_json::Value,
+        rule: Option<&Rule>,
+    ) -> Result<EmitterWithEntity, EmitterRuleError> {
+        let mut tx = pool.begin().await.map_err(EmitterRuleError::Sql)?;
+
+        let entity = sqlx::query_as::<_, Entity>(&format!(
+            "INSERT INTO entity (name, notes) VALUES ($1, $2) RETURNING {ENTITY_COLUMNS}"
+        ))
+        .bind(new_entity.name)
+        .bind(new_entity.notes)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(EmitterRuleError::Sql)?;
+
+        let emitter_sql = format!(
+            "INSERT INTO emitter (name, type, entity_id, match_criteria) \
+             VALUES ($1, $2, $3, $4) \
+             RETURNING {EMITTER_COLUMNS}"
+        );
+        let mut emitter = sqlx::query_as::<_, Emitter>(&emitter_sql)
+            .bind(emitter_name)
+            .bind(emitter_type)
+            .bind(Some(entity.id))
+            .bind(match_criteria)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(EmitterRuleError::Sql)?;
+
+        let mut attached_count: u64 = 0;
+        if let Some(rule) = rule {
+            let catalog = catalog_for("wifi");
+            let (frag, binds) =
+                conditions_to_sql_checked(&rule.conditions, rule.match_mode, 2, &catalog)?;
+
+            let update_sql = format!(
+                "UPDATE emission SET emitter_id = $1 \
+                 WHERE emitter_id IS NULL AND kind = 'wifi' AND {frag}"
+            );
+            let mut q = sqlx::query(&update_sql).bind(emitter.id);
+            for v in &binds {
+                let text = match v.clone() {
+                    serde_json::Value::String(s) => s,
+                    other => other.to_string(),
+                };
+                q = q.bind(text);
+            }
+            let result = q.execute(&mut *tx).await.map_err(EmitterRuleError::Sql)?;
+            attached_count = result.rows_affected();
+
+            emitter = sqlx::query_as::<_, Emitter>(&format!(
+                "UPDATE emitter SET \
+                     first_seen_at = sub.min_t, \
+                     last_seen_at = sub.max_t \
+                 FROM ( \
+                     SELECT MIN(observed_at) AS min_t, MAX(observed_at) AS max_t \
+                     FROM emission WHERE emitter_id = $1 \
+                 ) sub \
+                 WHERE emitter.id = $1 \
+                 RETURNING {EMITTER_COLUMNS}"
+            ))
+            .bind(emitter.id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(EmitterRuleError::Sql)?;
+        }
+
+        tx.commit().await.map_err(EmitterRuleError::Sql)?;
+
+        Ok(EmitterWithEntity {
+            emitter,
+            entity,
+            attached_count,
+        })
+    }
+}
+
+/// Result of [`EmitterRepo::create_with_entity`]: the freshly-created
+/// emitter (with `first_seen_at`/`last_seen_at` already refreshed if a rule
+/// backfilled anything), the entity it's now associated to, and how many
+/// emissions the backfill attached.
+#[derive(Debug, Clone)]
+pub struct EmitterWithEntity {
+    pub emitter: Emitter,
+    pub entity: Entity,
+    pub attached_count: u64,
 }

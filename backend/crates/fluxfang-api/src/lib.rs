@@ -46,6 +46,7 @@ pub mod catalog_routes;
 pub mod data_sources;
 pub mod dto;
 pub mod emissions;
+pub mod emitters;
 pub mod ingest;
 pub mod middleware;
 pub mod notify;
@@ -81,6 +82,7 @@ pub fn app(state: AppState) -> Router {
         .merge(catalog_routes::protected_routes())
         .merge(data_sources::protected_routes())
         .merge(emissions::protected_routes())
+        .merge(emitters::protected_routes())
         .route_layer(axum::middleware::from_fn(middleware::require_auth));
 
     Router::new()

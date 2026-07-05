@@ -9,8 +9,12 @@ use crate::models::{Entity, NewEntity};
 
 pub struct EntityRepo;
 
-/// Column list shared by every query that produces an [`Entity`].
-const ENTITY_COLUMNS: &str = "id, created_at, name, notes";
+/// Column list shared by every query that produces an [`Entity`]. `pub(crate)`
+/// so `repo::emitter`'s `create_with_entity` (Task 6.4) can reuse it for the
+/// entity-insert half of its atomic entity+emitter transaction, same
+/// precedent as `repo::alert_rule` reusing `repo::alert_method`'s
+/// `ALERT_METHOD_COLUMNS`.
+pub(crate) const ENTITY_COLUMNS: &str = "id, created_at, name, notes";
 
 impl EntityRepo {
     pub async fn insert(pool: &PgPool, new: NewEntity) -> Result<Entity, sqlx::Error> {

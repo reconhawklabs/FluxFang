@@ -11,7 +11,7 @@ use uuid::Uuid;
 use fluxfang_core::catalog::{FieldDef, FieldType};
 use fluxfang_core::rule::Op;
 
-use fluxfang_db::models::Emission;
+use fluxfang_db::models::{Emission, Emitter};
 
 /// One operator as exposed over the wire: its `serde` code plus a
 /// plain-English label the frontend can render directly in a dropdown.
@@ -129,6 +129,41 @@ impl From<&Emission> for EmissionDto {
             lat: e.lat,
             kind: e.kind.clone(),
             payload: e.payload.clone(),
+        }
+    }
+}
+
+/// One row in a `GET /api/emitters`/`GET /api/emitters/:id` response (Task
+/// 6.4). Same "explicit DTO, not a re-export" rationale as [`EmissionDto`]:
+/// `fluxfang_db::models::Emitter` already `#[derive(Serialize)]`s with a
+/// wire-compatible shape (its `#[sqlx(rename = "type")]` dance only affects
+/// the SQL column mapping, not `serde`), but this DTO keeps the emitters
+/// API's response shape independently controlled here rather than coupled
+/// to the DB row's exact field set.
+#[derive(Debug, Clone, Serialize)]
+pub struct EmitterDto {
+    pub id: Uuid,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub type_: Option<String>,
+    pub entity_id: Option<Uuid>,
+    pub match_criteria: serde_json::Value,
+    pub first_seen_at: Option<DateTime<Utc>>,
+    pub last_seen_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<&Emitter> for EmitterDto {
+    fn from(e: &Emitter) -> Self {
+        EmitterDto {
+            id: e.id,
+            name: e.name.clone(),
+            type_: e.type_.clone(),
+            entity_id: e.entity_id,
+            match_criteria: e.match_criteria.clone(),
+            first_seen_at: e.first_seen_at,
+            last_seen_at: e.last_seen_at,
+            created_at: e.created_at,
         }
     }
 }
