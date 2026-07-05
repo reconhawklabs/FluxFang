@@ -217,6 +217,24 @@ export default function Emissions() {
   function handleFilterChange(next: FilterState): void {
     setFilter(next);
     setOffset(0);
+    setSelected(new Set());
+  }
+
+  // Pagination (page size or prev/next) changes which emissions are in
+  // `items`, so a `selected` id from the previous page may no longer be
+  // present — clear it here (mirroring `handleFilterChange`'s reset) so
+  // "Assign to emitter (N)" can never reference a `seedEmission` that isn't
+  // on the current page (see module doc comment / AssignModal's render
+  // guard `showAssignModal && seedEmission`).
+  function handleOffsetChange(next: number): void {
+    setOffset(next);
+    setSelected(new Set());
+  }
+
+  function handlePageSizeChange(next: number): void {
+    setLimit(next);
+    setOffset(0);
+    setSelected(new Set());
   }
 
   function toggleSelected(id: string): void {
@@ -340,8 +358,7 @@ export default function Emissions() {
             id="emissions-page-size"
             value={limit}
             onChange={(event) => {
-              setLimit(Number(event.target.value));
-              setOffset(0);
+              handlePageSizeChange(Number(event.target.value));
             }}
             className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100 focus:border-amber-500 focus:outline-none"
           >
@@ -360,7 +377,7 @@ export default function Emissions() {
           <button
             type="button"
             disabled={offset === 0}
-            onClick={() => setOffset(Math.max(0, offset - limit))}
+            onClick={() => handleOffsetChange(Math.max(0, offset - limit))}
             className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 transition hover:border-amber-500 hover:text-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
           >
             Prev
@@ -368,7 +385,7 @@ export default function Emissions() {
           <button
             type="button"
             disabled={offset + limit >= total}
-            onClick={() => setOffset(offset + limit)}
+            onClick={() => handleOffsetChange(offset + limit)}
             className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 transition hover:border-amber-500 hover:text-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
           >
             Next

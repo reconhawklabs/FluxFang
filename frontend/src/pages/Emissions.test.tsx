@@ -168,6 +168,40 @@ test('selecting an emission and assigning prefills RuleBuilder with bssid eq <va
   });
 });
 
+test('paging (Next) clears the row selection so "Assign to emitter" can never no-op on a stale id', async () => {
+  // `total: 60` with `DEFAULT_LIMIT` (50) makes the Next button eligible
+  // (offset + limit < total); the handler varies `items` by the `offset`
+  // query param so paging genuinely swaps the rendered rows, matching how
+  // the real API behaves.
+  const fetchMock = mockRoutes({
+    'GET /api/emissions': (url) =>
+      url.searchParams.get('offset') === '50'
+        ? { items: [EMISSION_2], total: 60 }
+        : { items: [EMISSION_1], total: 60 },
+    'GET /api/emitters': () => [EMITTER_1],
+    'GET /api/catalog/wifi': () => WIFI_CATALOG,
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Emissions />, { wrapper });
+  await waitFor(() => expect(screen.getByTestId('emission-row-e1')).toBeInTheDocument());
+
+  fireEvent.click(screen.getByLabelText('Select emission e1'));
+  expect(screen.getByRole('button', { name: /assign to emitter \(1\)/i })).toBeEnabled();
+
+  fireEvent.click(screen.getByRole('button', { name: /^next$/i }));
+  await waitFor(() => expect(screen.getByTestId('emission-row-e2')).toBeInTheDocument());
+
+  const assignButton = screen.getByRole('button', { name: /assign to emitter \(0\)/i });
+  expect(assignButton).toBeDisabled();
+
+  // Clicking it (were it somehow enabled) must not silently no-op: the
+  // modal's render guard is `showAssignModal && seedEmission`, so with no
+  // selection there's no seed and no dialog — assert that stays true.
+  fireEvent.click(assignButton);
+  expect(screen.queryByRole('heading', { name: /assign .* to emitter/i })).not.toBeInTheDocument();
+});
+
 test('a filter change (unassigned-only) refetches emissions with the matching query params', async () => {
   const fetchMock = mockRoutes({
     'GET /api/emissions': () => ({ items: [EMISSION_1, EMISSION_2], total: 2 }),
