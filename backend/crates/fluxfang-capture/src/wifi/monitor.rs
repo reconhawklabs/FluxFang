@@ -56,7 +56,12 @@ const READ_TIMEOUT_MS: i32 = 200;
 /// the UI shows *why* it failed (e.g. "Device or resource busy") instead of a
 /// bare exit code like "exit status: 240".
 fn run_cmd(bin: &str, args: &[&str]) -> anyhow::Result<()> {
-    let output = std::process::Command::new(bin).args(args).output()?;
+    let output = std::process::Command::new(bin)
+        .args(args)
+        .output()
+        .map_err(|e| {
+            anyhow::anyhow!("failed to run `{bin}` (is it installed on the host image?): {e}")
+        })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stderr = stderr.trim();

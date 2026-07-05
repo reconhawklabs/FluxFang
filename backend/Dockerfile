@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpcap0.8 \
     libudev1 \
     iw \
+    iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/fluxfang-api /usr/local/bin/fluxfang-api
