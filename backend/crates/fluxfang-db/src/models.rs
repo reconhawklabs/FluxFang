@@ -253,3 +253,98 @@ pub struct ZoneMembership {
     pub inside: bool,
     pub since: DateTime<Utc>,
 }
+
+/// `alert_method`: a reusable, user-configured delivery channel (email,
+/// in-app, or webhook). `type_` maps to the DB column `type` (Rust keyword
+/// rename, same pattern as `Emitter::type_`) — every query in
+/// `repo::alert_method`/`repo::alert_rule` spells out an explicit column
+/// list rather than relying on `SELECT *`/`RETURNING *`.
+///
+/// `config` holds non-secret settings (webhook url/headers, smtp host,
+/// etc.) as plain JSON. `config_encrypted` is an opaque ciphertext blob for
+/// anything secret (smtp password, webhook secret) — Phase 8 wires up the
+/// actual encryption/decryption; this crate only stores/returns the bytes
+/// unchanged. It's nullable in the DB (no value has been encrypted yet),
+/// hence `Option<Vec<u8>>` here even though callers constructing a
+/// [`NewAlertMethod`] always supply bytes (possibly empty) up front.
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]
+pub struct AlertMethod {
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub name: String,
+    #[sqlx(rename = "type")]
+    pub type_: String,
+    pub enabled: bool,
+    pub config: serde_json::Value,
+    pub config_encrypted: Option<Vec<u8>>,
+}
+
+/// Fields required to create a new `alert_method`. `config` isn't included
+/// here (it defaults to `{}` in the DB); only `config_encrypted` is settable
+/// at this layer, per Task 1.3e's interface.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewAlertMethod {
+    pub name: String,
+    pub type_: String,
+    pub enabled: bool,
+    pub config_encrypted: Vec<u8>,
+}
+
+/// `alert_rule`: watches a target (`emitter`/`entity`) or, for host-zone
+/// rules, no target at all (`target_type`/`target_id` both `NULL`).
+/// `trigger` is a JSON blob whose shape is `trigger.on ∈ 'detected' |
+/// 'enters_zone' | 'leaves_zone' | 'host_enters_zone' | 'host_leaves_zone'`,
+/// with optional `trigger.zone_id`/`trigger.content_match` — interpreted by
+/// the alert-evaluation logic added in a later phase, not by this repo.
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]
+pub struct AlertRule {
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub name: String,
+    pub enabled: bool,
+    pub target_type: Option<String>,
+    pub target_id: Option<Uuid>,
+    pub trigger: serde_json::Value,
+}
+
+/// Fields required to create (or fully replace, via `AlertRuleRepo::update`)
+/// an `alert_rule`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewAlertRule {
+    pub name: String,
+    pub enabled: bool,
+    pub target_type: Option<String>,
+    pub target_id: Option<Uuid>,
+    pub trigger: serde_json::Value,
+}
+
+/// `notification`: fired-alert log; also the source for the in-app
+/// Notifications page (`read_at: None` = unread). `alert_rule_id`/
+/// `alert_method_id` are `ON DELETE SET NULL` in the DB — deleting the rule
+/// or method that produced a notification never deletes the notification
+/// itself, it just orphans the reference (unlike `alert_rule_method`, whose
+/// join rows `ON DELETE CASCADE` when either side is deleted).
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]
+pub struct Notification {
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub alert_rule_id: Option<Uuid>,
+    pub alert_method_id: Option<Uuid>,
+    pub fired_at: DateTime<Utc>,
+    pub payload: serde_json::Value,
+    pub delivery_status: String,
+    pub read_at: Option<DateTime<Utc>>,
+}
+
+/// Fields required to create a new `notification` (always the result of an
+/// alert actually firing, so `fired_at`/`payload`/`delivery_status` are
+/// required; `read_at` starts `NULL` and is set later via
+/// `NotificationRepo::mark_read`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewNotification {
+    pub alert_rule_id: Option<Uuid>,
+    pub alert_method_id: Option<Uuid>,
+    pub fired_at: DateTime<Utc>,
+    pub payload: serde_json::Value,
+    pub delivery_status: String,
+}

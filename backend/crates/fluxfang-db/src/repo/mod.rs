@@ -17,20 +17,26 @@
 //! instead of compile time — acceptable given the repo test suite exercises
 //! every query.
 
+pub mod alert_method;
+pub mod alert_rule;
 pub mod app_config;
 pub mod data_source;
 pub mod emission;
 pub mod emitter;
 pub mod entity;
+pub mod notification;
 pub mod session;
 pub mod zone;
 pub mod zone_membership;
 
+pub use alert_method::AlertMethodRepo;
+pub use alert_rule::AlertRuleRepo;
 pub use app_config::AppConfigRepo;
 pub use data_source::DataSourceRepo;
 pub use emission::EmissionRepo;
 pub use emitter::EmitterRepo;
 pub use entity::EntityRepo;
+pub use notification::NotificationRepo;
 pub use session::SessionRepo;
 pub use zone::ZoneRepo;
 pub use zone_membership::ZoneMembershipRepo;
