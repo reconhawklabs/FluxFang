@@ -159,3 +159,49 @@ impl NewEmission {
         }
     }
 }
+
+/// `entity`: the tracked real-world thing an operator has grouped one or
+/// more `emitter`s under (e.g. "Bob's phone").
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]
+pub struct Entity {
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub name: String,
+    pub notes: Option<String>,
+}
+
+/// Fields required to create a new `entity`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewEntity {
+    pub name: String,
+    pub notes: Option<String>,
+}
+
+/// `emitter`: a distinct identified source (e.g. a specific access point),
+/// optionally grouped under an `entity` and matched against incoming
+/// emissions via `match_criteria` (a [`fluxfang_core::Rule`] as JSON).
+///
+/// `type_` maps to the DB column `type` — `type` is a Rust keyword, so the
+/// field is renamed here (see `repo::emitter` for the explicit column list
+/// this requires on every query, same reasoning as `Emission::lon`/`lat`).
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]
+pub struct Emitter {
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub name: String,
+    #[sqlx(rename = "type")]
+    pub type_: Option<String>,
+    pub entity_id: Option<Uuid>,
+    pub match_criteria: serde_json::Value,
+    pub first_seen_at: Option<DateTime<Utc>>,
+    pub last_seen_at: Option<DateTime<Utc>>,
+}
+
+/// Fields required to create a new `emitter`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewEmitter {
+    pub name: String,
+    pub type_: Option<String>,
+    pub entity_id: Option<Uuid>,
+    pub match_criteria: serde_json::Value,
+}
