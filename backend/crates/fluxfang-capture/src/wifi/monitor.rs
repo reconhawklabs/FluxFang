@@ -88,6 +88,17 @@ impl WifiMonitorCapturer {
     fn restore_managed_mode(&self) -> anyhow::Result<()> {
         self.run_iw(&["dev", &self.interface, "set", "type", "managed"])
     }
+
+    /// Opens the (already monitor-mode) interface with `pcap`. Split out of
+    /// `start` purely so the error path there can roll back monitor mode
+    /// before propagating whatever this returns.
+    fn open_capture(&self) -> anyhow::Result<pcap::Capture<pcap::Active>> {
+        let cap = pcap::Capture::from_device(self.interface.as_str())?
+            .promisc(true)
+            .timeout(READ_TIMEOUT_MS)
+            .open()?;
+        Ok(cap)
+    }
 }
 
 impl Capturer for WifiMonitorCapturer {
@@ -98,10 +109,18 @@ impl Capturer for WifiMonitorCapturer {
 
         self.set_monitor_mode()?;
 
-        let mut cap = pcap::Capture::from_device(self.interface.as_str())?
-            .promisc(true)
-            .timeout(READ_TIMEOUT_MS)
-            .open()?;
+        // If opening the device fails after we've already flipped the
+        // interface into monitor mode, roll that back (best-effort - we
+        // still want to surface the real `open` error, not a rollback
+        // failure) rather than leaving the adapter stuck in monitor mode
+        // and unable to rejoin a normal network.
+        let mut cap = match self.open_capture() {
+            Ok(cap) => cap,
+            Err(err) => {
+                let _ = self.restore_managed_mode();
+                return Err(err);
+            }
+        };
 
         self.running.store(true, Ordering::SeqCst);
         let running = self.running.clone();
