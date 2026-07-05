@@ -1,11 +1,16 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use fluxfang_api::app;
 use tower::ServiceExt; // oneshot
 
+mod common;
+
+/// Health stays PUBLIC even after Task 2.2 wires up `require_auth` for
+/// everything else — it's an infra check and must never depend on session
+/// state, so this still hits it with no cookie at all.
 #[tokio::test]
 async fn health_returns_ok() {
-    let resp = app()
+    let app = common::test_app().await;
+    let resp = app
         .oneshot(
             Request::builder()
                 .uri("/api/health")
