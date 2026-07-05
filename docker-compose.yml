@@ -33,12 +33,24 @@ services:
       FLUXFANG_SECRET_KEY: ${FLUXFANG_SECRET_KEY}
       WIFI_DEVICE: ${WIFI_DEVICE:-}
       GPS_DEVICE: ${GPS_DEVICE:-}
-    # Real wifi/GPS hardware is not required to boot the health skeleton, so
-    # device passthrough is left commented until Phase 1+ needs it. Uncomment
-    # and set WIFI_DEVICE/GPS_DEVICE in `.env` once hardware is attached.
-    # devices:
-    #   - "${WIFI_DEVICE}:${WIFI_DEVICE}"
-    #   - "${GPS_DEVICE}:${GPS_DEVICE}"
+    # --- Hardware passthrough ---
+    # WiFi adapter: NOT listed under `devices:` below. A wifi NIC is a network
+    # interface, not a /dev character device -- with `network_mode: host` +
+    # `privileged: true` + `NET_ADMIN`/`NET_RAW` above, the backend already
+    # sees every host network interface by name (e.g. `iw dev wlan1 ...`).
+    # WIFI_DEVICE (env var only, no passthrough needed) just tells the backend
+    # which interface name to drive into monitor mode.
+    #
+    # GPS receiver: if it's a network gpsd server, same story -- host
+    # networking reaches `host:port` directly, no passthrough needed. If it's
+    # a USB/serial GPS dongle instead, the backend needs the character device
+    # node passed through explicitly via `--device` (Compose `devices:`).
+    # Default both sides to /dev/null (always present, harmless no-op) so
+    # `docker compose up` still comes up cleanly with no GPS hardware
+    # attached; set GPS_DEVICE=/dev/ttyUSB0 (or similar) in `.env` to pass
+    # through a real serial device.
+    devices:
+      - "${GPS_DEVICE:-/dev/null}:${GPS_DEVICE:-/dev/null}"
     depends_on:
       db:
         condition: service_healthy
