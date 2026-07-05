@@ -1,10 +1,16 @@
 //! First-run setup + login/logout routes (Task 2.2).
 //!
-//! All four routes here are PUBLIC (reachable with no session) — that's the
-//! whole point of setup/login, and logout has to be reachable by a session
-//! that might already be considered "invalid" for other purposes. They are
-//! mounted in `lib.rs::app`'s public router group, *outside* the
-//! `require_auth` layer.
+//! `setup`, `setup_status`, and `login` are PUBLIC (reachable with no
+//! session) — that's the whole point of setup/login: they're how a session
+//! gets created in the first place. They're mounted in `lib.rs::app`'s
+//! public router group, *outside* the `require_auth` layer.
+//!
+//! `logout` is PROTECTED: it requires an authenticated session like every
+//! other non-setup/login route, per the spec's public surface being exactly
+//! `{/api/health, /api/setup/status, /api/setup, /api/login}`. An
+//! unauthenticated logout would be a no-op anyway (there's no session to
+//! clear), so requiring auth costs nothing real. It's mounted in
+//! `lib.rs::app`'s protected router group, via [`protected_routes`].
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -38,7 +44,12 @@ pub fn public_routes() -> Router<AppState> {
         .route("/api/setup/status", get(setup_status))
         .route("/api/setup", post(setup))
         .route("/api/login", post(login))
-        .route("/api/logout", post(logout))
+}
+
+/// The protected route group. Mounted *inside* `require_auth` — see module
+/// docs for why logout requires a session rather than being public.
+pub fn protected_routes() -> Router<AppState> {
+    Router::new().route("/api/logout", post(logout))
 }
 
 async fn setup_status(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
@@ -56,9 +67,6 @@ async fn setup(
     session: Session,
     Json(payload): Json<PasswordPayload>,
 ) -> Result<StatusCode, ApiError> {
-    if AppConfigRepo::password_hash(&state.pool).await?.is_some() {
-        return Err(ApiError::Status(StatusCode::CONFLICT));
-    }
     if payload.password.is_empty() || payload.password.len() > MAX_PASSWORD_BYTES {
         return Err(ApiError::Status(StatusCode::BAD_REQUEST));
     }
@@ -69,7 +77,19 @@ async fn setup(
         .await
         .expect("hash_password blocking task panicked");
 
-    AppConfigRepo::set_password_hash(&state.pool, &hash).await?;
+    // `set_password_hash_if_unset` is the single source of truth on whether
+    // this call won the race to set the password: it's a single atomic
+    // statement, so there's no separate "is one already set?" check to race
+    // against it (a prior check-then-act here let two concurrent requests
+    // both pass the check and both upsert, with the last write silently
+    // becoming the admin password). `None` means a password was already
+    // configured (by this request or a concurrent one that won).
+    if AppConfigRepo::set_password_hash_if_unset(&state.pool, &hash)
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::Status(StatusCode::CONFLICT));
+    }
 
     // First-run setup doubles as a login: the person who just set the
     // password is sitting right there and shouldn't have to log in again

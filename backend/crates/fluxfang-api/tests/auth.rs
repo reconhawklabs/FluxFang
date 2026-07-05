@@ -125,6 +125,66 @@ async fn logout_then_protected_route_401_again() {
     assert_status(&resp, StatusCode::UNAUTHORIZED);
 }
 
+/// Regression test for the setup TOCTOU: `setup()` used to read
+/// `password_hash().is_some()` and, separately, call an unconditional
+/// upsert — two concurrent `POST /api/setup` requests could both observe
+/// `None` from the read, both pass the check, and both upsert, with the
+/// last write silently becoming the admin password (both requests would
+/// return `200 OK`). The fix makes `AppConfigRepo::set_password_hash_if_unset`
+/// a single atomic statement, so Postgres serializes the two requests on the
+/// row and exactly one of them can "win".
+///
+/// This fires two concurrent setup requests with *different* passwords and
+/// asserts exactly one succeeds (`200`) and the other is rejected (`409`),
+/// and that only the winning candidate's password actually verifies
+/// afterwards. Against the old unconditional-upsert code this test fails
+/// (both requests return `200`, and login succeeds with the *second*
+/// candidate rather than deterministically with just one of them).
+#[tokio::test]
+async fn concurrent_setup_requests_only_one_wins() {
+    let app = test_app().await;
+
+    let (resp_a, resp_b) = tokio::join!(
+        post_json(&app, "/api/setup", r#"{"password":"candidate-aaaa"}"#),
+        post_json(&app, "/api/setup", r#"{"password":"candidate-bbbb"}"#),
+    );
+
+    let statuses = [resp_a.status(), resp_b.status()];
+    let ok_count = statuses.iter().filter(|s| **s == StatusCode::OK).count();
+    let conflict_count = statuses
+        .iter()
+        .filter(|s| **s == StatusCode::CONFLICT)
+        .count();
+
+    assert_eq!(
+        ok_count, 1,
+        "expected exactly one concurrent setup request to succeed, got statuses {statuses:?}"
+    );
+    assert_eq!(
+        conflict_count, 1,
+        "expected exactly one concurrent setup request to be rejected as a conflict, got statuses {statuses:?}"
+    );
+
+    // Whichever candidate won, only that one's password should verify.
+    let a_won = statuses[0] == StatusCode::OK;
+    let (winner, loser) = if a_won {
+        ("candidate-aaaa", "candidate-bbbb")
+    } else {
+        ("candidate-bbbb", "candidate-aaaa")
+    };
+
+    let resp = post_json(
+        &app,
+        "/api/login",
+        &format!(r#"{{"password":"{winner}"}}"#),
+    )
+    .await;
+    assert_status(&resp, StatusCode::OK);
+
+    let resp = post_json(&app, "/api/login", &format!(r#"{{"password":"{loser}"}}"#)).await;
+    assert_status(&resp, StatusCode::UNAUTHORIZED);
+}
+
 /// A simple sanity check on the rate limiter: enough failed attempts in a
 /// row eventually get `429` instead of `401`, distinguishing "wrong
 /// password" from "you're being throttled".

@@ -7,19 +7,23 @@
 //! The router is built as two groups merged together:
 //!
 //! - **public** (`auth_routes::public_routes()` + `/api/health`): reachable
-//!   with no session at all. Setup and login are how a session gets
+//!   with no session at all — exactly `{/api/health, /api/setup/status,
+//!   /api/setup, /api/login}`. Setup and login are how a session gets
 //!   created in the first place, so they necessarily can't require one;
 //!   health is an infra check that should never depend on app state.
 //! - **protected**: everything else, wrapped in [`middleware::require_auth`]
 //!   via `route_layer` so new routes added to this group in later tasks
 //!   (entities, emissions, zones, alerts, ...) are guarded automatically —
-//!   nobody has to remember to re-apply the middleware each time.
+//!   nobody has to remember to re-apply the middleware each time. This
+//!   includes `POST /api/logout` (`auth_routes::protected_routes()`): an
+//!   unauthenticated logout is a no-op anyway, so requiring a session costs
+//!   nothing and keeps the public surface minimal.
 //!
-//! For this task the only protected route is a stub `GET /api/entities`
-//! returning `[]` (chosen over a `/api/me` placeholder because the task
-//! brief's own illustrative test hits `/api/entities` directly). Phase 6
-//! replaces this stub with the real entity-listing handler in the same
-//! protected group.
+//! For this task the only placeholder protected route is a stub
+//! `GET /api/entities` returning `[]` (chosen over a `/api/me` placeholder
+//! because the task brief's own illustrative test hits `/api/entities`
+//! directly). Phase 6 replaces this stub with the real entity-listing
+//! handler in the same protected group.
 //!
 //! ## Session store
 //!
@@ -59,8 +63,12 @@ pub fn app(state: AppState) -> Router {
 
     // Placeholder protected route proving `require_auth` actually guards
     // things; see module docs for why `/api/entities` over `/api/me`.
+    // `auth_routes::protected_routes()` (currently just `POST /api/logout`)
+    // is merged in here too, so it goes through `require_auth` like every
+    // other protected route rather than living in the public group.
     let protected = Router::new()
         .route("/api/entities", get(|| async { Json(json!([])) }))
+        .merge(auth_routes::protected_routes())
         .route_layer(axum::middleware::from_fn(middleware::require_auth));
 
     Router::new()
