@@ -100,6 +100,81 @@ async fn wifi_bogus_mode_is_still_rejected_by_data_source_check() {
     );
 }
 
+/// Phase A1 (`0004_emitter_classification.sql`): confirms 0001->0004 apply
+/// cleanly to a fresh schema and the four new `emitter` columns exist with
+/// the documented defaults (`emitter_type`/`identity_key` NULL, `attributes`
+/// `{}`, `match_enabled` true) for a plain insert that doesn't set them.
+#[tokio::test]
+async fn emitter_classification_columns_exist_with_documented_defaults() {
+    let pool = fresh_pool().await;
+
+    let row: (
+        uuid::Uuid,
+        Option<String>,
+        serde_json::Value,
+        bool,
+        Option<String>,
+    ) = sqlx::query_as(
+        "insert into emitter(name) values('plain emitter') \
+         returning id, emitter_type, attributes, match_enabled, identity_key",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert!(!row.0.is_nil());
+    assert_eq!(row.1, None, "emitter_type must default to NULL");
+    assert_eq!(
+        row.2,
+        serde_json::json!({}),
+        "attributes must default to '{{}}'"
+    );
+    assert!(row.3, "match_enabled must default to true");
+    assert_eq!(row.4, None, "identity_key must default to NULL");
+}
+
+/// The `identity_key` unique index must allow many NULL rows (every
+/// user-made emitter) while still rejecting two rows that share the same
+/// non-NULL key — this is exactly what makes
+/// `EmitterRepo::get_or_create_by_identity`'s `ON CONFLICT (identity_key)`
+/// meaningful.
+///
+/// This test runs against the shared `public` schema (see this module's
+/// `fresh_pool`, which — unlike `tests/common::fresh_pool` — applies
+/// migrations directly rather than into a per-test isolated schema), so
+/// rows it inserts persist across repeated runs of this same test binary.
+/// The candidate key is a fresh UUID each run specifically so re-running
+/// this test never collides with a row a previous run left behind.
+#[tokio::test]
+async fn emitter_identity_key_unique_index_allows_many_nulls_but_rejects_duplicates() {
+    let pool = fresh_pool().await;
+    let key = uuid::Uuid::new_v4().to_string();
+
+    sqlx::query("insert into emitter(name) values('a')")
+        .execute(&pool)
+        .await
+        .expect("first NULL identity_key row must succeed");
+    sqlx::query("insert into emitter(name) values('b')")
+        .execute(&pool)
+        .await
+        .expect("second NULL identity_key row must also succeed");
+
+    sqlx::query("insert into emitter(name, identity_key) values('c', $1)")
+        .bind(&key)
+        .execute(&pool)
+        .await
+        .expect("first row with a given non-NULL identity_key must succeed");
+
+    let dup = sqlx::query("insert into emitter(name, identity_key) values('d', $1)")
+        .bind(&key)
+        .execute(&pool)
+        .await;
+    assert!(
+        dup.is_err(),
+        "a second row with the same non-NULL identity_key must violate the unique index"
+    );
+}
+
 #[tokio::test]
 async fn emission_accepts_geography_point() {
     let pool = fresh_pool().await;

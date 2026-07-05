@@ -55,6 +55,7 @@ async fn seed_emitter(pool: &PgPool, name: &str, entity_id: Option<Uuid>) -> Uui
             type_: Some("Access Point".to_string()),
             entity_id,
             match_criteria: json!({}),
+            ..Default::default()
         },
     )
     .await

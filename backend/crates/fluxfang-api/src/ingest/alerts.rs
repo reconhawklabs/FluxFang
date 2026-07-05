@@ -415,6 +415,7 @@ mod tests {
                     "match": "all",
                     "conditions": [{"field": "bssid", "op": "eq", "value": "aa:bb:cc:dd:ee:ff"}]
                 }),
+                ..Default::default()
             },
         )
         .await
@@ -507,6 +508,7 @@ mod tests {
                     "match": "all",
                     "conditions": [{"field": "bssid", "op": "eq", "value": "aa:bb:cc:dd:ee:ff"}]
                 }),
+                ..Default::default()
             },
         )
         .await
@@ -587,6 +589,7 @@ mod tests {
                     "match": "all",
                     "conditions": [{"field": "bssid", "op": "eq", "value": "aa:bb:cc:dd:ee:ff"}]
                 }),
+                ..Default::default()
             },
         )
         .await
@@ -667,6 +670,7 @@ mod tests {
                     "match": "all",
                     "conditions": [{"field": "bssid", "op": "eq", "value": "aa:bb:cc:dd:ee:ff"}]
                 }),
+                ..Default::default()
             },
         )
         .await
@@ -784,6 +788,7 @@ mod tests {
                     "match": "all",
                     "conditions": [{"field": "bssid", "op": "eq", "value": "aa:bb:cc:dd:ee:ff"}]
                 }),
+                ..Default::default()
             },
         )
         .await
@@ -869,6 +874,7 @@ mod tests {
                     "match": "all",
                     "conditions": [{"field": "bssid", "op": "eq", "value": "aa:bb:cc:dd:ee:ff"}]
                 }),
+                ..Default::default()
             },
         )
         .await
@@ -969,6 +975,7 @@ mod tests {
                     "match": "all",
                     "conditions": [{"field": "bssid", "op": "eq", "value": "aa:bb:cc:dd:ee:ff"}]
                 }),
+                ..Default::default()
             },
         )
         .await

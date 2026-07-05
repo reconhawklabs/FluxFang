@@ -103,6 +103,7 @@ async fn last_seen_returns_max_observed_at_across_entitys_emitters_emissions() {
             type_: Some("Access Point".to_string()),
             entity_id: Some(entity.id),
             match_criteria: serde_json::json!({}),
+            ..Default::default()
         },
     )
     .await
@@ -114,6 +115,7 @@ async fn last_seen_returns_max_observed_at_across_entitys_emitters_emissions() {
             type_: Some("Access Point".to_string()),
             entity_id: Some(entity.id),
             match_criteria: serde_json::json!({}),
+            ..Default::default()
         },
     )
     .await

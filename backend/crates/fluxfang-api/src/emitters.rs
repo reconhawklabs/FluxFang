@@ -156,6 +156,7 @@ async fn create_emitter(
         type_: req.type_,
         entity_id: req.entity_id,
         match_criteria,
+        ..Default::default()
     };
     let created = EmitterRepo::insert(&state.pool, new).await?;
 

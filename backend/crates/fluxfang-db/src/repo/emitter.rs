@@ -54,6 +54,24 @@
 //! `attach_emissions_matching`, all inside a single transaction — see its
 //! own doc comment for why an invalid rule there rolls back the entity
 //! insert too, rather than leaving an orphaned `entity` row behind.
+//!
+//! ## Phase A1 additions: classification columns + race-safe get-or-create
+//!
+//! [`EmitterRepo::get_or_create_by_identity`] is the one non-trivial
+//! addition: it's what a future ingest auto-create path will call to
+//! atomically look up-or-insert an emitter by `identity_key`, race-safe
+//! under concurrent ingest (see its own doc comment for the `ON CONFLICT
+//! ... DO NOTHING` + fallback-`SELECT` mechanics). [`EmitterRepo::insert`]
+//! and `EMITTER_COLUMNS` were extended to carry the four new columns
+//! (`emitter_type`/`attributes`/`match_enabled`/`identity_key`;
+//! `0004_emitter_classification.sql`) through every existing query
+//! unchanged. [`EmitterRepo::set_match_enabled`] and
+//! [`EmitterRepo::set_attributes`] round out minimal, single-column
+//! mutators for the two columns a later phase's API/UI needs to update
+//! independently of everything else on the row (toggling the auto-attach
+//! rule; overriding e.g. a detected `randomized_mac`). No ingest/API/
+//! classification logic lives in this crate yet — see the design doc's
+//! "Build order" for what's deferred to later phases.
 
 use std::fmt;
 
@@ -69,9 +87,13 @@ pub struct EmitterRepo;
 
 /// Column list shared by every query that produces an [`Emitter`]. The `type`
 /// column decodes into [`Emitter::type_`] via `#[sqlx(rename = "type")]`, so
-/// no `AS` aliasing is needed here (unlike `emission.location`).
-const EMITTER_COLUMNS: &str =
-    "id, created_at, name, type, entity_id, match_criteria, first_seen_at, last_seen_at";
+/// no `AS` aliasing is needed here (unlike `emission.location`). Phase A1
+/// (`0004_emitter_classification.sql`) added `emitter_type`/`attributes`/
+/// `match_enabled`/`identity_key`; sqlx's `FromRow` derive maps by column
+/// name, not position, so appending them here is enough for every query
+/// built from this constant to pick them up.
+const EMITTER_COLUMNS: &str = "id, created_at, name, type, entity_id, match_criteria, \
+     first_seen_at, last_seen_at, emitter_type, attributes, match_enabled, identity_key";
 
 /// Error from [`EmitterRepo::attach_emissions_matching`] /
 /// [`EmitterRepo::count_matching`]: either a DB error, or the rule
@@ -109,8 +131,10 @@ impl From<RuleSqlError> for EmitterRuleError {
 impl EmitterRepo {
     pub async fn insert(pool: &PgPool, new: NewEmitter) -> Result<Emitter, sqlx::Error> {
         let sql = format!(
-            "INSERT INTO emitter (name, type, entity_id, match_criteria) \
-             VALUES ($1, $2, $3, $4) \
+            "INSERT INTO emitter \
+                 (name, type, entity_id, match_criteria, emitter_type, attributes, \
+                  match_enabled, identity_key) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
              RETURNING {EMITTER_COLUMNS}"
         );
         sqlx::query_as::<_, Emitter>(&sql)
@@ -118,6 +142,110 @@ impl EmitterRepo {
             .bind(new.type_)
             .bind(new.entity_id)
             .bind(new.match_criteria)
+            .bind(new.emitter_type)
+            .bind(new.attributes)
+            .bind(new.match_enabled)
+            .bind(new.identity_key)
+            .fetch_one(pool)
+            .await
+    }
+
+    /// Atomic get-or-create keyed on `new.identity_key`, which **must** be
+    /// `Some` (this is the auto-create path's entry point; a user-made
+    /// emitter with `identity_key = None` should go through
+    /// [`Self::insert`] instead — `None` can't be the conflict target of an
+    /// `ON CONFLICT (identity_key)` clause since Postgres never considers
+    /// two `NULL`s equal for that purpose, so calling this with `None`
+    /// would just always insert a fresh row instead of erroring, which
+    /// would be a silent footgun. Rather than return a `Result` for that
+    /// caller-error case, it's a documented precondition (`debug_assert!`)
+    /// — every real caller (ingest auto-create) always has a concrete
+    /// identity key by construction).
+    ///
+    /// Race-safety: `INSERT ... ON CONFLICT (identity_key) DO NOTHING
+    /// RETURNING ...` either (a) wins the race and returns the freshly
+    /// inserted row, or (b) loses it (another concurrent call with the same
+    /// `identity_key` committed first) and returns no row at all — Postgres
+    /// guarantees exactly one of the two outcomes even under concurrent
+    /// transactions targeting the same unique index, because the conflict
+    /// is detected and resolved at the index level, not via a
+    /// read-then-write race in application code. Case (b) falls back to a
+    /// plain `SELECT` for the row the other caller created. Returns the
+    /// emitter plus whether *this* call created it.
+    pub async fn get_or_create_by_identity(
+        pool: &PgPool,
+        new: NewEmitter,
+    ) -> Result<(Emitter, bool), sqlx::Error> {
+        debug_assert!(
+            new.identity_key.is_some(),
+            "get_or_create_by_identity requires Some(identity_key); use insert() for user-made emitters"
+        );
+
+        let insert_sql = format!(
+            "INSERT INTO emitter \
+                 (name, type, entity_id, match_criteria, emitter_type, attributes, \
+                  match_enabled, identity_key) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+             ON CONFLICT (identity_key) DO NOTHING \
+             RETURNING {EMITTER_COLUMNS}"
+        );
+        let inserted = sqlx::query_as::<_, Emitter>(&insert_sql)
+            .bind(&new.name)
+            .bind(&new.type_)
+            .bind(new.entity_id)
+            .bind(&new.match_criteria)
+            .bind(&new.emitter_type)
+            .bind(&new.attributes)
+            .bind(new.match_enabled)
+            .bind(&new.identity_key)
+            .fetch_optional(pool)
+            .await?;
+
+        if let Some(emitter) = inserted {
+            return Ok((emitter, true));
+        }
+
+        let select_sql = format!("SELECT {EMITTER_COLUMNS} FROM emitter WHERE identity_key = $1");
+        let existing = sqlx::query_as::<_, Emitter>(&select_sql)
+            .bind(&new.identity_key)
+            .fetch_one(pool)
+            .await?;
+        Ok((existing, false))
+    }
+
+    /// Flip `match_enabled` for `id` — disables/re-enables the emitter's
+    /// auto-attach rule without touching anything else about it (the
+    /// general "rule enable/disable" capability the design calls for).
+    pub async fn set_match_enabled(
+        pool: &PgPool,
+        id: Uuid,
+        enabled: bool,
+    ) -> Result<Emitter, sqlx::Error> {
+        let sql = format!(
+            "UPDATE emitter SET match_enabled = $2 WHERE id = $1 RETURNING {EMITTER_COLUMNS}"
+        );
+        sqlx::query_as::<_, Emitter>(&sql)
+            .bind(id)
+            .bind(enabled)
+            .fetch_one(pool)
+            .await
+    }
+
+    /// Replace `attributes` wholesale (e.g. a manual `randomized_mac`
+    /// override on an auto-created emitter). Full-value replace, same
+    /// "PATCH re-sends the field it's touching" convention as
+    /// [`Self::update_rule`]/[`Self::update_basic`] — callers that want to
+    /// change one key merge against the existing JSON before calling this.
+    pub async fn set_attributes(
+        pool: &PgPool,
+        id: Uuid,
+        attributes: &serde_json::Value,
+    ) -> Result<Emitter, sqlx::Error> {
+        let sql =
+            format!("UPDATE emitter SET attributes = $2 WHERE id = $1 RETURNING {EMITTER_COLUMNS}");
+        sqlx::query_as::<_, Emitter>(&sql)
+            .bind(id)
+            .bind(attributes)
             .fetch_one(pool)
             .await
     }

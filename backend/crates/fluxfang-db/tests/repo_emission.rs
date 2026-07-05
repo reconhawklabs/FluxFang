@@ -64,6 +64,7 @@ async fn set_emitter_assigns_and_persists() {
             type_: None,
             entity_id: None,
             match_criteria: serde_json::json!({}),
+            ..Default::default()
         },
     )
     .await

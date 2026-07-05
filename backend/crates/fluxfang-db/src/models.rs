@@ -228,6 +228,17 @@ pub struct NewEntity {
 /// `type_` maps to the DB column `type` — `type` is a Rust keyword, so the
 /// field is renamed here (see `repo::emitter` for the explicit column list
 /// this requires on every query, same reasoning as `Emission::lon`/`lat`).
+///
+/// Phase A1 (`0004_emitter_classification.sql`) added four columns for the
+/// auto-classification pipeline (see
+/// `docs/superpowers/specs/2026-07-05-emitter-classification-design.md`):
+/// `emitter_type` (machine key, e.g. `"wifi_access_point"`; `None` for a
+/// plain user-made emitter), `attributes` (type-specific identifying
+/// info/metadata as JSON), `match_enabled` (lets the auto-attach rule be
+/// toggled off without deleting the emitter), and `identity_key` (stable
+/// de-dup key for auto-create, `None` for user-made emitters; unique in the
+/// DB but nullable, so many `None`s coexist — see the migration and
+/// [`crate::repo::emitter::EmitterRepo::get_or_create_by_identity`]).
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]
 pub struct Emitter {
     pub id: Uuid,
@@ -239,15 +250,52 @@ pub struct Emitter {
     pub match_criteria: serde_json::Value,
     pub first_seen_at: Option<DateTime<Utc>>,
     pub last_seen_at: Option<DateTime<Utc>>,
+    pub emitter_type: Option<String>,
+    pub attributes: serde_json::Value,
+    pub match_enabled: bool,
+    pub identity_key: Option<String>,
 }
 
 /// Fields required to create a new `emitter`.
+///
+/// Phase A1 added `emitter_type`/`attributes`/`match_enabled`/
+/// `identity_key` (mirroring the same additions to [`Emitter`] — see its
+/// doc comment). Every call site that existed before Phase A1 constructs
+/// this struct as a literal listing only the original four fields
+/// (`name`/`type_`/`entity_id`/`match_criteria`); rather than touching each
+/// one to spell out the four new fields individually, [`NewEmitter`]
+/// implements [`Default`] (empty name/`None`/`None`/`{}` for the original
+/// fields, `None`/`{}`/`true`/`None` for the new ones — the same defaults
+/// the DB columns themselves use) so those call sites only need one line
+/// added: `..Default::default()`. New call sites that care about
+/// `identity_key`/`emitter_type`/`attributes` (i.e. auto-create) should
+/// still set those fields explicitly; the `Default` impl exists for
+/// backward compatibility, not as the recommended shape for new code.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewEmitter {
     pub name: String,
     pub type_: Option<String>,
     pub entity_id: Option<Uuid>,
     pub match_criteria: serde_json::Value,
+    pub emitter_type: Option<String>,
+    pub attributes: serde_json::Value,
+    pub match_enabled: bool,
+    pub identity_key: Option<String>,
+}
+
+impl Default for NewEmitter {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            type_: None,
+            entity_id: None,
+            match_criteria: serde_json::json!({}),
+            emitter_type: None,
+            attributes: serde_json::json!({}),
+            match_enabled: true,
+            identity_key: None,
+        }
+    }
 }
 
 /// `zone`: a user-named geofence. `center` is `geography(Point,4326)` in

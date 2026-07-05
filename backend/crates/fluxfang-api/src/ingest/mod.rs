@@ -427,6 +427,7 @@ mod tests {
                     "match": "all",
                     "conditions": [{"field": "bssid", "op": "eq", "value": "aa:bb:cc:dd:ee:ff"}]
                 }),
+                ..Default::default()
             },
         )
         .await
@@ -486,6 +487,7 @@ mod tests {
                     "match": "all",
                     "conditions": [{"field": "channel", "op": "eq", "value": 6}]
                 }),
+                ..Default::default()
             },
         )
         .await
@@ -504,6 +506,7 @@ mod tests {
                     "match": "all",
                     "conditions": [{"field": "bssid", "op": "eq", "value": "aa:bb:cc:dd:ee:ff"}]
                 }),
+                ..Default::default()
             },
         )
         .await
@@ -557,6 +560,7 @@ mod tests {
                 type_: Some("wifi".to_string()),
                 entity_id: None,
                 match_criteria: serde_json::json!({"this": "is not a Rule"}),
+                ..Default::default()
             },
         )
         .await
@@ -573,6 +577,7 @@ mod tests {
                     "match": "all",
                     "conditions": [{"field": "bssid", "op": "eq", "value": "aa:bb:cc:dd:ee:ff"}]
                 }),
+                ..Default::default()
             },
         )
         .await

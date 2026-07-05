@@ -61,7 +61,8 @@ const ZONE_COLUMNS: &str =
 /// joined queries (see module docs on why qualification is needed here).
 const JOINED_EMITTER_COLUMNS: &str = "emitter.id, emitter.created_at, emitter.name, \
      emitter.type, emitter.entity_id, emitter.match_criteria, \
-     emitter.first_seen_at, emitter.last_seen_at";
+     emitter.first_seen_at, emitter.last_seen_at, emitter.emitter_type, \
+     emitter.attributes, emitter.match_enabled, emitter.identity_key";
 
 /// Table-qualified [`Entity`] column list for [`ZoneRepo::subjects_in_zone`].
 const JOINED_ENTITY_COLUMNS: &str = "entity.id, entity.created_at, entity.name, entity.notes";

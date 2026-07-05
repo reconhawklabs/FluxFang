@@ -479,6 +479,7 @@ impl EmitterRepoInsertHelper {
                 type_: None,
                 entity_id: None,
                 match_criteria: json!({}),
+                ..Default::default()
             },
         )
         .await

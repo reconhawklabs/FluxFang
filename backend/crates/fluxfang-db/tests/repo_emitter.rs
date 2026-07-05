@@ -17,6 +17,25 @@ fn new_emitter(name: &str) -> NewEmitter {
         type_: Some("Access Point".to_string()),
         entity_id: None,
         match_criteria: serde_json::json!({}),
+        ..Default::default()
+    }
+}
+
+/// Builds a `NewEmitter` for the auto-create path: identity_key `Some`,
+/// plus the classification fields a real classifier would set.
+fn new_auto_emitter(identity_key: &str) -> NewEmitter {
+    NewEmitter {
+        name: format!("WiFi AP ({identity_key})"),
+        type_: None,
+        entity_id: None,
+        match_criteria: serde_json::json!({
+            "match": "all",
+            "conditions": [{"field": "bssid", "op": "eq", "value": identity_key}]
+        }),
+        emitter_type: Some("wifi_access_point".to_string()),
+        attributes: serde_json::json!({"bssid": identity_key}),
+        match_enabled: true,
+        identity_key: Some(identity_key.to_string()),
     }
 }
 
@@ -291,4 +310,198 @@ async fn count_matching_rejects_invalid_rule() {
     };
     let err = EmitterRepo::count_matching(&pool, &rule).await.unwrap_err();
     assert!(matches!(err, EmitterRuleError::Rule(_)));
+}
+
+// ---------------------------------------------------------------------
+// Phase A1: classification columns (emitter_type/attributes/match_enabled/
+// identity_key) round-trip through insert/get, and get_or_create_by_identity
+// is a race-safe atomic get-or-create keyed on identity_key.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn insert_roundtrips_classification_columns() {
+    let pool = fresh_pool().await;
+
+    let new = NewEmitter {
+        name: "WiFi AP (aa:bb:cc:dd:ee:ff)".to_string(),
+        type_: None,
+        entity_id: None,
+        match_criteria: serde_json::json!({}),
+        emitter_type: Some("wifi_access_point".to_string()),
+        attributes: serde_json::json!({"bssid": "aa:bb:cc:dd:ee:ff", "ssid": "Home"}),
+        match_enabled: true,
+        identity_key: Some("wifi_access_point:aa:bb:cc:dd:ee:ff".to_string()),
+    };
+    let created = EmitterRepo::insert(&pool, new).await.unwrap();
+    assert_eq!(created.emitter_type.as_deref(), Some("wifi_access_point"));
+    assert_eq!(
+        created.attributes,
+        serde_json::json!({"bssid": "aa:bb:cc:dd:ee:ff", "ssid": "Home"})
+    );
+    assert!(created.match_enabled);
+    assert_eq!(
+        created.identity_key.as_deref(),
+        Some("wifi_access_point:aa:bb:cc:dd:ee:ff")
+    );
+
+    let got = EmitterRepo::get(&pool, created.id).await.unwrap().unwrap();
+    assert_eq!(got.emitter_type, created.emitter_type);
+    assert_eq!(got.attributes, created.attributes);
+    assert_eq!(got.match_enabled, created.match_enabled);
+    assert_eq!(got.identity_key, created.identity_key);
+}
+
+#[tokio::test]
+async fn insert_defaults_classification_columns_when_a_plain_user_made_emitter_is_created() {
+    let pool = fresh_pool().await;
+    let created = EmitterRepo::insert(&pool, new_emitter("Plain AP"))
+        .await
+        .unwrap();
+    assert_eq!(created.emitter_type, None);
+    assert_eq!(created.attributes, serde_json::json!({}));
+    assert!(created.match_enabled);
+    assert_eq!(created.identity_key, None);
+}
+
+#[tokio::test]
+async fn get_or_create_by_identity_creates_on_first_call() {
+    let pool = fresh_pool().await;
+
+    let (emitter, created) =
+        EmitterRepo::get_or_create_by_identity(&pool, new_auto_emitter("aa:bb:cc:dd:ee:ff"))
+            .await
+            .unwrap();
+
+    assert!(created, "first call for a fresh identity_key must create");
+    assert_eq!(emitter.identity_key.as_deref(), Some("aa:bb:cc:dd:ee:ff"));
+    assert_eq!(emitter.emitter_type.as_deref(), Some("wifi_access_point"));
+
+    let all = EmitterRepo::list(&pool).await.unwrap();
+    assert_eq!(all.len(), 1);
+}
+
+#[tokio::test]
+async fn get_or_create_by_identity_gets_the_same_row_on_second_call() {
+    let pool = fresh_pool().await;
+
+    let (first, first_created) =
+        EmitterRepo::get_or_create_by_identity(&pool, new_auto_emitter("aa:bb:cc:dd:ee:ff"))
+            .await
+            .unwrap();
+    assert!(first_created);
+
+    let (second, second_created) =
+        EmitterRepo::get_or_create_by_identity(&pool, new_auto_emitter("aa:bb:cc:dd:ee:ff"))
+            .await
+            .unwrap();
+
+    assert!(
+        !second_created,
+        "second call for the same identity_key must GET, not create"
+    );
+    assert_eq!(
+        second.id, first.id,
+        "must return the SAME row, not a new one"
+    );
+
+    let all = EmitterRepo::list(&pool).await.unwrap();
+    assert_eq!(
+        all.len(),
+        1,
+        "exactly one emitter must exist for this identity_key, not two"
+    );
+}
+
+/// The atomicity guarantee that actually matters: two concurrent calls with
+/// the SAME identity_key must never both create a row. `tokio::join!` runs
+/// both futures concurrently against the same pool (which has more than one
+/// physical connection, see `common::fresh_pool`'s `max_connections(5)`), so
+/// both `INSERT ... ON CONFLICT DO NOTHING` statements can genuinely race at
+/// the database level rather than being serialized by single-connection
+/// pooling. Exactly one of the two calls must observe `created = true`, and
+/// exactly one row must exist afterwards.
+#[tokio::test]
+async fn get_or_create_by_identity_is_race_safe_under_concurrent_calls() {
+    let pool = fresh_pool().await;
+
+    let (r1, r2) = tokio::join!(
+        EmitterRepo::get_or_create_by_identity(&pool, new_auto_emitter("aa:bb:cc:dd:ee:ff")),
+        EmitterRepo::get_or_create_by_identity(&pool, new_auto_emitter("aa:bb:cc:dd:ee:ff")),
+    );
+    let (e1, created1) = r1.unwrap();
+    let (e2, created2) = r2.unwrap();
+
+    assert_eq!(e1.id, e2.id, "both calls must resolve to the same row");
+    assert_eq!(
+        created1 as u8 + created2 as u8,
+        1,
+        "exactly one of the two concurrent calls must have created the row \
+         (created1={created1}, created2={created2})"
+    );
+
+    let all = EmitterRepo::list(&pool).await.unwrap();
+    assert_eq!(
+        all.len(),
+        1,
+        "a concurrent pair of get_or_create_by_identity calls for the same \
+         identity_key must produce exactly ONE row, got {}",
+        all.len()
+    );
+}
+
+#[tokio::test]
+async fn get_or_create_by_identity_distinguishes_different_identity_keys() {
+    let pool = fresh_pool().await;
+
+    let (a, a_created) =
+        EmitterRepo::get_or_create_by_identity(&pool, new_auto_emitter("aa:bb:cc:dd:ee:ff"))
+            .await
+            .unwrap();
+    let (b, b_created) =
+        EmitterRepo::get_or_create_by_identity(&pool, new_auto_emitter("11:22:33:44:55:66"))
+            .await
+            .unwrap();
+
+    assert!(a_created);
+    assert!(b_created);
+    assert_ne!(a.id, b.id);
+
+    let all = EmitterRepo::list(&pool).await.unwrap();
+    assert_eq!(all.len(), 2);
+}
+
+#[tokio::test]
+async fn set_match_enabled_flips_the_flag() {
+    let pool = fresh_pool().await;
+    let emitter = EmitterRepo::insert(&pool, new_emitter("AP")).await.unwrap();
+    assert!(emitter.match_enabled, "match_enabled defaults to true");
+
+    let disabled = EmitterRepo::set_match_enabled(&pool, emitter.id, false)
+        .await
+        .unwrap();
+    assert!(!disabled.match_enabled);
+
+    let got = EmitterRepo::get(&pool, emitter.id).await.unwrap().unwrap();
+    assert!(!got.match_enabled);
+
+    let re_enabled = EmitterRepo::set_match_enabled(&pool, emitter.id, true)
+        .await
+        .unwrap();
+    assert!(re_enabled.match_enabled);
+}
+
+#[tokio::test]
+async fn set_attributes_roundtrips_json() {
+    let pool = fresh_pool().await;
+    let emitter = EmitterRepo::insert(&pool, new_emitter("AP")).await.unwrap();
+    assert_eq!(emitter.attributes, serde_json::json!({}));
+
+    let attrs = serde_json::json!({"bssid": "aa:bb:cc:dd:ee:ff", "randomized_mac": true});
+    let updated = EmitterRepo::set_attributes(&pool, emitter.id, &attrs)
+        .await
+        .unwrap();
+    assert_eq!(updated.attributes, attrs);
+
+    let got = EmitterRepo::get(&pool, emitter.id).await.unwrap().unwrap();
+    assert_eq!(got.attributes, attrs);
 }
