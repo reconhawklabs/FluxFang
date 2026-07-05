@@ -180,7 +180,12 @@ impl CapturerFactory for RealCapturerFactory {
 /// or [`MockCapturerFactory::with_gps_fixes`] before starting the matching
 /// kind of data source; every `build()` call for that kind clones the same
 /// configured replay data (fine for this slice's single-source-at-a-time
-/// tests).
+/// tests). [`Self::set_wifi_observations`] additionally lets a caller
+/// already holding a live `Arc<MockCapturerFactory>` stage a *different*
+/// batch for a later data-source start, and [`Self::looping_gps`] keeps a
+/// gps-backed session alive indefinitely instead of self-closing as soon as
+/// a finite fix list drains — both added for `tests/e2e.rs`'s multi-stage
+/// scenario (see their own doc comments).
 ///
 /// Not `#[cfg(test)]`: `tests/data_sources.rs` (a separate integration-test
 /// binary) needs to construct it too, and `#[cfg(test)]` items aren't
@@ -193,6 +198,10 @@ pub struct MockCapturerFactory {
     /// via [`MockCapturer::failing`] so its `start()` always errors —
     /// see [`Self::failing_wifi_start`].
     fail_wifi_start: std::sync::atomic::AtomicBool,
+    /// When set, every gps `build()` call's `MockGps` is configured via
+    /// [`MockGps::looping`] instead of stopping once its fix list drains —
+    /// see [`Self::looping_gps`].
+    loop_gps: std::sync::atomic::AtomicBool,
 }
 
 impl MockCapturerFactory {
@@ -203,6 +212,7 @@ impl MockCapturerFactory {
             wifi_observations: std::sync::Mutex::new(Vec::new()),
             gps_fixes: std::sync::Mutex::new(Vec::new()),
             fail_wifi_start: std::sync::atomic::AtomicBool::new(false),
+            loop_gps: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -221,6 +231,21 @@ impl MockCapturerFactory {
         factory
     }
 
+    /// Replace the wifi observations every subsequent wifi `build()` call
+    /// will replay, without needing a fresh factory instance. Runtime
+    /// (`&self`, not a consuming builder like [`Self::with_wifi_observations`])
+    /// so a caller that's already handed `Arc<dyn CapturerFactory>` to a live
+    /// `CaptureSupervisor`/`AppState` (and so only has this concrete type
+    /// behind its own separate `Arc<MockCapturerFactory>`) can still stage a
+    /// second, different batch of observations for a later data-source start
+    /// — e.g. `tests/e2e.rs`'s round-1 (unassigned, pre-emitter) vs round-2
+    /// (post-alert-rule) emissions, which a single fixed `Vec` set once at
+    /// construction couldn't express since each round needs its own distinct
+    /// content.
+    pub fn set_wifi_observations(&self, observations: Vec<RawObservation>) {
+        *self.wifi_observations.lock().expect("mutex poisoned") = observations;
+    }
+
     /// Chainable: make every wifi `build()` call's `MockCapturer` fail its
     /// `start()` — used to test `CaptureSupervisor::start`'s failure path
     /// (status flips to `error`, and — the regression this guards — no
@@ -228,6 +253,27 @@ impl MockCapturerFactory {
     /// hardware.
     pub fn failing_wifi_start(self) -> Self {
         self.fail_wifi_start
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self
+    }
+
+    /// Chainable: make every gps `build()` call's `MockGps` loop its
+    /// configured fixes forever instead of stopping once the list drains.
+    ///
+    /// Needed because [`MockGps`] (unlike [`MockCapturer`], which paces
+    /// itself via a real `interval` between sends) has no artificial delay
+    /// between fixes at all — a finite, non-looping track drains as fast as
+    /// each fix's `location_fix` DB write completes, which
+    /// [`session::run_ingest_loop`](crate::ingest::session) then treats as
+    /// **source exhaustion**: the shared `survey_session` self-closes almost
+    /// immediately, well before a realistic caller (e.g. an end-to-end test
+    /// driving several more HTTP requests, or a wifi-only data source
+    /// wanting to keep reusing this same gps-backed session) is done with
+    /// it. Looping keeps the session's `current_session_id()` valid and its
+    /// `latest_fix()` fresh for as long as the caller needs, only ending
+    /// when the gps data source is explicitly stopped.
+    pub fn looping_gps(self) -> Self {
+        self.loop_gps
             .store(true, std::sync::atomic::Ordering::SeqCst);
         self
     }
@@ -260,7 +306,11 @@ impl CapturerFactory for MockCapturerFactory {
             }
             "gps" => {
                 let fixes = self.gps_fixes.lock().expect("mutex poisoned").clone();
-                Ok(BuiltCapture::Gps(Box::new(MockGps::new(fixes))))
+                let mut gps = MockGps::new(fixes);
+                if self.loop_gps.load(std::sync::atomic::Ordering::SeqCst) {
+                    gps = gps.looping(true);
+                }
+                Ok(BuiltCapture::Gps(Box::new(gps)))
             }
             other => Err(anyhow!("MockCapturerFactory: unsupported kind '{other}'")),
         }
