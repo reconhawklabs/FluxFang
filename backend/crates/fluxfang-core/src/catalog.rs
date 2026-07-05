@@ -42,6 +42,7 @@ fn wifi_catalog() -> Vec<FieldDef> {
     vec![
         field("bssid", "BSSID", FieldType::Mac),
         field("mac", "MAC address", FieldType::Mac),
+        field("src_mac", "Source MAC (client)", FieldType::Mac),
         field("ssid", "SSID", FieldType::Text),
         field(
             "frame_type",
@@ -73,6 +74,14 @@ mod tests {
         assert!(bssid.ops.contains(&Op::Eq));
         assert!(bssid.ops.contains(&Op::Matches));
         assert!(!bssid.ops.contains(&Op::Gte)); // mac isn't ordered
+    }
+
+    #[test]
+    fn wifi_catalog_exposes_src_mac_as_mac_field() {
+        let c = catalog_for("wifi");
+        let src_mac = c.iter().find(|f| f.key == "src_mac").unwrap();
+        assert_eq!(src_mac.ty, FieldType::Mac);
+        assert!(src_mac.ops.contains(&Op::Eq));
     }
 
     #[test]

@@ -8,12 +8,16 @@
 
 pub mod auth;
 pub mod catalog;
+pub mod classify;
 pub mod rule;
 pub mod rule_sql;
 pub mod secrets;
 
 pub use auth::{hash_password, verify_password};
 pub use catalog::{catalog_for, FieldDef, FieldType};
+pub use classify::{
+    classify, emitter_category, emitter_type_label, is_randomized_mac, Classification,
+};
 pub use rule::{Condition, MatchMode, Op, Rule};
 pub use rule_sql::{conditions_to_sql, conditions_to_sql_checked, RuleSqlError};
 pub use secrets::{decrypt, encrypt, key_from_base64, SecretError};
