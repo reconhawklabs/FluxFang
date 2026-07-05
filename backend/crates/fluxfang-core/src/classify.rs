@@ -139,6 +139,52 @@ pub fn emitter_category(type_key: &str) -> &'static str {
     }
 }
 
+/// One emitter type as exposed to a caller building a "pick a type"
+/// dropdown (see [`emitter_types_for_kind`]): a machine `key` (what gets
+/// stored as `Emitter::emitter_type`/sent as `POST /api/emitters`'
+/// `emitter_type`) paired with the same human-readable `label`
+/// [`emitter_type_label`] would derive from that key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmitterTypeInfo {
+    pub key: &'static str,
+    pub label: &'static str,
+}
+
+/// The known emitter types for a data-source `kind`, for a frontend type
+/// dropdown (replacing a free-text field). Data-driven and additive, same
+/// spirit as [`classify`]: adding Bluetooth later means adding a new match
+/// arm here, no other code changes. An unrecognized `kind` returns an empty
+/// vec rather than erroring — mirrors `catalog_for`'s "unknown kind has no
+/// fields" convention.
+///
+/// Labels here are kept in lockstep with [`emitter_type_label`] by
+/// construction (both list the same key/label pairs) rather than by
+/// deriving one from the other, since `emitter_type_label`'s signature
+/// (`&str -> &'static str`) has no "which keys exist" direction to walk.
+pub fn emitter_types_for_kind(kind: &str) -> Vec<EmitterTypeInfo> {
+    match kind {
+        "wifi" => vec![
+            EmitterTypeInfo {
+                key: "wifi_access_point",
+                label: "WiFi Access Point",
+            },
+            EmitterTypeInfo {
+                key: "wifi_client",
+                label: "WiFi Client",
+            },
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// True if `type_key` is a recognized emitter type (i.e. appears in some
+/// [`emitter_types_for_kind`] listing) — used to validate a caller-supplied
+/// `emitter_type` on emitter creation before it's stored. Currently just
+/// the wifi pair; grows alongside `emitter_types_for_kind`.
+pub fn is_known_emitter_type(type_key: &str) -> bool {
+    matches!(type_key, "wifi_access_point" | "wifi_client")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,5 +329,43 @@ mod tests {
         assert_eq!(emitter_category("wifi_access_point"), "wifi");
         assert_eq!(emitter_category("wifi_client"), "wifi");
         assert_eq!(emitter_category("bluetooth_device"), "other");
+    }
+
+    // -- emitter_types_for_kind / is_known_emitter_type ----------------------
+
+    #[test]
+    fn emitter_types_for_kind_wifi_lists_both_types_with_matching_labels() {
+        let types = emitter_types_for_kind("wifi");
+        assert_eq!(
+            types,
+            vec![
+                EmitterTypeInfo {
+                    key: "wifi_access_point",
+                    label: "WiFi Access Point",
+                },
+                EmitterTypeInfo {
+                    key: "wifi_client",
+                    label: "WiFi Client",
+                },
+            ]
+        );
+        // Consistent with emitter_type_label for every listed key.
+        for t in &types {
+            assert_eq!(emitter_type_label(t.key), t.label);
+        }
+    }
+
+    #[test]
+    fn emitter_types_for_kind_unknown_kind_is_empty() {
+        assert_eq!(emitter_types_for_kind("bluetooth"), Vec::new());
+        assert_eq!(emitter_types_for_kind(""), Vec::new());
+    }
+
+    #[test]
+    fn is_known_emitter_type_true_for_wifi_types_false_otherwise() {
+        assert!(is_known_emitter_type("wifi_access_point"));
+        assert!(is_known_emitter_type("wifi_client"));
+        assert!(!is_known_emitter_type("bluetooth_device"));
+        assert!(!is_known_emitter_type(""));
     }
 }

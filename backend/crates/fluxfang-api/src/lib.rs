@@ -47,6 +47,7 @@ pub mod catalog_routes;
 pub mod data_sources;
 pub mod dto;
 pub mod emissions;
+pub mod emitter_type_routes;
 pub mod emitters;
 pub mod entities;
 pub mod ingest;
@@ -87,6 +88,7 @@ pub fn app(state: AppState) -> Router {
         .merge(catalog_routes::protected_routes())
         .merge(data_sources::protected_routes())
         .merge(emissions::protected_routes())
+        .merge(emitter_type_routes::protected_routes())
         .merge(emitters::protected_routes())
         .merge(entities::protected_routes())
         .merge(notifications::protected_routes())

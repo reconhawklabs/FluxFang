@@ -171,6 +171,133 @@ async fn create_emitter_from_emission_id_prefills_default_rule_and_attaches() {
     );
 }
 
+/// `POST /api/emitters` with an `emitter_type` stores it, and the created
+/// (and re-fetched) emitter's `type_label`/`category` derive from it via
+/// `fluxfang_core::{emitter_type_label, emitter_category}` — the frontend's
+/// dropdown-driven create flow this endpoint now supports.
+#[tokio::test]
+async fn create_emitter_with_emitter_type_derives_label_and_category() {
+    let (app, _pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    let body = json!({
+        "name": "Bob's AP",
+        "type": "Access Point",
+        "emitter_type": "wifi_access_point",
+        "match_criteria": {"match": "all", "conditions": []}
+    })
+    .to_string();
+
+    let resp = post_json_with_cookie(&app, "/api/emitters", &body, &cookie).await;
+    assert_status(&resp, StatusCode::CREATED);
+    let resp_body = body_json(resp).await;
+    let emitter_id = resp_body["emitter"]["id"].as_str().unwrap().to_string();
+    assert_eq!(resp_body["emitter"]["emitter_type"], "wifi_access_point");
+    assert_eq!(resp_body["emitter"]["type_label"], "WiFi Access Point");
+    assert_eq!(resp_body["emitter"]["category"], "wifi");
+
+    // Re-fetch via GET to confirm it's persisted, not just echoed back.
+    let get_resp = get_with_cookie(&app, &format!("/api/emitters/{emitter_id}"), &cookie).await;
+    assert_status(&get_resp, StatusCode::OK);
+    let get_body = body_json(get_resp).await;
+    assert_eq!(get_body["emitter_type"], "wifi_access_point");
+    assert_eq!(get_body["type_label"], "WiFi Access Point");
+    assert_eq!(get_body["category"], "wifi");
+}
+
+/// An unknown `emitter_type` is rejected with `400` before any row is
+/// inserted.
+#[tokio::test]
+async fn create_emitter_with_invalid_emitter_type_is_bad_request() {
+    let (app, _pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    let body = json!({
+        "name": "Mystery Device",
+        "emitter_type": "bluetooth_beacon",
+        "match_criteria": {"match": "all", "conditions": []}
+    })
+    .to_string();
+
+    let resp = post_json_with_cookie(&app, "/api/emitters", &body, &cookie).await;
+    assert_status(&resp, StatusCode::BAD_REQUEST);
+}
+
+/// Absent `emitter_type` behaves exactly as before: free-text `type` only,
+/// `emitter_type` left `NULL`, `type_label` falls back to the free-text
+/// `type`.
+#[tokio::test]
+async fn create_emitter_without_emitter_type_leaves_it_null() {
+    let (app, _pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    let body = json!({
+        "name": "Plain Emitter",
+        "type": "Custom Thing"
+    })
+    .to_string();
+
+    let resp = post_json_with_cookie(&app, "/api/emitters", &body, &cookie).await;
+    assert_status(&resp, StatusCode::CREATED);
+    let resp_body = body_json(resp).await;
+    assert!(
+        resp_body["emitter"]["emitter_type"].is_null(),
+        "body: {resp_body}"
+    );
+    assert_eq!(resp_body["emitter"]["type_label"], "Custom Thing");
+    assert!(resp_body["emitter"]["category"].is_null());
+}
+
+/// `POST /api/emitters/with-entity` also accepts `emitter_type`, stored the
+/// same way.
+#[tokio::test]
+async fn with_entity_accepts_emitter_type() {
+    let (app, _pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    let body = json!({
+        "emitter": {
+            "name": "Bob's phone AP",
+            "type": "Access Point",
+            "emitter_type": "wifi_access_point",
+            "match_criteria": {"match": "all", "conditions": []}
+        },
+        "entity": {
+            "name": "Bob's phone"
+        }
+    })
+    .to_string();
+
+    let resp = post_json_with_cookie(&app, "/api/emitters/with-entity", &body, &cookie).await;
+    assert_status(&resp, StatusCode::CREATED);
+    let resp_body = body_json(resp).await;
+    assert_eq!(resp_body["emitter"]["emitter_type"], "wifi_access_point");
+    assert_eq!(resp_body["emitter"]["type_label"], "WiFi Access Point");
+}
+
+/// `POST /api/emitters/with-entity` also rejects an unknown `emitter_type`
+/// with `400`.
+#[tokio::test]
+async fn with_entity_invalid_emitter_type_is_bad_request() {
+    let (app, _pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    let body = json!({
+        "emitter": {
+            "name": "Mystery",
+            "emitter_type": "not_a_real_type",
+            "match_criteria": {"match": "all", "conditions": []}
+        },
+        "entity": {
+            "name": "Someone"
+        }
+    })
+    .to_string();
+
+    let resp = post_json_with_cookie(&app, "/api/emitters/with-entity", &body, &cookie).await;
+    assert_status(&resp, StatusCode::BAD_REQUEST);
+}
+
 /// (c) `GET /api/emitters/preview?rule=...` returns the match count without
 /// assigning anything.
 #[tokio::test]

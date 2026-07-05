@@ -70,7 +70,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 use fluxfang_core::rule::{Condition, MatchMode, Op};
-use fluxfang_core::{catalog_for, conditions_to_sql_checked, Rule, RuleSqlError};
+use fluxfang_core::{
+    catalog_for, conditions_to_sql_checked, is_known_emitter_type, Rule, RuleSqlError,
+};
 use fluxfang_db::models::{NewEmitter, NewEntity};
 use fluxfang_db::repo::emitter::{EmitterRuleError, EmitterWithEntity};
 use fluxfang_db::{EmissionRepo, EmitterRepo};
@@ -99,6 +101,21 @@ pub fn protected_routes() -> Router<AppState> {
 fn validate_rule(rule: &Rule) -> Result<(), RuleSqlError> {
     let catalog = catalog_for("wifi");
     conditions_to_sql_checked(&rule.conditions, rule.match_mode, 1, &catalog).map(|_| ())
+}
+
+/// Reject an unrecognized `emitter_type` (e.g. `Some("bluetooth_beacon")`)
+/// with `400` before any row is inserted — same "validate before mutating"
+/// convention `validate_rule` follows. `None` (the field wasn't given at
+/// all) always passes: this only guards a caller-supplied value, matching
+/// today's behavior when `emitter_type` is absent (free-text `type` only,
+/// `emitter_type` left `NULL`).
+fn validate_emitter_type(emitter_type: &Option<String>) -> Result<(), ApiError> {
+    match emitter_type {
+        Some(t) if !is_known_emitter_type(t) => {
+            Err(ApiError::BadRequest(format!("unknown emitter_type: {t:?}")))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Parse `raw` (a `match_criteria` JSON value) into a [`Rule`], mapping a
@@ -141,6 +158,18 @@ struct CreateEmitterRequest {
     /// module docs.
     #[serde(default)]
     from_emission_id: Option<Uuid>,
+    /// Optional machine emitter-type key (e.g. `"wifi_access_point"`),
+    /// letting a frontend "create emitter" form send a dropdown selection
+    /// (backed by `GET /api/emitter-types/:kind`) instead of only the
+    /// free-text `type`. When given, it's validated against
+    /// `fluxfang_core::is_known_emitter_type` (400 if unrecognized) and
+    /// stored on `Emitter::emitter_type`, so the created emitter's
+    /// `type_label`/`category` derive from it like an auto-classified one
+    /// would. `type_` (the free-text label) may still be given
+    /// independently — the two aren't mutually exclusive. Absent entirely
+    /// (the pre-existing behavior): `emitter_type` stays `NULL`.
+    #[serde(default)]
+    emitter_type: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -158,6 +187,7 @@ async fn create_emitter(
             "match_criteria and from_emission_id are mutually exclusive".to_string(),
         ));
     }
+    validate_emitter_type(&req.emitter_type)?;
 
     let (match_criteria, rule) =
         resolve_match_criteria(&state, req.match_criteria, req.from_emission_id).await?;
@@ -167,6 +197,7 @@ async fn create_emitter(
         type_: req.type_,
         entity_id: req.entity_id,
         match_criteria,
+        emitter_type: req.emitter_type,
         ..Default::default()
     };
     let created = EmitterRepo::insert(&state.pool, new).await?;
@@ -367,6 +398,10 @@ struct CreateWithEntityEmitter {
     type_: Option<String>,
     #[serde(default)]
     match_criteria: Option<serde_json::Value>,
+    /// Same optional machine emitter-type key as `POST /api/emitters`' own
+    /// `emitter_type` field — see [`CreateEmitterRequest`]'s doc comment.
+    #[serde(default)]
+    emitter_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -393,6 +428,8 @@ async fn create_with_entity(
     State(state): State<AppState>,
     Json(req): Json<CreateWithEntityRequest>,
 ) -> Result<(StatusCode, Json<EmitterEntityAndCount>), ApiError> {
+    validate_emitter_type(&req.emitter.emitter_type)?;
+
     let (match_criteria, rule) = match req.emitter.match_criteria {
         Some(raw) => {
             let rule = parse_rule(&raw)?;
@@ -410,6 +447,7 @@ async fn create_with_entity(
         },
         req.emitter.name,
         req.emitter.type_,
+        req.emitter.emitter_type,
         match_criteria,
         rule.as_ref(),
     )

@@ -16,7 +16,8 @@ pub mod secrets;
 pub use auth::{hash_password, verify_password};
 pub use catalog::{catalog_for, FieldDef, FieldType};
 pub use classify::{
-    classify, emitter_category, emitter_type_label, is_randomized_mac, Classification,
+    classify, emitter_category, emitter_type_label, emitter_types_for_kind, is_known_emitter_type,
+    is_randomized_mac, Classification, EmitterTypeInfo,
 };
 pub use rule::{Condition, MatchMode, Op, Rule};
 pub use rule_sql::{conditions_to_sql, conditions_to_sql_checked, RuleSqlError};

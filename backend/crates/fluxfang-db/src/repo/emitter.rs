@@ -470,10 +470,19 @@ impl EmitterRepo {
     /// the same one `attach_emissions_matching` runs, so an invalid rule
     /// still surfaces as `EmitterRuleError::Rule` and rolls back cleanly
     /// (the transaction is simply dropped, never committed).
+    ///
+    /// `type_` is the free-text `type` column value; `emitter_type` is the
+    /// machine emitter-type key (e.g. `"wifi_access_point"`) stored on the
+    /// `emitter_type` DB column — same naming as `NewEmitter`'s own fields.
+    /// `fluxfang-api` is expected to have already validated `emitter_type`
+    /// against `fluxfang_core::is_known_emitter_type` before calling this,
+    /// same as `rule`.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_with_entity(
         pool: &PgPool,
         new_entity: NewEntity,
         emitter_name: String,
+        type_: Option<String>,
         emitter_type: Option<String>,
         match_criteria: serde_json::Value,
         rule: Option<&Rule>,
@@ -490,15 +499,16 @@ impl EmitterRepo {
         .map_err(EmitterRuleError::Sql)?;
 
         let emitter_sql = format!(
-            "INSERT INTO emitter (name, type, entity_id, match_criteria) \
-             VALUES ($1, $2, $3, $4) \
+            "INSERT INTO emitter (name, type, entity_id, match_criteria, emitter_type) \
+             VALUES ($1, $2, $3, $4, $5) \
              RETURNING {EMITTER_COLUMNS}"
         );
         let mut emitter = sqlx::query_as::<_, Emitter>(&emitter_sql)
             .bind(emitter_name)
-            .bind(emitter_type)
+            .bind(type_)
             .bind(Some(entity.id))
             .bind(match_criteria)
+            .bind(emitter_type)
             .fetch_one(&mut *tx)
             .await
             .map_err(EmitterRuleError::Sql)?;
