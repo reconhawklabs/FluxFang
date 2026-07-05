@@ -1,0 +1,26 @@
+//! One module per aggregate repository. Each file owns the SQL for a single
+//! table (or tightly-related pair) and exposes a unit struct with async
+//! associated functions taking `&PgPool` — no repo holds its own pool, so
+//! callers are free to share one pool across every repo.
+//!
+//! ## sqlx: runtime `query_as` vs. compile-time `query_as!`
+//!
+//! These repos use the **runtime** `sqlx::query_as::<_, T>()` /
+//! `sqlx::query()` functions, not the compile-time-checked `query!`/
+//! `query_as!` macros. The macros need a live `DATABASE_URL` (or a
+//! committed `.sqlx` offline cache) available at `cargo build`/`cargo check`
+//! time for every workspace member, which would force CI and every
+//! contributor's machine to have Postgres reachable (or a cache kept in
+//! sync) just to compile. The runtime functions push that requirement out
+//! to `cargo test` only, where it's already required for the DB round-trip
+//! tests. The trade-off is column/type typos are caught at test time
+//! instead of compile time — acceptable given the repo test suite exercises
+//! every query.
+
+pub mod app_config;
+pub mod data_source;
+pub mod session;
+
+pub use app_config::AppConfigRepo;
+pub use data_source::DataSourceRepo;
+pub use session::SessionRepo;
