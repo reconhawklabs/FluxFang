@@ -69,3 +69,26 @@ fn unrecognized_sentence_returns_none() {
     let line = "$GPGSA,A,3,04,05,,09,12,,,24,,,,,2.5,1.3,2.1*39";
     assert_eq!(parse_nmea(line, date()), None);
 }
+
+#[test]
+fn gga_non_numeric_quality_field_returns_none() {
+    // Correct field count, but the quality slot (index 6) holds a
+    // non-numeric value. `.parse().ok()?` should reject it cleanly.
+    let line = "$GPGGA,123519,4807.038,N,01131.000,E,X,08,0.9,545.4,M,46.9,M,,*00";
+    assert_eq!(parse_nmea(line, date()), None);
+}
+
+#[test]
+fn gga_multibyte_char_in_lat_field_returns_none_without_panic() {
+    // Regression test: the lat field is "0é31.000" - a multi-byte UTF-8
+    // character ('é', bytes 1..3) straddling byte offset 2, which is
+    // where `parse_coord` used to call `raw.split_at(2)` for a lat field
+    // (degree_digits == 2). `str::split_at` panics if the offset isn't on
+    // a UTF-8 char boundary; byte offset 2 falls in the *middle* of 'é's
+    // 2-byte encoding (confirmed via `str::is_char_boundary`), so this
+    // used to kill the whole process instead of returning `None`. Field
+    // count is otherwise well-formed (10 GGA fields); only the lat field
+    // is garbled.
+    let line = "$GPGGA,123519,0\u{e9}31.000,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47";
+    assert_eq!(parse_nmea(line, date()), None);
+}

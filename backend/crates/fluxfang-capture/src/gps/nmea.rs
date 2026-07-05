@@ -181,7 +181,12 @@ fn parse_coord(raw: &str, hemisphere: &str, degree_digits: usize) -> Option<f64>
     if raw.len() <= degree_digits {
         return None;
     }
-    let (deg_str, min_str) = raw.split_at(degree_digits);
+    // `str::split_at` panics if `degree_digits` isn't on a UTF-8 char
+    // boundary (possible with garbled/malicious input containing
+    // multi-byte characters). Use the byte-safe, Option-returning
+    // `get` instead - same pattern as `parse_time_of_day` above.
+    let deg_str = raw.get(..degree_digits)?;
+    let min_str = raw.get(degree_digits..)?;
     let degrees: f64 = deg_str.parse().ok()?;
     let minutes: f64 = min_str.parse().ok()?;
     let value = degrees + minutes / 60.0;

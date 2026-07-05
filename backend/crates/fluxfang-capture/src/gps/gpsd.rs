@@ -102,6 +102,9 @@ impl GpsSource for GpsdSource {
 /// - `time` is missing - `GpsFix::at` is required and this function never
 ///   substitutes `Utc::now()` for a missing value (that would make it
 ///   impure); a `TPV` with no fix and no time is simply not a usable fix.
+/// - `mode` is `< 2` (no 2D/3D fix) - checked explicitly as defense in
+///   depth even though gpsd is supposed to omit `lat`/`lon` in that case;
+///   an off-spec/malicious report shouldn't be trusted to honor that.
 ///
 /// Field mapping:
 /// - `lat`/`lon` -> `GpsFix::lat`/`lon` directly (already decimal degrees).
@@ -130,6 +133,13 @@ pub fn parse_tpv(value: &serde_json::Value) -> Option<GpsFix> {
     let speed = value.get("speed").and_then(|v| v.as_f64());
     let heading = value.get("track").and_then(|v| v.as_f64());
     let quality = value.get("mode").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    if quality < 2 {
+        // Defense in depth: gpsd is supposed to omit lat/lon on a
+        // mode < 2 ("no fix") TPV, but don't trust that off-spec
+        // (or malicious) input can't carry stale/placeholder
+        // coordinates alongside a no-fix mode.
+        return None;
+    }
 
     Some(GpsFix {
         at,
@@ -201,6 +211,21 @@ mod tests {
         // gpsd reports a TPV with mode 1 ("no fix") and omits lat/lon
         // entirely rather than sending stale/zero coordinates.
         let value = json!({"class": "TPV", "mode": 1, "time": "2026-07-05T12:35:19.000Z"});
+        assert_eq!(parse_tpv(&value), None);
+    }
+
+    #[test]
+    fn mode_1_with_stale_lat_lon_returns_none() {
+        // Off-spec (or malicious) TPV: mode 1 ("no fix") but lat/lon are
+        // present anyway (e.g. stale from a previous fix). The explicit
+        // `mode >= 2` guard must reject it even though lat/lon parse fine.
+        let value = json!({
+            "class": "TPV",
+            "mode": 1,
+            "time": "2026-07-05T12:35:19.000Z",
+            "lat": 48.1173,
+            "lon": 11.5167,
+        });
         assert_eq!(parse_tpv(&value), None);
     }
 
