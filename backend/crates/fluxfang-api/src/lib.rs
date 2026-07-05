@@ -41,6 +41,7 @@
 //! whichever future task adds a persistent, signed/private-cookie store.
 
 pub mod auth_routes;
+pub mod ingest;
 pub mod middleware;
 pub mod notify;
 pub mod state;

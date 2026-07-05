@@ -168,9 +168,21 @@ pub async fn seed_gps_source(pool: &PgPool) -> Uuid {
 /// Open a `survey_session` row, returning its id. `emission.session_id`
 /// (via `NewEmission::session_id`) is a required FK, so `EmissionRepo`
 /// tests need a real session row to attach rows to.
+///
+/// Several callers (e.g. `repo_emission.rs`'s session-filter test) call
+/// this more than once per test purely as an FK factory to get distinct
+/// session ids — with no interest in "active session" semantics at all.
+/// Since Task 5.1's `0002_single_active_session.sql` makes it a hard DB
+/// error to have two rows with `ended_at IS NULL` at once, this
+/// self-heals (closes whatever's currently active, exactly like
+/// `SessionManager::open` does in production) before opening the next
+/// one, so those FK-factory call sites keep working unmodified.
 pub async fn seed_session(pool: &PgPool) -> Uuid {
     use fluxfang_db::SessionRepo;
 
+    SessionRepo::close_active(pool)
+        .await
+        .expect("self-heal: close any active survey_session");
     let session = SessionRepo::open(pool).await.expect("seed survey_session");
     session.id
 }

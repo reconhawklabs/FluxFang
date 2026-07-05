@@ -565,8 +565,10 @@ dependencies = [
 name = "fluxfang-api"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "chrono",
+ "fluxfang-capture",
  "fluxfang-core",
  "fluxfang-db",
  "hex",

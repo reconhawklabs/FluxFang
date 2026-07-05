@@ -1,0 +1,23 @@
+-- =====================================================================
+-- Task 5.1: enforce at most one *active* survey_session at the DB level.
+-- =====================================================================
+--
+-- `survey_session.ended_at IS NULL` means "currently active" (see
+-- `0001_init.sql`'s comment on that table). The application layer
+-- (`SessionManager::open`, `SessionRepo::close_active`) already
+-- self-heals by closing any active session before opening a new one, but
+-- that's two statements, not one atomic operation — a crash/race between
+-- them (or any other code path that inserts a `survey_session` row
+-- directly) could leave more than one row with `ended_at IS NULL`. This
+-- index is the DB-level backstop that makes that state simply impossible
+-- to persist, regardless of what the application layer does.
+--
+-- The trick: a unique index on a *constant* expression, scoped by a
+-- partial `WHERE` predicate. Every row matching `ended_at IS NULL`
+-- computes the *same* key value (`true`), so a second such row collides
+-- with the first on that key and is rejected by the uniqueness
+-- constraint — i.e. "at most one row where ended_at IS NULL" without
+-- needing a real column to be unique. Rows with `ended_at IS NOT NULL`
+-- (closed sessions; the overwhelming majority over time) aren't indexed
+-- at all (partial index), so this costs nothing per historical row.
+CREATE UNIQUE INDEX one_active_session ON survey_session ((true)) WHERE ended_at IS NULL;

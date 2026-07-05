@@ -94,6 +94,50 @@ pub struct SurveySession {
     pub label: Option<String>,
 }
 
+/// `location_fix`: one continuous-log point of the host's own GPS
+/// trajectory during a `survey_session` (the foundation for follow/stalker
+/// detection later — see `repo::location`). `location` is
+/// `geography(Point,4326)` in the DB, same undecodable-by-sqlx situation as
+/// `Emission::location` (see module docs above): every query producing
+/// this type projects it via `ST_X(location::geometry) AS lon,
+/// ST_Y(location::geometry) AS lat` instead of `SELECT *`/`RETURNING *`.
+/// Unlike `Emission::location`, `location_fix.location` is `NOT NULL`, so
+/// `lon`/`lat` here are plain `f64`, not `Option<f64>`.
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow, Serialize, Deserialize)]
+pub struct LocationFix {
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub session_id: Uuid,
+    pub observed_at: DateTime<Utc>,
+    pub altitude: Option<f64>,
+    pub speed: Option<f64>,
+    pub heading: Option<f64>,
+    /// Free-text fix-quality descriptor. The only producer today
+    /// (`ingest::session::SessionManager`, `fluxfang-api`) stringifies
+    /// `fluxfang_capture::GpsFix::quality` (an `i32` fix-quality/mode
+    /// code) into this column — kept as `text` rather than `int` to match
+    /// the DB schema's intentionally loose typing here (future GPS sources
+    /// may report a non-numeric quality descriptor).
+    pub fix_quality: Option<String>,
+    /// Longitude, decoded from `ST_X(location::geometry)`.
+    pub lon: f64,
+    /// Latitude, decoded from `ST_Y(location::geometry)`.
+    pub lat: f64,
+}
+
+/// Fields required to create a new `location_fix`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewLocationFix {
+    pub session_id: Uuid,
+    pub observed_at: DateTime<Utc>,
+    /// `(lon, lat)`.
+    pub location: (f64, f64),
+    pub altitude: Option<f64>,
+    pub speed: Option<f64>,
+    pub heading: Option<f64>,
+    pub fix_quality: Option<String>,
+}
+
 /// `emission`: one captured observation (currently only `kind = "wifi"`).
 /// High-volume, time-indexed.
 ///
