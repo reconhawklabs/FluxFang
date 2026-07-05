@@ -81,6 +81,7 @@ use async_trait::async_trait;
 use fluxfang_capture::gps::ALLOWED_BAUD_RATES;
 use fluxfang_capture::mock::{MockCapturer, MockGps};
 use fluxfang_capture::wifi::monitor::WifiMonitorCapturer;
+use fluxfang_capture::wifi::scan::WifiScanCapturer;
 use fluxfang_capture::{Capturer, GpsFix, GpsSource, RawObservation};
 use fluxfang_db::models::DataSource;
 use fluxfang_db::DataSourceRepo;
@@ -133,9 +134,15 @@ impl CapturerFactory for RealCapturerFactory {
                     .interface
                     .clone()
                     .ok_or_else(|| anyhow!("wifi data source is missing its interface"))?;
-                Ok(BuiltCapture::Wifi(Box::new(WifiMonitorCapturer::new(
-                    interface,
-                ))))
+                match source.mode.as_str() {
+                    "monitor" => Ok(BuiltCapture::Wifi(Box::new(WifiMonitorCapturer::new(
+                        interface,
+                    )))),
+                    "scan" => Ok(BuiltCapture::Wifi(Box::new(WifiScanCapturer::new(
+                        interface,
+                    )))),
+                    other => Err(anyhow!("unsupported wifi mode '{other}'")),
+                }
             }
             "gps" => match source.mode.as_str() {
                 "gpsd" => {
@@ -364,9 +371,9 @@ pub(crate) fn validate_data_source(
 ) -> Result<(), String> {
     match kind {
         "wifi" => {
-            if mode != "monitor" {
+            if mode != "monitor" && mode != "scan" {
                 return Err(format!(
-                    "wifi data sources must use mode 'monitor', got '{mode}'"
+                    "wifi data sources must use mode 'monitor' or 'scan', got '{mode}'"
                 ));
             }
             match interface {

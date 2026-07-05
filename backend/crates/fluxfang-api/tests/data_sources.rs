@@ -384,6 +384,45 @@ async fn update_with_invalid_serial_baud_is_rejected_with_400() {
     assert_status(&resp, StatusCode::BAD_REQUEST);
 }
 
+/// A wifi data source with the new `scan` mode (managed-mode `iw ... scan`
+/// polling, see `fluxfang_capture::wifi::scan`) is accepted at create-time,
+/// same as the existing `monitor` mode.
+#[tokio::test]
+async fn create_wifi_scan_mode_is_accepted_with_201() {
+    let (app, _pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    let resp = post_json_with_cookie(
+        &app,
+        "/api/data-sources",
+        r#"{"kind":"wifi","mode":"scan","interface":"wlan0","config":{}}"#,
+        &cookie,
+    )
+    .await;
+    assert_status(&resp, StatusCode::CREATED);
+    let created = body_json(resp).await;
+    assert_eq!(created["mode"], "scan");
+    assert_eq!(created["status"], "stopped");
+}
+
+/// An unrecognized wifi mode is still rejected with 400, both at
+/// create-time and update-time -- confirms widening `monitor` -> `{monitor,
+/// scan}` didn't accidentally open validation up to arbitrary strings.
+#[tokio::test]
+async fn create_wifi_with_bogus_mode_is_rejected_with_400() {
+    let (app, _pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    let resp = post_json_with_cookie(
+        &app,
+        "/api/data-sources",
+        r#"{"kind":"wifi","mode":"bogus","interface":"wlan0","config":{}}"#,
+        &cookie,
+    )
+    .await;
+    assert_status(&resp, StatusCode::BAD_REQUEST);
+}
+
 /// Basic CRUD roundtrip (create/list/get/patch/delete), all under auth.
 #[tokio::test]
 async fn crud_roundtrip() {

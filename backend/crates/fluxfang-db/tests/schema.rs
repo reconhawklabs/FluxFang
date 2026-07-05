@@ -68,6 +68,38 @@ async fn host_zone_membership_upsert_is_deduped_by_nulls_not_distinct_index() {
     );
 }
 
+/// Task: `0003_wifi_scan_mode.sql` widens the `data_source` kind/mode CHECK
+/// to additionally allow `wifi` + `scan` (managed-mode `iw ... scan`
+/// polling, alongside the existing `wifi` + `monitor` monitor-mode
+/// capture). Confirms the new combination is accepted...
+#[tokio::test]
+async fn wifi_scan_mode_is_accepted_by_data_source_check() {
+    let pool = fresh_pool().await;
+    let row: (uuid::Uuid,) = sqlx::query_as(
+        "insert into data_source(kind,mode,status) values('wifi','scan','stopped') returning id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!row.0.is_nil());
+}
+
+/// ...and that an unrelated bogus mode is still rejected by the same
+/// constraint (i.e. the widening didn't accidentally open it up to
+/// anything).
+#[tokio::test]
+async fn wifi_bogus_mode_is_still_rejected_by_data_source_check() {
+    let pool = fresh_pool().await;
+    let result =
+        sqlx::query("insert into data_source(kind,mode,status) values('wifi','bogus','stopped')")
+            .execute(&pool)
+            .await;
+    assert!(
+        result.is_err(),
+        "expected wifi+bogus mode to violate the data_source kind/mode CHECK"
+    );
+}
+
 #[tokio::test]
 async fn emission_accepts_geography_point() {
     let pool = fresh_pool().await;

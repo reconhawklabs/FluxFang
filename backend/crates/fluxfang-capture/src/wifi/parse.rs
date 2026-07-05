@@ -176,7 +176,13 @@ fn format_mac(bytes: &[u8]) -> String {
 /// Covers 2.4GHz (channels 1-13, plus the special-cased channel 14) and
 /// 5GHz; returns `None` for anything outside those ranges rather than
 /// guessing.
-fn freq_to_channel(freq_mhz: u16) -> Option<u16> {
+///
+/// `pub(crate)` (not private) so [`super::scan::parse_iw_scan`] can reuse
+/// the exact same freq->channel mapping for `iw scan`'s `freq: <MHz>`
+/// lines, rather than duplicating this table and risking the two capture
+/// paths (monitor-mode radiotap vs. managed-mode `iw scan`) disagreeing on
+/// what channel a given frequency means.
+pub(crate) fn freq_to_channel(freq_mhz: u16) -> Option<u16> {
     match freq_mhz {
         2412..=2472 => Some((freq_mhz - 2407) / 5),
         2484 => Some(14),
