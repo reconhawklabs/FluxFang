@@ -4,10 +4,14 @@
 //! default `serde` derive never leaks onto the wire by accident; see
 //! [`FieldDefDto`]'s docs).
 
+use chrono::{DateTime, Utc};
 use serde::Serialize;
+use uuid::Uuid;
 
 use fluxfang_core::catalog::{FieldDef, FieldType};
 use fluxfang_core::rule::Op;
+
+use fluxfang_db::models::Emission;
 
 /// One operator as exposed over the wire: its `serde` code plus a
 /// plain-English label the frontend can render directly in a dropdown.
@@ -84,6 +88,47 @@ impl From<&FieldDef> for FieldDefDto {
             ty,
             values,
             ops: field.ops.iter().map(op_dto).collect(),
+        }
+    }
+}
+
+/// One row in a `GET /api/emissions` response (Task 6.3). A thin, explicit
+/// projection of `fluxfang_db::models::Emission` rather than a re-export:
+/// `Emission` already `#[derive(Serialize)]`s with a wire-compatible shape,
+/// but this DTO exists so the emissions API's response shape is controlled
+/// here rather than coupled to however the DB model happens to be laid out
+/// (e.g. it deliberately omits `created_at`, which isn't part of the brief's
+/// response shape).
+#[derive(Debug, Clone, Serialize)]
+pub struct EmissionDto {
+    pub id: Uuid,
+    pub data_source_id: Option<Uuid>,
+    pub emitter_id: Option<Uuid>,
+    pub session_id: Option<Uuid>,
+    pub observed_at: DateTime<Utc>,
+    pub signal_strength: Option<i32>,
+    /// Longitude/latitude decoded from `Emission::lon`/`lat` (themselves
+    /// projected from PostGIS `location` — see `fluxfang_db::models`'
+    /// module docs). `None` for both when the emission has no location.
+    pub lon: Option<f64>,
+    pub lat: Option<f64>,
+    pub kind: String,
+    pub payload: serde_json::Value,
+}
+
+impl From<&Emission> for EmissionDto {
+    fn from(e: &Emission) -> Self {
+        EmissionDto {
+            id: e.id,
+            data_source_id: e.data_source_id,
+            emitter_id: e.emitter_id,
+            session_id: e.session_id,
+            observed_at: e.observed_at,
+            signal_strength: e.signal_strength,
+            lon: e.lon,
+            lat: e.lat,
+            kind: e.kind.clone(),
+            payload: e.payload.clone(),
         }
     }
 }

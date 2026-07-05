@@ -572,6 +572,7 @@ dependencies = [
  "fluxfang-capture",
  "fluxfang-core",
  "fluxfang-db",
+ "form_urlencoded",
  "hex",
  "hmac",
  "lettre",
