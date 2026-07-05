@@ -249,6 +249,43 @@ async fn create_zone_with_invalid_lon_lat_is_400() {
     }
 }
 
+/// (b) The coordinate boundaries themselves — `lon = -180`/`180`,
+/// `lat = -90`/`90` — are ACCEPTED (`201`), not just rejected just outside
+/// them: `validate_zone`'s `RangeInclusive` checks already accept these, this
+/// pins that behavior so it can't regress to an exclusive range.
+#[tokio::test]
+async fn create_zone_at_coordinate_boundaries_is_accepted() {
+    let (app, _pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    for (lon, lat) in [
+        (-180.0, 0.0),
+        (180.0, 0.0),
+        (0.0, -90.0),
+        (0.0, 90.0),
+        (-180.0, -90.0),
+        (180.0, 90.0),
+    ] {
+        let body = json!({
+            "name": "Boundary Zone",
+            "center": {"lon": lon, "lat": lat},
+            "radius_m": RADIUS_M,
+        })
+        .to_string();
+        let resp = post_json_with_cookie(&app, "/api/zones", &body, &cookie).await;
+        assert_status(&resp, StatusCode::CREATED);
+        let created = body_json(resp).await;
+        assert!(
+            (created["lon"].as_f64().unwrap() - lon).abs() < 1e-9,
+            "lon={lon} lat={lat}: body {created}"
+        );
+        assert!(
+            (created["lat"].as_f64().unwrap() - lat).abs() < 1e-9,
+            "lon={lon} lat={lat}: body {created}"
+        );
+    }
+}
+
 /// `PATCH /api/zones/:id` updates name/radius while leaving `center` alone
 /// when omitted.
 #[tokio::test]

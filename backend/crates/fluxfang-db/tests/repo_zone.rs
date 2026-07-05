@@ -216,6 +216,61 @@ async fn delete_and_disable_rules_removes_zone_and_disables_only_its_own_referen
     assert!(reloaded_other_rule.enabled);
 }
 
+/// Regression test: `trigger.zone_id` stored in a NON-CANONICAL form (here,
+/// all-uppercase — `alert_rules.rs::validate_trigger` only checks the string
+/// *parses* as a `Uuid`, it never canonicalizes it, so this is a value a real
+/// client can produce) must still be recognized as referencing the deleted
+/// zone. Against the old `trigger ->> 'zone_id' = $1` plain-text compare
+/// (bound with `id.to_string()`, always lowercase-hyphenated) this rule would
+/// never match and would stay `enabled` after its zone was deleted; the
+/// `(trigger ->> 'zone_id')::uuid = $1` cast fixes that by normalizing both
+/// sides through Postgres' `uuid` type.
+#[tokio::test]
+async fn delete_and_disable_rules_disables_rule_whose_zone_id_is_non_canonical_case() {
+    let pool = fresh_pool().await;
+    let doomed = seed_zone(&pool).await;
+
+    let uppercase_zone_id = doomed.id.to_string().to_uppercase();
+    assert_ne!(
+        uppercase_zone_id,
+        doomed.id.to_string(),
+        "sanity: this zone's id must actually contain a letter for the case flip to matter"
+    );
+
+    let rule_on_doomed = AlertRuleRepo::insert(
+        &pool,
+        NewAlertRule {
+            name: "watches doomed zone, non-canonical zone_id".to_string(),
+            enabled: true,
+            target_type: None,
+            target_id: None,
+            trigger: serde_json::json!({"on": "host_enters_zone", "zone_id": uppercase_zone_id}),
+        },
+    )
+    .await
+    .unwrap();
+
+    let (existed, disabled) = ZoneRepo::delete_and_disable_rules(&pool, doomed.id)
+        .await
+        .unwrap();
+    assert!(existed);
+    assert_eq!(
+        disabled, 1,
+        "the rule's non-canonical (uppercase) zone_id should still count as referencing \
+         the deleted zone"
+    );
+
+    let reloaded = AlertRuleRepo::get(&pool, rule_on_doomed.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !reloaded.enabled,
+        "rule referencing the deleted zone via a non-canonical zone_id string should be \
+         disabled, not left enabled"
+    );
+}
+
 #[tokio::test]
 async fn delete_and_disable_rules_on_unknown_id_is_a_noop() {
     let pool = fresh_pool().await;

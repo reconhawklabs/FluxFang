@@ -175,6 +175,21 @@ impl ZoneRepo {
     /// caller (or a concurrent reader) can never observe the zone gone with
     /// a referencing rule still `enabled`, or vice versa.
     ///
+    /// The comparison casts `trigger ->> 'zone_id'` to `uuid` (`(trigger ->>
+    /// 'zone_id')::uuid = $1`, binding the `Uuid` itself) rather than
+    /// comparing text against `id.to_string()`: `alert_rules.rs::create_alert_rule`/
+    /// `update_alert_rule` store the caller's `trigger` JSONB verbatim, and
+    /// `validate_trigger` only checks `zone_id` *parses* as a UUID (the
+    /// `uuid` crate's `FromStr` accepts uppercase, no-hyphen, and braced/URN
+    /// forms too) — it never canonicalizes the string. A plain text compare
+    /// would silently never match a non-canonical `zone_id` (e.g. all-caps),
+    /// leaving that rule enabled forever after its zone is gone. Casting both
+    /// sides to `uuid` lets Postgres normalize the comparison instead. The
+    /// cast is safe against stored data — `validate_trigger` guarantees any
+    /// persisted `zone_id` parses as a UUID — but `IS NOT NULL` is checked
+    /// first anyway so a trigger with no `zone_id` at all is skipped
+    /// explicitly rather than relying on `NULL::uuid = $1` short-circuiting.
+    ///
     /// Returns `(zone_existed, rules_disabled)`. If `id` doesn't name a real
     /// zone, `zone_existed` is `false` and `rules_disabled` is always `0`
     /// (the transaction still commits, but rewrites nothing) — matching
@@ -193,11 +208,15 @@ impl ZoneRepo {
             > 0;
 
         let rules_disabled = if zone_existed {
-            sqlx::query("UPDATE alert_rule SET enabled = false WHERE trigger ->> 'zone_id' = $1")
-                .bind(id.to_string())
-                .execute(&mut *tx)
-                .await?
-                .rows_affected()
+            sqlx::query(
+                "UPDATE alert_rule SET enabled = false \
+                 WHERE trigger ->> 'zone_id' IS NOT NULL \
+                   AND (trigger ->> 'zone_id')::uuid = $1",
+            )
+            .bind(id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
         } else {
             0
         };
