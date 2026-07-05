@@ -20,13 +20,32 @@ export interface FilterState {
 export const EMPTY_FILTER_STATE: FilterState = { q: '', conditions: [] };
 
 /** Serialize one condition's typed value the way `parse_condition` in the
- * backend's `emissions.rs` expects: a JSON array for `in` (e.g.
- * `[1,2]`/`["beacon","probe_request"]`), and the bare value otherwise —
- * `String(number)` is a valid bare JSON number token, and any other string
- * that isn't itself valid JSON falls back to being used as a literal string
- * (see that module's "Parse-JSON-first, string-fallback" doc comment). */
+ * backend's `emissions.rs` expects: it parses each value token as JSON
+ * first, falling back to treating it as a literal string only if that JSON
+ * parse fails ("Parse-JSON-first, string-fallback" — see that module's doc
+ * comment). That means a bare numeric-looking *string* value (e.g. a `Text`
+ * field holding `"2024"`, or `"true"`/`"false"`/`"null"`) would be
+ * mis-parsed as a JSON number/bool/null instead of the string it actually
+ * is, tripping the backend's `conditions_to_sql_checked` type check with a
+ * 400 `InvalidValueType`.
+ *
+ * So we key the encoding off the value's *JS runtime type* rather than
+ * blindly stringifying: a genuine JS `number` is emitted bare (`String(6)`
+ * -> `6`, a valid bare JSON number token the backend parses back as a
+ * number), while anything else scalar (string/boolean) goes through
+ * `JSON.stringify` (`"2024"`, `true`) so the backend's JSON parse yields
+ * that same string/bool rather than silently coercing it to a number. This
+ * is sound because `RuleBuilder`/`ConditionRow` already hand us
+ * correctly-typed JS values per the field's catalog type (a `number` for a
+ * `number` field, a `string` otherwise) — so `typeof` alone is enough,
+ * without threading the field catalog through here to look up the
+ * declared type. `in` conditions serialize as a JSON array with each
+ * element typed the same way (numbers bare, strings quoted) — precisely
+ * what `JSON.stringify` on a JS array already produces. */
 function conditionValueToken(condition: Condition): string {
-  return Array.isArray(condition.value) ? JSON.stringify(condition.value) : String(condition.value);
+  if (Array.isArray(condition.value)) return JSON.stringify(condition.value);
+  if (typeof condition.value === 'number') return String(condition.value);
+  return JSON.stringify(condition.value);
 }
 
 /**

@@ -59,7 +59,12 @@ export default function RuleBuilder({ kind, value, onChange, showPreview = false
 
   const hasCompleteCondition = value.conditions.some(isCompleteCondition);
   const debouncedRule = useDebouncedValue(value, PREVIEW_DEBOUNCE_MS);
-  const previewEnabled = showPreview && hasCompleteCondition;
+  // Gate the query's `enabled` flag on the *debounced* rule (the same rule
+  // the query itself sends) rather than the live `value` — otherwise a
+  // just-typed, not-yet-debounced condition can flip `previewEnabled` true
+  // a beat before `debouncedRule` catches up (or vice versa), firing (or
+  // withholding) a request for a rule that doesn't match what's shown.
+  const previewEnabled = showPreview && debouncedRule.conditions.some(isCompleteCondition);
 
   const previewQuery = useQuery({
     queryKey: ['emitters', 'preview', kind, debouncedRule],

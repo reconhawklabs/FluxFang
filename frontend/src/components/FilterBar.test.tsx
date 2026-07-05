@@ -88,9 +88,38 @@ test('filterToQueryParams: q + complete conditions become query params; incomple
   expect(params.get('q')).toBe('living room');
   expect(params.get('unassigned')).toBe('true');
   expect(params.getAll('cond')).toEqual([
-    'bssid:eq:aa:bb:cc:dd:ee:ff',
+    'bssid:eq:"aa:bb:cc:dd:ee:ff"',
     'channel:gte:6',
     'bssid:in:["aa:aa","bb:bb"]',
+  ]);
+});
+
+test('filterToQueryParams quotes a numeric-looking string value (Text/mac/enum field) but emits a number bare', () => {
+  const state: FilterState = {
+    q: '',
+    conditions: [
+      // A Text/enum-typed field (e.g. `ssid`) whose value happens to look
+      // like a JSON number/bool/null: must be JSON-quoted so the backend's
+      // JSON-first `parse_condition` parses it back as a STRING, not a
+      // number/bool — this is the regression the fix targets.
+      { field: 'ssid', op: 'eq', value: '2024' },
+      { field: 'ssid', op: 'eq', value: 'true' },
+      { field: 'ssid', op: 'eq', value: 'false' },
+      { field: 'ssid', op: 'eq', value: 'null' },
+      // A genuine `number`-typed field value must stay bare so it parses
+      // back as a JSON number.
+      { field: 'channel', op: 'gte', value: 6 },
+    ],
+  };
+
+  const params = filterToQueryParams(state);
+
+  expect(params.getAll('cond')).toEqual([
+    'ssid:eq:"2024"',
+    'ssid:eq:"true"',
+    'ssid:eq:"false"',
+    'ssid:eq:"null"',
+    'channel:gte:6',
   ]);
 });
 
