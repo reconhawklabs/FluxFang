@@ -99,8 +99,29 @@ test('renders the source list with color-coded status badges and last_error', as
   expect(within(screen.getByTestId('source-row-gps-2')).getByText(/device not found/i)).toBeInTheDocument();
 });
 
-test('add source: wifi kind reveals an interface text input', async () => {
-  const fetchMock = mockMethodRoutes({ 'GET /api/data-sources': () => [] });
+/** `GET /api/system/capture-devices` fixture builder — the Add form fetches
+ * this whenever it's mounted (both wifi and gps-serial paths depend on it),
+ * so every Add-form test below registers a route for it. */
+function captureDevices(wifiInterfaces: string[], serialDevices: string[]) {
+  return { wifi_interfaces: wifiInterfaces, serial_devices: serialDevices };
+}
+
+test('add source: wifi kind with enumerated interfaces shows a Mode dropdown and an interface SELECT (not free text), and posts the chosen mode/interface', async () => {
+  const created: DataSource = {
+    id: 'new-wifi',
+    created_at: '2026-01-01T00:00:00Z',
+    kind: 'wifi',
+    mode: 'scan',
+    interface: 'wlan2',
+    status: 'stopped',
+    config: {},
+    last_error: null,
+  };
+  const fetchMock = mockMethodRoutes({
+    'GET /api/data-sources': () => [],
+    'GET /api/system/capture-devices': () => captureDevices(['wlan0', 'wlan2'], []),
+    'POST /api/data-sources': () => created,
+  });
   vi.stubGlobal('fetch', fetchMock);
 
   render(<DataSources />, { wrapper });
@@ -108,12 +129,65 @@ test('add source: wifi kind reveals an interface text input', async () => {
 
   fireEvent.click(screen.getByRole('button', { name: /add data source/i }));
   // wifi is the default kind
-  expect(screen.getByLabelText(/interface/i)).toBeInTheDocument();
-  expect(screen.getByLabelText(/interface/i).tagName).toBe('INPUT');
+
+  const modeField = await screen.findByLabelText(/^mode$/i);
+  expect(modeField.tagName).toBe('SELECT');
+  const modeOptions = within(modeField as HTMLSelectElement).getAllByRole('option').map((o) => o.textContent);
+  expect(modeOptions).toEqual(['Monitor Mode', 'SSID Scan']);
+
+  const ifaceField = await screen.findByLabelText(/interface/i);
+  // The critical assertion: interface is a <select> dropdown, not free text.
+  expect(ifaceField.tagName).toBe('SELECT');
+  const ifaceOptions = within(ifaceField as HTMLSelectElement)
+    .getAllByRole('option')
+    .map((o) => o.textContent);
+  expect(ifaceOptions).toEqual(['Select an interface…', 'wlan0', 'wlan2']);
+
+  fireEvent.change(modeField, { target: { value: 'scan' } });
+  fireEvent.change(ifaceField, { target: { value: 'wlan2' } });
+
+  const submitButton = screen.getByRole('button', { name: /^add$|^create$|^save$/i });
+  expect(submitButton).not.toBeDisabled();
+  fireEvent.click(submitButton);
+
+  await waitFor(() => expect(screen.queryByLabelText(/interface/i)).not.toBeInTheDocument());
+
+  const postCall = fetchMock.mock.calls.find(([, init]) => init?.method === 'POST');
+  expect(postCall).toBeDefined();
+  const [url, init] = postCall as [RequestInfo | URL, RequestInit];
+  expect(String(url)).toBe('/api/data-sources');
+  expect(JSON.parse(init.body as string)).toEqual({
+    kind: 'wifi',
+    mode: 'scan',
+    interface: 'wlan2',
+    config: {},
+  });
+});
+
+test('add source: wifi kind with NO enumerated interfaces shows "No compatible WiFi card found." and disables the Add button, with no text input fallback', async () => {
+  const fetchMock = mockMethodRoutes({
+    'GET /api/data-sources': () => [],
+    'GET /api/system/capture-devices': () => captureDevices([], []),
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<DataSources />, { wrapper });
+  await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+
+  fireEvent.click(screen.getByRole('button', { name: /add data source/i }));
+
+  expect(await screen.findByText('No compatible WiFi card found.')).toBeInTheDocument();
+  expect(screen.queryByLabelText(/interface/i)).not.toBeInTheDocument();
+
+  const submitButton = screen.getByRole('button', { name: /^add$|^create$|^save$/i });
+  expect(submitButton).toBeDisabled();
 });
 
 test('add source: gps + gpsd mode reveals host and port fields', async () => {
-  const fetchMock = mockMethodRoutes({ 'GET /api/data-sources': () => [] });
+  const fetchMock = mockMethodRoutes({
+    'GET /api/data-sources': () => [],
+    'GET /api/system/capture-devices': () => captureDevices([], []),
+  });
   vi.stubGlobal('fetch', fetchMock);
 
   render(<DataSources />, { wrapper });
@@ -126,7 +200,7 @@ test('add source: gps + gpsd mode reveals host and port fields', async () => {
   expect(screen.getByLabelText(/port/i)).toBeInTheDocument();
 });
 
-test('add source: gps + serial mode reveals a device input and a baud DROPDOWN (not free text), and posts the chosen config', async () => {
+test('add source: gps + serial mode reveals a device SELECT (not free text) and a baud DROPDOWN, and posts the chosen config', async () => {
   const created: DataSource = {
     id: 'new-1',
     created_at: '2026-01-01T00:00:00Z',
@@ -139,6 +213,7 @@ test('add source: gps + serial mode reveals a device input and a baud DROPDOWN (
   };
   const fetchMock = mockMethodRoutes({
     'GET /api/data-sources': () => [],
+    'GET /api/system/capture-devices': () => captureDevices([], ['/dev/ttyUSB0', '/dev/ttyUSB1']),
     'POST /api/data-sources': () => created,
   });
   vi.stubGlobal('fetch', fetchMock);
@@ -150,9 +225,14 @@ test('add source: gps + serial mode reveals a device input and a baud DROPDOWN (
   fireEvent.change(screen.getByLabelText(/^kind$/i), { target: { value: 'gps' } });
   fireEvent.change(screen.getByLabelText(/^mode$/i), { target: { value: 'serial' } });
 
-  const deviceInput = screen.getByLabelText(/device/i);
-  expect(deviceInput.tagName).toBe('INPUT');
-  fireEvent.change(deviceInput, { target: { value: '/dev/ttyUSB1' } });
+  const deviceField = await screen.findByLabelText(/device/i);
+  // The critical assertion: device is a <select> dropdown, not free text.
+  expect(deviceField.tagName).toBe('SELECT');
+  const deviceOptions = within(deviceField as HTMLSelectElement)
+    .getAllByRole('option')
+    .map((o) => o.textContent);
+  expect(deviceOptions).toEqual(['Select a device…', '/dev/ttyUSB0', '/dev/ttyUSB1']);
+  fireEvent.change(deviceField, { target: { value: '/dev/ttyUSB1' } });
 
   const baudField = screen.getByLabelText(/baud/i);
   // The critical assertion: baud is a <select> dropdown, not a free-text input.
@@ -174,6 +254,27 @@ test('add source: gps + serial mode reveals a device input and a baud DROPDOWN (
     mode: 'serial',
     config: { device: '/dev/ttyUSB1', baud: 57600 },
   });
+});
+
+test('add source: gps + serial mode with NO enumerated serial devices shows "No compatible serial GPS device found." and disables Add', async () => {
+  const fetchMock = mockMethodRoutes({
+    'GET /api/data-sources': () => [],
+    'GET /api/system/capture-devices': () => captureDevices(['wlan0'], []),
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<DataSources />, { wrapper });
+  await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+
+  fireEvent.click(screen.getByRole('button', { name: /add data source/i }));
+  fireEvent.change(screen.getByLabelText(/^kind$/i), { target: { value: 'gps' } });
+  fireEvent.change(screen.getByLabelText(/^mode$/i), { target: { value: 'serial' } });
+
+  expect(await screen.findByText('No compatible serial GPS device found.')).toBeInTheDocument();
+  expect(screen.queryByLabelText(/device/i)).not.toBeInTheDocument();
+
+  const submitButton = screen.getByRole('button', { name: /^add$|^create$|^save$/i });
+  expect(submitButton).toBeDisabled();
 });
 
 test('Start button on a stopped source calls the start endpoint', async () => {

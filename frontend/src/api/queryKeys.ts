@@ -21,9 +21,15 @@
 //   `FilterBar`). It's intentionally NOT invalidated by `useLiveEvents`: the
 //   catalog is server-side static configuration, not data that changes from
 //   live emissions/notifications.
+// - `captureDevices` (`GET /api/system/capture-devices` — enumerated wifi
+//   interfaces/serial devices for the Add-Data-Source form's dropdowns) is
+//   also NOT invalidated by `useLiveEvents`: it's a live *hardware* read, not
+//   data driven by emissions/notifications, so the form's own Refresh
+//   control (a manual `refetch()`) is how it re-runs, not the WS stream.
 export const queryKeys = {
   dashboard: ['dashboard'] as const,
   dataSources: ['dataSources'] as const,
+  captureDevices: ['captureDevices'] as const,
   emissions: ['emissions'] as const,
   emitters: ['emitters'] as const,
   entities: ['entities'] as const,

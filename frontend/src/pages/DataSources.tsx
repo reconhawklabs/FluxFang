@@ -19,11 +19,17 @@ import {
   BAUD_RATES,
   createDataSource,
   deleteDataSource,
+  listCaptureDevices,
   listDataSources,
   startDataSource,
   stopDataSource,
 } from '../api/dataSources';
-import type { BaudRate, CreateDataSourceInput, DataSource, DataSourceStatus } from '../api/dataSources';
+import type {
+  BaudRate,
+  CreateDataSourceInput,
+  DataSource,
+  DataSourceStatus,
+} from '../api/dataSources';
 
 /** How often to re-poll the list while this page is mounted (see module doc
  * comment on why polling, not WS, drives status here). A few seconds is
@@ -79,7 +85,20 @@ function ConfigSummary({ source }: { source: DataSource }) {
 }
 
 type FormKind = 'wifi' | 'gps';
+type FormWifiMode = 'monitor' | 'scan';
 type FormGpsMode = 'gpsd' | 'serial';
+
+/** One-line description shown under the WiFi Mode dropdown for whichever
+ * mode is currently selected — see backend `fluxfang-api::capture`'s
+ * `"monitor"`/`"scan"` capturer split (`WifiMonitorCapturer` vs
+ * `WifiScanCapturer`). */
+const WIFI_MODE_HELP: Record<FormWifiMode, string> = {
+  monitor: 'Monitor Mode puts the adapter into monitor mode to capture all 802.11 frames.',
+  scan: 'SSID Scan uses the adapter as-is to scan for nearby networks.',
+};
+
+const NO_WIFI_MESSAGE = 'No compatible WiFi card found.';
+const NO_SERIAL_MESSAGE = 'No compatible serial GPS device found.';
 
 interface AddSourceFormProps {
   onCancel: () => void;
@@ -90,6 +109,7 @@ interface AddSourceFormProps {
 
 function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSourceFormProps) {
   const [kind, setKind] = useState<FormKind>('wifi');
+  const [wifiMode, setWifiMode] = useState<FormWifiMode>('monitor');
   const [iface, setIface] = useState('');
   const [gpsMode, setGpsMode] = useState<FormGpsMode>('gpsd');
   const [host, setHost] = useState('127.0.0.1');
@@ -97,11 +117,27 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
   const [device, setDevice] = useState('');
   const [baud, setBaud] = useState<BaudRate>(9600);
 
+  // Hardware enumeration (Task devdropdown) — the Add form no longer takes
+  // free-text interface/device names; it offers only what
+  // `GET /api/system/capture-devices` actually reports as present, so a
+  // typo'd/nonexistent device can't be submitted in the first place.
+  const devicesQuery = useQuery({
+    queryKey: queryKeys.captureDevices,
+    queryFn: listCaptureDevices,
+  });
+
+  const devicesLoading = devicesQuery.isLoading;
+  const devicesErrored = devicesQuery.isError;
+  const wifiInterfaces = devicesQuery.data?.wifi_interfaces ?? [];
+  const serialDevices = devicesQuery.data?.serial_devices ?? [];
+  const wifiHasDevices = wifiInterfaces.length > 0;
+  const serialHasDevices = serialDevices.length > 0;
+
   function handleSubmit(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
 
     if (kind === 'wifi') {
-      onSubmit({ kind: 'wifi', mode: 'monitor', interface: iface, config: {} });
+      onSubmit({ kind: 'wifi', mode: wifiMode, interface: iface, config: {} });
       return;
     }
 
@@ -113,13 +149,49 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
     onSubmit({ kind: 'gps', mode: 'serial', config: { device, baud } });
   }
 
+  // The Add button is disabled whenever the currently-selected path has no
+  // selectable device (wifi with an empty enumeration, or gps-serial with
+  // an empty one) or the hardware list hasn't resolved yet (still loading,
+  // or errored — never fall back to letting the user type a device name).
+  let canSubmit: boolean;
+  if (kind === 'wifi') {
+    canSubmit = !devicesLoading && !devicesErrored && wifiHasDevices && iface !== '';
+  } else if (gpsMode === 'serial') {
+    canSubmit = !devicesLoading && !devicesErrored && serialHasDevices && device !== '';
+  } else {
+    canSubmit = host.trim() !== '' && port.trim() !== '';
+  }
+
   return (
     <div className="fixed inset-0 z-10 flex items-center justify-center bg-slate-950/70 px-4">
       <form
         onSubmit={handleSubmit}
         className="w-full max-w-md space-y-4 rounded-lg border border-slate-800 bg-slate-900 p-6 shadow-xl"
       >
-        <h2 className="text-lg font-semibold text-slate-100">Add Data Source</h2>
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-slate-100">Add Data Source</h2>
+          <button
+            type="button"
+            onClick={() => void devicesQuery.refetch()}
+            disabled={devicesQuery.isFetching}
+            className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 transition hover:border-amber-500 hover:text-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {devicesQuery.isFetching ? 'Refreshing…' : 'Refresh'}
+          </button>
+        </div>
+
+        {devicesErrored && (
+          <p role="alert" className="text-sm text-red-400">
+            Failed to load hardware devices.{' '}
+            <button
+              type="button"
+              onClick={() => void devicesQuery.refetch()}
+              className="underline hover:text-red-300"
+            >
+              Retry
+            </button>
+          </p>
+        )}
 
         <div className="space-y-1">
           <label htmlFor="ds-kind" className={labelClassName}>
@@ -137,19 +209,48 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
         </div>
 
         {kind === 'wifi' && (
-          <div className="space-y-1">
-            <label htmlFor="ds-interface" className={labelClassName}>
-              Interface
-            </label>
-            <input
-              id="ds-interface"
-              type="text"
-              value={iface}
-              onChange={(event) => setIface(event.target.value)}
-              placeholder="wlan0"
-              className={`font-mono ${inputClassName}`}
-            />
-          </div>
+          <>
+            <div className="space-y-1">
+              <label htmlFor="ds-wifi-mode" className={labelClassName}>
+                Mode
+              </label>
+              <select
+                id="ds-wifi-mode"
+                value={wifiMode}
+                onChange={(event) => setWifiMode(event.target.value as FormWifiMode)}
+                className={inputClassName}
+              >
+                <option value="monitor">Monitor Mode</option>
+                <option value="scan">SSID Scan</option>
+              </select>
+              <p className="text-xs text-slate-500">{WIFI_MODE_HELP[wifiMode]}</p>
+            </div>
+
+            <div className="space-y-1">
+              <label htmlFor="ds-interface" className={labelClassName}>
+                Interface
+              </label>
+              {devicesLoading && <p className="text-sm text-slate-500">Loading interfaces…</p>}
+              {!devicesLoading && !devicesErrored && wifiHasDevices && (
+                <select
+                  id="ds-interface"
+                  value={iface}
+                  onChange={(event) => setIface(event.target.value)}
+                  className={`font-mono ${inputClassName}`}
+                >
+                  <option value="">Select an interface…</option>
+                  {wifiInterfaces.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {!devicesLoading && !devicesErrored && !wifiHasDevices && (
+                <p className="text-sm text-amber-400">{NO_WIFI_MESSAGE}</p>
+              )}
+            </div>
+          </>
         )}
 
         {kind === 'gps' && (
@@ -204,14 +305,25 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
                   <label htmlFor="ds-device" className={labelClassName}>
                     Device
                   </label>
-                  <input
-                    id="ds-device"
-                    type="text"
-                    value={device}
-                    onChange={(event) => setDevice(event.target.value)}
-                    placeholder="/dev/ttyUSB0"
-                    className={`font-mono ${inputClassName}`}
-                  />
+                  {devicesLoading && <p className="text-sm text-slate-500">Loading devices…</p>}
+                  {!devicesLoading && !devicesErrored && serialHasDevices && (
+                    <select
+                      id="ds-device"
+                      value={device}
+                      onChange={(event) => setDevice(event.target.value)}
+                      className={`font-mono ${inputClassName}`}
+                    >
+                      <option value="">Select a device…</option>
+                      {serialDevices.map((name) => (
+                        <option key={name} value={name}>
+                          {name}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  {!devicesLoading && !devicesErrored && !serialHasDevices && (
+                    <p className="text-sm text-amber-400">{NO_SERIAL_MESSAGE}</p>
+                  )}
                 </div>
                 <div className="space-y-1">
                   <label htmlFor="ds-baud" className={labelClassName}>
@@ -254,7 +366,7 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
           </button>
           <button
             type="submit"
-            disabled={submitting}
+            disabled={submitting || !canSubmit}
             className="rounded bg-amber-500 px-3 py-1.5 text-sm font-semibold text-slate-950 transition hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {submitting ? 'Adding…' : 'Add'}

@@ -13,7 +13,7 @@
 import { del, get, post } from './client';
 
 export type DataSourceKind = 'wifi' | 'gps';
-export type DataSourceMode = 'monitor' | 'gpsd' | 'serial';
+export type DataSourceMode = 'monitor' | 'scan' | 'gpsd' | 'serial';
 export type DataSourceStatus = 'stopped' | 'starting' | 'running' | 'error';
 
 /** The backend's `ALLOWED_BAUD_RATES` (`fluxfang-api::capture`) — the only
@@ -76,4 +76,20 @@ export function stopDataSource(id: string): Promise<DataSource> {
 
 export function deleteDataSource(id: string): Promise<void> {
   return del<void>(`/api/data-sources/${encodeURIComponent(id)}`);
+}
+
+/** `GET /api/system/capture-devices` response (`fluxfang-api::system`) —
+ * hardware the Add-Data-Source form enumerates so the user picks an
+ * interface/device from a dropdown instead of typing one that may not
+ * exist (see `fluxfang_capture::enumerate::{list_wifi_interfaces,
+ * list_serial_devices}`). Both arrays can be empty (no matching hardware
+ * plugged in), which the form surfaces as a "no compatible device" message
+ * rather than falling back to free text. */
+export interface CaptureDevices {
+  wifi_interfaces: string[];
+  serial_devices: string[];
+}
+
+export function listCaptureDevices(): Promise<CaptureDevices> {
+  return get<CaptureDevices>('/api/system/capture-devices');
 }
