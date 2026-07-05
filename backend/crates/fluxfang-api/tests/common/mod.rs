@@ -26,10 +26,40 @@ use uuid::Uuid;
 
 static SWEEP_DONE: OnceCell<()> = OnceCell::const_new();
 
+/// A leftover `test_*` schema is only swept once it's at least this old.
+/// No single test (let alone a whole binary's run) should take anywhere
+/// near this long, so a schema still around after this window has to
+/// belong to a process that already exited without cleaning up after
+/// itself — never one that's still in flight.
+const SWEEP_MAX_AGE_MILLIS: u128 = 15 * 60 * 1000;
+
+fn now_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after the UNIX epoch")
+        .as_millis()
+}
+
+/// Parses the creation timestamp embedded in a `test_<epoch_millis>_<uuid>`
+/// schema name (see [`fresh_pool`]). Schemas that don't match this scheme
+/// return `None` and are left alone by the sweep rather than guessed at.
+fn parse_created_millis(schema: &str) -> Option<u128> {
+    let rest = schema.strip_prefix("test_")?;
+    let (millis, _uuid) = rest.split_once('_')?;
+    millis.parse().ok()
+}
+
 /// Best-effort cleanup of `test_*` schemas left behind by earlier test
-/// runs of this crate's test binaries. See `fluxfang-db`'s equivalent for
-/// why this ordering (sweep once, before this binary creates its own
-/// schema) is safe under `cargo test`'s default execution model.
+/// runs of this crate's test binaries.
+///
+/// Age-gated, not merely ordering-gated: a schema is only dropped once
+/// [`parse_created_millis`] shows it's older than [`SWEEP_MAX_AGE_MILLIS`].
+/// A schema younger than that could belong to a *concurrently-running*
+/// sibling process — another integration-test binary in this crate,
+/// `fluxfang-api`'s in-crate unit tests, or `fluxfang-db`'s integration
+/// tests, all of which run this same sweep independently against the same
+/// database — that is actively migrating/using it, so this process
+/// running its sweep first must not be enough justification to drop it.
 async fn sweep_leftover_test_schemas(database_url: &str) {
     let Ok(admin) = PgPoolOptions::new()
         .max_connections(1)
@@ -47,10 +77,17 @@ async fn sweep_leftover_test_schemas(database_url: &str) {
     .await;
 
     if let Ok(schemas) = schemas {
+        let now = now_millis();
         for (schema,) in schemas {
-            let _ = admin
-                .execute(format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE"#).as_str())
-                .await;
+            let is_stale = matches!(
+                parse_created_millis(&schema),
+                Some(created) if now.saturating_sub(created) > SWEEP_MAX_AGE_MILLIS
+            );
+            if is_stale {
+                let _ = admin
+                    .execute(format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE"#).as_str())
+                    .await;
+            }
         }
     }
 
@@ -67,7 +104,7 @@ async fn fresh_pool() -> PgPool {
         .get_or_init(|| sweep_leftover_test_schemas(&database_url))
         .await;
 
-    let schema = format!("test_{}", Uuid::new_v4().simple());
+    let schema = format!("test_{}_{}", now_millis(), Uuid::new_v4().simple());
 
     let admin = PgPoolOptions::new()
         .max_connections(1)

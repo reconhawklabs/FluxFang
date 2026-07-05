@@ -148,11 +148,13 @@ async fn multiple_closed_sessions_can_coexist() {
     assert!(first_ended.is_some());
     assert!(second_ended.is_some());
 
-    let count: (i64,) = sqlx::query_as(
-        "SELECT count(*) FROM survey_session WHERE ended_at IS NOT NULL",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(count.0, 2, "both closed sessions must persist simultaneously");
+    let count: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM survey_session WHERE ended_at IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        count.0, 2,
+        "both closed sessions must persist simultaneously"
+    );
 }

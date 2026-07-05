@@ -66,9 +66,7 @@ impl SerialGpsSource {
     /// to open the device.
     pub fn open(device: &str, baud: u32) -> anyhow::Result<Self> {
         if !ALLOWED_BAUD_RATES.contains(&baud) {
-            anyhow::bail!(
-                "unsupported baud rate {baud}; must be one of {ALLOWED_BAUD_RATES:?}"
-            );
+            anyhow::bail!("unsupported baud rate {baud}; must be one of {ALLOWED_BAUD_RATES:?}");
         }
 
         let port = serialport::new(device, baud)

@@ -177,10 +177,7 @@ mod tests {
     #[test]
     fn delivery_status_db_str_matches_check_constraint() {
         assert_eq!(DeliveryStatus::Delivered.as_db_str(), "sent");
-        assert_eq!(
-            DeliveryStatus::Failed("boom".into()).as_db_str(),
-            "failed"
-        );
+        assert_eq!(DeliveryStatus::Failed("boom".into()).as_db_str(), "failed");
     }
 
     #[test]

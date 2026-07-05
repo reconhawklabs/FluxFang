@@ -282,15 +282,14 @@ mod tests {
     use fluxfang_core::secrets::encrypt;
     use fluxfang_db::models::{NewAlertMethod, NewAlertRule, NewDataSource, NewEmitter, NewEntity};
     use fluxfang_db::{AlertMethodRepo, DataSourceRepo, EntityRepo};
-    use sqlx::postgres::PgPoolOptions;
-    use sqlx::{Executor, PgPool};
+    use sqlx::PgPool;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::broadcast;
     use tokio::sync::mpsc;
-    use tokio::sync::OnceCell;
 
     use super::super::session::{no_op_hook, SessionManager, SessionManagerConfig};
+    use crate::test_support::fresh_pool;
 
     /// See `ingest::tests::ChannelGps` (mod.rs) for the full rationale --
     /// duplicated here since that module's test-only helpers are private to
@@ -303,77 +302,6 @@ mod tests {
         async fn next_fix(&mut self) -> Option<GpsFix> {
             self.0.recv().await
         }
-    }
-
-    static SWEEP_DONE: OnceCell<()> = OnceCell::const_new();
-
-    async fn sweep_leftover_test_schemas(database_url: &str) {
-        let Ok(admin) = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(database_url)
-            .await
-        else {
-            return;
-        };
-
-        let schemas: Result<Vec<(String,)>, _> = sqlx::query_as(
-            "SELECT schema_name FROM information_schema.schemata \
-             WHERE schema_name LIKE 'test\\_%' ESCAPE '\\'",
-        )
-        .fetch_all(&admin)
-        .await;
-
-        if let Ok(schemas) = schemas {
-            for (schema,) in schemas {
-                let _ = admin
-                    .execute(format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE"#).as_str())
-                    .await;
-            }
-        }
-        admin.close().await;
-    }
-
-    async fn fresh_pool() -> PgPool {
-        let database_url = std::env::var("DATABASE_URL")
-            .expect("DATABASE_URL must be set for fluxfang-api ingest::alerts tests");
-
-        SWEEP_DONE
-            .get_or_init(|| sweep_leftover_test_schemas(&database_url))
-            .await;
-
-        let schema = format!("test_{}", Uuid::new_v4().simple());
-
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&database_url)
-            .await
-            .expect("connect to DATABASE_URL to create test schema");
-        admin
-            .execute(format!(r#"CREATE SCHEMA "{schema}""#).as_str())
-            .await
-            .expect("create isolated test schema");
-        admin.close().await;
-
-        let search_path = format!(r#""{schema}", public"#);
-        let pool = PgPoolOptions::new()
-            .max_connections(5)
-            .after_connect(move |conn, _meta| {
-                let search_path = search_path.clone();
-                Box::pin(async move {
-                    conn.execute(format!("SET search_path TO {search_path}").as_str())
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect(&database_url)
-            .await
-            .expect("connect to DATABASE_URL with isolated search_path");
-
-        fluxfang_db::run_migrations(&pool)
-            .await
-            .expect("run migrations into isolated test schema");
-
-        pool
     }
 
     fn test_key() -> [u8; 32] {

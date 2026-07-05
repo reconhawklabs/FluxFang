@@ -95,9 +95,7 @@ pub fn key_from_base64(s: &str) -> Result<[u8; KEY_LEN], SecretError> {
     let bytes = BASE64
         .decode(s.trim())
         .map_err(|_| SecretError::InvalidBase64)?;
-    bytes
-        .try_into()
-        .map_err(|_| SecretError::InvalidKeyLength)
+    bytes.try_into().map_err(|_| SecretError::InvalidKeyLength)
 }
 
 #[cfg(test)]

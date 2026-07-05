@@ -85,9 +85,7 @@ async fn dispatch_with_timeout(
 
     let http_method = match Method::from_bytes(config.method.as_bytes()) {
         Ok(m) => m,
-        Err(_) => {
-            return DeliveryStatus::Failed(format!("invalid HTTP method: {}", config.method))
-        }
+        Err(_) => return DeliveryStatus::Failed(format!("invalid HTTP method: {}", config.method)),
     };
 
     let client = match reqwest::Client::builder().timeout(timeout).build() {
@@ -223,7 +221,11 @@ mod tests {
         assert_eq!(status, DeliveryStatus::Delivered);
 
         let reqs = requests.lock().await;
-        assert_eq!(reqs.len(), 1, "server should have received exactly one request");
+        assert_eq!(
+            reqs.len(),
+            1,
+            "server should have received exactly one request"
+        );
         let (headers, body) = &reqs[0];
 
         let received: serde_json::Value = serde_json::from_slice(body).expect("valid JSON body");
@@ -296,10 +298,7 @@ mod tests {
         }
 
         let sleep_for_captured = sleep_for;
-        let app = Router::new().route(
-            "/hook",
-            any(move || hang(sleep_for_captured)),
-        );
+        let app = Router::new().route("/hook", any(move || hang(sleep_for_captured)));
 
         let listener = TcpListener::bind("127.0.0.1:0")
             .await

@@ -209,6 +209,7 @@ pub async fn ingest(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::fresh_pool;
     use async_trait::async_trait;
     use chrono::{Duration as ChronoDuration, TimeZone, Utc};
     use fluxfang_capture::mock::MockGps;
@@ -216,11 +217,8 @@ mod tests {
     use fluxfang_db::models::{NewDataSource, NewEmitter};
     use fluxfang_db::DataSourceRepo;
     use session::{no_op_hook, SessionManagerConfig};
-    use sqlx::postgres::PgPoolOptions;
-    use sqlx::Executor;
     use std::time::Duration;
     use tokio::sync::mpsc;
-    use tokio::sync::OnceCell;
 
     /// A `GpsSource` backed by a channel, letting tests control exactly
     /// when a fix arrives without racing the source's own exhaustion (a
@@ -235,80 +233,6 @@ mod tests {
         async fn next_fix(&mut self) -> Option<GpsFix> {
             self.0.recv().await
         }
-    }
-
-    /// See `session::tests`' identical helper for the full isolation
-    /// rationale (one Postgres schema per test) -- duplicated here since
-    /// that module's test-only helpers are private to it.
-    static SWEEP_DONE: OnceCell<()> = OnceCell::const_new();
-
-    async fn sweep_leftover_test_schemas(database_url: &str) {
-        let Ok(admin) = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(database_url)
-            .await
-        else {
-            return;
-        };
-
-        let schemas: Result<Vec<(String,)>, _> = sqlx::query_as(
-            "SELECT schema_name FROM information_schema.schemata \
-             WHERE schema_name LIKE 'test\\_%' ESCAPE '\\'",
-        )
-        .fetch_all(&admin)
-        .await;
-
-        if let Ok(schemas) = schemas {
-            for (schema,) in schemas {
-                let _ = admin
-                    .execute(format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE"#).as_str())
-                    .await;
-            }
-        }
-        admin.close().await;
-    }
-
-    async fn fresh_pool() -> PgPool {
-        let database_url = std::env::var("DATABASE_URL")
-            .expect("DATABASE_URL must be set for fluxfang-api ingest tests");
-
-        SWEEP_DONE
-            .get_or_init(|| sweep_leftover_test_schemas(&database_url))
-            .await;
-
-        let schema = format!("test_{}", Uuid::new_v4().simple());
-
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&database_url)
-            .await
-            .expect("connect to DATABASE_URL to create test schema");
-        admin
-            .execute(format!(r#"CREATE SCHEMA "{schema}""#).as_str())
-            .await
-            .expect("create isolated test schema");
-        admin.close().await;
-
-        let search_path = format!(r#""{schema}", public"#);
-        let pool = PgPoolOptions::new()
-            .max_connections(5)
-            .after_connect(move |conn, _meta| {
-                let search_path = search_path.clone();
-                Box::pin(async move {
-                    conn.execute(format!("SET search_path TO {search_path}").as_str())
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect(&database_url)
-            .await
-            .expect("connect to DATABASE_URL with isolated search_path");
-
-        fluxfang_db::run_migrations(&pool)
-            .await
-            .expect("run migrations into isolated test schema");
-
-        pool
     }
 
     async fn seed_wifi_source(pool: &PgPool) -> Uuid {

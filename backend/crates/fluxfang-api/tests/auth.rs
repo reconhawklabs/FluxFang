@@ -173,12 +173,7 @@ async fn concurrent_setup_requests_only_one_wins() {
         ("candidate-bbbb", "candidate-aaaa")
     };
 
-    let resp = post_json(
-        &app,
-        "/api/login",
-        &format!(r#"{{"password":"{winner}"}}"#),
-    )
-    .await;
+    let resp = post_json(&app, "/api/login", &format!(r#"{{"password":"{winner}"}}"#)).await;
     assert_status(&resp, StatusCode::OK);
 
     let resp = post_json(&app, "/api/login", &format!(r#"{{"password":"{loser}"}}"#)).await;

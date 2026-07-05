@@ -238,8 +238,7 @@ mod tests {
         // never close the channel.
         let observations = vec![wifi_obs("AA:AA:AA:AA:AA:01", base)];
 
-        let mut capturer =
-            MockCapturer::new(observations, Duration::from_millis(10)).looping(true);
+        let mut capturer = MockCapturer::new(observations, Duration::from_millis(10)).looping(true);
         let (tx, mut rx) = mpsc::channel(8);
         capturer.start(tx).unwrap();
 
@@ -313,7 +312,8 @@ mod tests {
     #[tokio::test]
     async fn mock_gps_yields_synthetic_track_then_none() {
         let base = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let fixes = MockGps::synthetic_track(base, -122.0, 37.0, 0.001, chrono::Duration::seconds(5), 3);
+        let fixes =
+            MockGps::synthetic_track(base, -122.0, 37.0, 0.001, chrono::Duration::seconds(5), 3);
         let mut gps = MockGps::new(fixes.clone());
 
         let mut collected = Vec::new();

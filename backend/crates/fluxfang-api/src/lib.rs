@@ -45,6 +45,8 @@ pub mod ingest;
 pub mod middleware;
 pub mod notify;
 pub mod state;
+#[cfg(test)]
+mod test_support;
 
 use axum::routing::get;
 use axum::{Json, Router};

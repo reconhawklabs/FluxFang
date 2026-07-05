@@ -32,11 +32,19 @@
 //! temporary-table-like mechanism, and dropping from inside the same
 //! connection that's using it isn't possible). Since `fluxfang_test` is a
 //! disposable, non-production database, [`sweep_leftover_test_schemas`]
-//! performs a best-effort `DROP SCHEMA test_* CASCADE` sweep once per test
-//! *binary process*, before that binary creates any schema of its own —
-//! see its doc comment for why that ordering makes it safe under cargo
-//! test's default (one-binary-at-a-time, multi-threaded-within-a-binary)
-//! execution model.
+//! performs a best-effort, *age-gated* `DROP SCHEMA test_* CASCADE` sweep
+//! once per test *binary process*, before that binary creates any schema
+//! of its own. Age-gated, not merely ordering-gated: this crate's own
+//! integration-test binaries, `fluxfang-api`'s integration tests, and
+//! `fluxfang-api`'s in-crate unit tests (`ingest::*`) each run this same
+//! sweep independently against the same database, and nothing here
+//! guarantees those processes never overlap in time (e.g. `cargo-nextest`
+//! runs test binaries concurrently by default, unlike plain `cargo test`).
+//! So rather than assuming "any `test_*` schema found by my sweep must
+//! belong to an already-exited process," each schema name embeds its own
+//! creation timestamp (`test_<epoch_millis>_<uuid>`) and the sweep only
+//! drops ones older than a safe threshold — see
+//! [`sweep_leftover_test_schemas`]'s doc comment for the exact rule.
 
 // Each integration test binary compiles this module fresh and only uses a
 // subset of its helpers, so an unused-fn lint would fire in most of them.
@@ -54,19 +62,45 @@ use uuid::Uuid;
 /// than each running their own).
 static SWEEP_DONE: OnceCell<()> = OnceCell::const_new();
 
+/// A leftover `test_*` schema is only swept once it's at least this old.
+/// No single test (let alone a whole binary's run) should take anywhere
+/// near this long, so a schema still around after this window has to
+/// belong to a process that already exited without cleaning up after
+/// itself — never one that's still in flight.
+const SWEEP_MAX_AGE_MILLIS: u128 = 15 * 60 * 1000;
+
+fn now_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after the UNIX epoch")
+        .as_millis()
+}
+
+/// Parses the creation timestamp embedded in a `test_<epoch_millis>_<uuid>`
+/// schema name (see [`fresh_pool`]). Schemas that don't match this scheme
+/// return `None` and are left alone by the sweep rather than guessed at.
+fn parse_created_millis(schema: &str) -> Option<u128> {
+    let rest = schema.strip_prefix("test_")?;
+    let (millis, _uuid) = rest.split_once('_')?;
+    millis.parse().ok()
+}
+
 /// Best-effort cleanup of `test_*` schemas left behind by earlier test
 /// runs. Never panics — every step swallows its own errors — because this
 /// is pure housekeeping and must never be allowed to break test setup.
 ///
-/// Safety note: this is only safe to call *before* the current binary has
-/// created its own `test_*` schema (otherwise a slow-starting sibling
-/// thread could sweep away a schema a faster thread just created and is
-/// actively migrating/using). [`fresh_pool`] guarantees that ordering by
-/// running the (deduped, one-shot) sweep before its own `CREATE SCHEMA`.
-/// `cargo test` runs one integration-test binary at a time by default (only
-/// threads *within* a binary run concurrently), so by the time this sweep
-/// runs, any schemas matching `test_*` were left behind by a prior,
-/// already-exited binary process — never a currently-running one.
+/// Age-gated, not merely ordering-gated: a schema is only dropped once
+/// [`parse_created_millis`] shows it's older than [`SWEEP_MAX_AGE_MILLIS`].
+/// A schema younger than that could belong to a *concurrently-running*
+/// sibling process — another integration-test binary in this same crate,
+/// `fluxfang-api`'s integration tests, or `fluxfang-api`'s in-crate unit
+/// tests — that is actively migrating/using it, so sweeping it away
+/// purely because this process happened to run its sweep first would be
+/// unsafe. (Previously this relied on `cargo test`'s default of running
+/// one integration-test binary at a time; that's not guaranteed by any
+/// tool in this workspace and doesn't hold at all for e.g. `cargo-nextest`
+/// or `-j`-parallel test runners, so it was a latent race even before any
+/// such tool was introduced.)
 async fn sweep_leftover_test_schemas(database_url: &str) {
     let Ok(admin) = PgPoolOptions::new()
         .max_connections(1)
@@ -84,10 +118,17 @@ async fn sweep_leftover_test_schemas(database_url: &str) {
     .await;
 
     if let Ok(schemas) = schemas {
+        let now = now_millis();
         for (schema,) in schemas {
-            let _ = admin
-                .execute(format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE"#).as_str())
-                .await;
+            let is_stale = matches!(
+                parse_created_millis(&schema),
+                Some(created) if now.saturating_sub(created) > SWEEP_MAX_AGE_MILLIS
+            );
+            if is_stale {
+                let _ = admin
+                    .execute(format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE"#).as_str())
+                    .await;
+            }
         }
     }
 
@@ -104,7 +145,7 @@ pub async fn fresh_pool() -> PgPool {
         .get_or_init(|| sweep_leftover_test_schemas(&database_url))
         .await;
 
-    let schema = format!("test_{}", Uuid::new_v4().simple());
+    let schema = format!("test_{}_{}", now_millis(), Uuid::new_v4().simple());
 
     // A short-lived single connection just to create the schema; the main
     // pool below (with its own after_connect hook) is what tests use.
