@@ -19,11 +19,10 @@
 //!   unauthenticated logout is a no-op anyway, so requiring a session costs
 //!   nothing and keeps the public surface minimal.
 //!
-//! For this task the only placeholder protected route is a stub
-//! `GET /api/entities` returning `[]` (chosen over a `/api/me` placeholder
-//! because the task brief's own illustrative test hits `/api/entities`
-//! directly). Phase 6 replaces this stub with the real entity-listing
-//! handler in the same protected group.
+//! Task 6.5 replaces the placeholder `GET /api/entities -> []` stub this
+//! module briefly carried (Task 2.2 chose `/api/entities` over a `/api/me`
+//! placeholder since the task brief's own illustrative test hit it
+//! directly) with the real `entities` module's CRUD + detail handlers.
 //!
 //! ## Session store
 //!
@@ -47,6 +46,7 @@ pub mod data_sources;
 pub mod dto;
 pub mod emissions;
 pub mod emitters;
+pub mod entities;
 pub mod ingest;
 pub mod middleware;
 pub mod notify;
@@ -71,18 +71,16 @@ pub fn app(state: AppState) -> Router {
         )
         .merge(auth_routes::public_routes());
 
-    // Placeholder protected route proving `require_auth` actually guards
-    // things; see module docs for why `/api/entities` over `/api/me`.
     // `auth_routes::protected_routes()` (currently just `POST /api/logout`)
     // is merged in here too, so it goes through `require_auth` like every
     // other protected route rather than living in the public group.
     let protected = Router::new()
-        .route("/api/entities", get(|| async { Json(json!([])) }))
         .merge(auth_routes::protected_routes())
         .merge(catalog_routes::protected_routes())
         .merge(data_sources::protected_routes())
         .merge(emissions::protected_routes())
         .merge(emitters::protected_routes())
+        .merge(entities::protected_routes())
         .route_layer(axum::middleware::from_fn(middleware::require_auth));
 
     Router::new()

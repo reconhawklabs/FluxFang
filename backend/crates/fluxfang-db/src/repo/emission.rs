@@ -379,4 +379,36 @@ impl EmissionRepo {
 
         Ok((rows, total))
     }
+
+    /// Recent, geolocated (`location IS NOT NULL`) emissions across a *set*
+    /// of emitters, newest first, capped at `limit` — Task 6.5's `GET
+    /// /api/entities/:id` uses this for `recent_detections`, the feed that
+    /// drives the map/tracking view for an entity's emitters combined.
+    ///
+    /// A single `emitter_id = ANY($1)` query rather than one `EmissionRepo::
+    /// query` call per emitter (then merging/truncating in Rust): an entity
+    /// can have any number of emitters, and this keeps the work to one
+    /// query and one `ORDER BY ... LIMIT` regardless of how many. Returns an
+    /// empty `Vec` (not an error) for an empty `emitter_ids`, matching how
+    /// an entity with no emitters should report `recent_detections: []`.
+    pub async fn recent_located(
+        pool: &PgPool,
+        emitter_ids: &[Uuid],
+        limit: i64,
+    ) -> Result<Vec<Emission>, sqlx::Error> {
+        if emitter_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let sql = format!(
+            "SELECT {EMISSION_COLUMNS} FROM emission \
+             WHERE emitter_id = ANY($1) AND location IS NOT NULL \
+             ORDER BY observed_at DESC LIMIT $2"
+        );
+        sqlx::query_as::<_, Emission>(&sql)
+            .bind(emitter_ids)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+    }
 }

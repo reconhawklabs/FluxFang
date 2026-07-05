@@ -11,7 +11,7 @@ use uuid::Uuid;
 use fluxfang_core::catalog::{FieldDef, FieldType};
 use fluxfang_core::rule::Op;
 
-use fluxfang_db::models::{Emission, Emitter};
+use fluxfang_db::models::{Emission, Emitter, Entity};
 
 /// One operator as exposed over the wire: its `serde` code plus a
 /// plain-English label the frontend can render directly in a dropdown.
@@ -163,6 +163,38 @@ impl From<&Emitter> for EmitterDto {
             match_criteria: e.match_criteria.clone(),
             first_seen_at: e.first_seen_at,
             last_seen_at: e.last_seen_at,
+            created_at: e.created_at,
+        }
+    }
+}
+
+/// One row in `GET /api/entities`/`POST /api/entities`/`PATCH
+/// /api/entities/:id`, and the base fields `GET /api/entities/:id`'s detail
+/// response (see `entities::EntityDetailDto`) builds on top of (Task 6.5).
+/// Same "explicit DTO, not a re-export" rationale as [`EmissionDto`]/
+/// [`EmitterDto`].
+///
+/// Deliberately excludes `last_seen`: for a *list* of entities, computing it
+/// per row would mean either N extra `EntityRepo::last_seen` calls (one per
+/// entity) or a broader join/aggregate query this task doesn't otherwise
+/// need. The task brief explicitly allows omitting it from the list in that
+/// case, so it's provided only on the single-entity detail endpoint, where
+/// it costs exactly one extra query regardless of how many emitters the
+/// entity has.
+#[derive(Debug, Clone, Serialize)]
+pub struct EntityDto {
+    pub id: Uuid,
+    pub name: String,
+    pub notes: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<&Entity> for EntityDto {
+    fn from(e: &Entity) -> Self {
+        EntityDto {
+            id: e.id,
+            name: e.name.clone(),
+            notes: e.notes.clone(),
             created_at: e.created_at,
         }
     }

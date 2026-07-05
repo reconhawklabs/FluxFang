@@ -60,11 +60,11 @@ use uuid::Uuid;
 
 use fluxfang_core::rule::{Condition, MatchMode, Op};
 use fluxfang_core::{catalog_for, conditions_to_sql_checked, Rule, RuleSqlError};
-use fluxfang_db::models::{Entity, NewEmitter, NewEntity};
+use fluxfang_db::models::{NewEmitter, NewEntity};
 use fluxfang_db::repo::emitter::{EmitterRuleError, EmitterWithEntity};
 use fluxfang_db::{EmissionRepo, EmitterRepo};
 
-use crate::dto::EmitterDto;
+use crate::dto::{EmitterDto, EntityDto};
 use crate::state::AppState;
 
 pub fn protected_routes() -> Router<AppState> {
@@ -348,7 +348,7 @@ struct CreateWithEntityRequest {
 #[derive(Debug, Serialize)]
 struct EmitterEntityAndCount {
     emitter: EmitterDto,
-    entity: Entity,
+    entity: EntityDto,
     attached_count: u64,
 }
 
@@ -388,7 +388,7 @@ async fn create_with_entity(
         StatusCode::CREATED,
         Json(EmitterEntityAndCount {
             emitter: EmitterDto::from(&emitter),
-            entity,
+            entity: EntityDto::from(&entity),
             attached_count,
         }),
     ))

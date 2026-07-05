@@ -135,6 +135,23 @@ impl EmitterRepo {
             .await
     }
 
+    /// Every emitter grouped under `entity_id`, oldest first. Empty `Vec`
+    /// (not an error) if the entity has no emitters or doesn't exist. Task
+    /// 6.5's `GET /api/entities/:id` detail response uses this for its
+    /// `emitters` field.
+    pub async fn list_by_entity(
+        pool: &PgPool,
+        entity_id: Uuid,
+    ) -> Result<Vec<Emitter>, sqlx::Error> {
+        let sql = format!(
+            "SELECT {EMITTER_COLUMNS} FROM emitter WHERE entity_id = $1 ORDER BY created_at ASC"
+        );
+        sqlx::query_as::<_, Emitter>(&sql)
+            .bind(entity_id)
+            .fetch_all(pool)
+            .await
+    }
+
     /// Associate `emitter_id` with `entity_id` (`Some`), or detach it
     /// (`None`).
     pub async fn set_entity(

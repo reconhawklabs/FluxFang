@@ -55,4 +55,39 @@ impl EntityRepo {
             sqlx::query_as(sql).bind(entity_id).fetch_one(pool).await?;
         Ok(max)
     }
+
+    /// Full replacement of `name`/`notes`, same "PATCH re-sends the row's
+    /// full desired value for every field it's touching" convention
+    /// `ZoneRepo::update`/`EmitterRepo::update_basic` use — the caller
+    /// (`fluxfang-api`'s handler) is responsible for resolving "field
+    /// omitted from the request" against the existing row before calling
+    /// this.
+    pub async fn update(
+        pool: &PgPool,
+        id: Uuid,
+        name: &str,
+        notes: Option<&str>,
+    ) -> Result<Entity, sqlx::Error> {
+        let sql = format!(
+            "UPDATE entity SET name = $2, notes = $3 WHERE id = $1 RETURNING {ENTITY_COLUMNS}"
+        );
+        sqlx::query_as::<_, Entity>(&sql)
+            .bind(id)
+            .bind(name)
+            .bind(notes)
+            .fetch_one(pool)
+            .await
+    }
+
+    /// Delete an entity, returning whether a row was actually removed.
+    /// `emitter.entity_id` is `ON DELETE SET NULL` (see
+    /// `migrations/0001_init.sql`), so any emitters previously grouped under
+    /// this entity survive, just detached (their own emissions untouched).
+    pub async fn delete(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM entity WHERE id = $1")
+            .bind(id)
+            .execute(pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
 }
