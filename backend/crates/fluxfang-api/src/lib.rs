@@ -54,6 +54,7 @@ pub mod middleware;
 pub mod notifications;
 pub mod notify;
 pub mod state;
+pub mod system;
 #[cfg(test)]
 mod test_support;
 pub mod ws;
@@ -89,6 +90,7 @@ pub fn app(state: AppState) -> Router {
         .merge(emitters::protected_routes())
         .merge(entities::protected_routes())
         .merge(notifications::protected_routes())
+        .merge(system::protected_routes())
         .merge(ws::protected_routes())
         .merge(zones::protected_routes())
         .route_layer(axum::middleware::from_fn(middleware::require_auth));

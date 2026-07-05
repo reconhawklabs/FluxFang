@@ -221,6 +221,18 @@ pub struct ZoneDto {
     pub created_at: DateTime<Utc>,
 }
 
+/// `GET /api/system/capture-devices` response: the enumerated hardware the
+/// WebUI offers in its data-source setup dropdowns instead of making the
+/// operator type an interface/device name from memory. Built directly from
+/// `fluxfang_capture::enumerate::{list_wifi_interfaces, list_serial_devices}`
+/// — see that module's docs for detection strategy and the "never panics,
+/// empty on a hardware-less host" guarantee this DTO relies on.
+#[derive(Debug, Clone, Serialize)]
+pub struct CaptureDevicesDto {
+    pub wifi_interfaces: Vec<String>,
+    pub serial_devices: Vec<String>,
+}
+
 impl From<&Zone> for ZoneDto {
     fn from(z: &Zone) -> Self {
         ZoneDto {
