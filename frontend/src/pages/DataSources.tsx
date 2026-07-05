@@ -155,9 +155,11 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
   // or errored — never fall back to letting the user type a device name).
   let canSubmit: boolean;
   if (kind === 'wifi') {
-    canSubmit = !devicesLoading && !devicesErrored && wifiHasDevices && iface !== '';
+    // Require the selection to still be one of the currently-enumerated
+    // interfaces — guards against a stale pick after a Refresh changes the list.
+    canSubmit = !devicesLoading && !devicesErrored && wifiInterfaces.includes(iface);
   } else if (gpsMode === 'serial') {
-    canSubmit = !devicesLoading && !devicesErrored && serialHasDevices && device !== '';
+    canSubmit = !devicesLoading && !devicesErrored && serialDevices.includes(device);
   } else {
     canSubmit = host.trim() !== '' && port.trim() !== '';
   }
