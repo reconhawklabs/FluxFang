@@ -4,6 +4,11 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Creates the application database on first init (matches the DB name in
+      # DATABASE_URL). The postgis image enables the PostGIS extension in it.
+      # NOTE: only takes effect on an empty data volume — if you change it, run
+      # `docker compose down -v` to re-init (this WIPES existing data).
+      POSTGRES_DB: ${POSTGRES_DB:-fluxfang}
     ports:
       - "127.0.0.1:5432:5432"
     volumes:

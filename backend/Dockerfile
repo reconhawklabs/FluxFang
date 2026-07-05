@@ -1,5 +1,8 @@
 # --- Build stage ---
-FROM rust:1-slim AS builder
+# Pin to bookworm so the builder's glibc matches the debian:bookworm-slim
+# runtime below (a bare `rust:1-slim` tracks Debian testing/trixie, whose newer
+# glibc produces a binary the bookworm runtime can't load).
+FROM rust:1-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpcap-dev \
