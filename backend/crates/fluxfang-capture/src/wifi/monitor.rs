@@ -11,6 +11,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use chrono::Utc;
 use tokio::sync::mpsc;
@@ -45,12 +46,57 @@ pub struct WifiMonitorCapturer {
     interface: String,
     running: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
+    /// The channel-hopping thread's handle (see [`spawn_channel_hopper`]).
+    hop_handle: Option<thread::JoinHandle<()>>,
 }
 
 /// How long a single blocking `next_packet()` read may block before
 /// returning `Error::TimeoutExpired`, so the capture thread wakes up often
 /// enough to notice `stop()` even with no traffic on the channel.
 const READ_TIMEOUT_MS: i32 = 200;
+
+/// How long to dwell on each channel before hopping to the next. ~250ms is
+/// the airodump-ng-style default: long enough to catch a beacon (APs beacon
+/// ~10x/sec) but short enough to sweep every channel within a few seconds.
+const CHANNEL_DWELL_MS: u64 = 250;
+
+/// The channels the monitor interface hops across so it hears APs on every
+/// band, not just whatever it happened to be parked on. 2.4GHz 1-13 (the
+/// non-overlapping 1/6/11 first so they get an early hit), then a broad set
+/// of common 5GHz channels. Channels the adapter/regulatory domain doesn't
+/// support just fail the `iw set channel` and are skipped — see
+/// [`spawn_channel_hopper`].
+pub(crate) fn channel_hop_list() -> Vec<u16> {
+    let mut chans = vec![1u16, 6, 11, 2, 3, 4, 5, 7, 8, 9, 10, 12, 13];
+    // Common 5GHz channels: UNII-1, UNII-2 (incl. DFS), UNII-3.
+    chans.extend([
+        36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 149,
+        153, 157, 161, 165,
+    ]);
+    chans
+}
+
+/// Spawns a thread that retunes `interface` across [`channel_hop_list`] every
+/// [`CHANNEL_DWELL_MS`] until `running` is cleared. Per-channel `iw set
+/// channel` failures (unsupported channel / DFS / regulatory) are ignored so
+/// one bad channel doesn't stop the sweep.
+fn spawn_channel_hopper(interface: String, running: Arc<AtomicBool>) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let channels = channel_hop_list();
+        'outer: while running.load(Ordering::SeqCst) {
+            for ch in &channels {
+                if !running.load(Ordering::SeqCst) {
+                    break 'outer;
+                }
+                let _ = run_cmd(
+                    "iw",
+                    &["dev", &interface, "set", "channel", &ch.to_string()],
+                );
+                thread::sleep(Duration::from_millis(CHANNEL_DWELL_MS));
+            }
+        }
+    })
+}
 
 /// Run an external command (`iw`/`ip`), surfacing its stderr in the error so
 /// the UI shows *why* it failed (e.g. "Device or resource busy") instead of a
@@ -81,6 +127,7 @@ impl WifiMonitorCapturer {
             interface: interface.into(),
             running: Arc::new(AtomicBool::new(false)),
             handle: None,
+            hop_handle: None,
         }
     }
 
@@ -147,6 +194,14 @@ impl Capturer for WifiMonitorCapturer {
         self.running.store(true, Ordering::SeqCst);
         let running = self.running.clone();
 
+        // Sweep channels so we hear APs on every band, not just the one the
+        // radio powered up on (otherwise only whatever channel we're parked
+        // on is captured — typically ch1 — and off-channel APs are invisible).
+        self.hop_handle = Some(spawn_channel_hopper(
+            self.interface.clone(),
+            self.running.clone(),
+        ));
+
         let handle = thread::spawn(move || {
             while running.load(Ordering::SeqCst) {
                 match cap.next_packet() {
@@ -179,11 +234,35 @@ impl Capturer for WifiMonitorCapturer {
             // is released before we try to flip it back to managed mode.
             let _ = handle.join();
         }
+        if let Some(hop) = self.hop_handle.take() {
+            // Stop retuning the radio before we restore managed mode.
+            let _ = hop.join();
+        }
         if let Err(err) = self.restore_managed_mode() {
             eprintln!(
                 "wifi monitor: failed to restore managed mode on {}: {err:#}",
                 self.interface
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::channel_hop_list;
+
+    #[test]
+    fn channel_hop_list_covers_both_bands_without_duplicates() {
+        let chans = channel_hop_list();
+        // 2.4GHz non-overlapping channels come first for an early hit.
+        assert_eq!(&chans[..3], &[1, 6, 11]);
+        // Covers 2.4GHz (<=14) and 5GHz (>=36).
+        assert!(chans.iter().any(|&c| (1..=13).contains(&c)));
+        assert!(chans.iter().any(|&c| c >= 36));
+        // No duplicates.
+        let mut sorted = chans.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), chans.len(), "channel list has duplicates");
     }
 }
