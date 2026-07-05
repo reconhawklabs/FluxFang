@@ -35,7 +35,8 @@ CREATE TABLE data_source (
     interface   text,          -- wifi: e.g. wlan0
     status      text NOT NULL CHECK (status IN ('stopped', 'starting', 'running', 'error')),
     config      jsonb NOT NULL DEFAULT '{}'::jsonb,
-    last_error  text
+    last_error  text,
+    CHECK ((kind = 'wifi' AND mode = 'monitor') OR (kind = 'gps' AND mode IN ('gpsd', 'serial')))
 );
 
 -- ---------------------------------------------------------------------
@@ -94,7 +95,7 @@ CREATE TABLE emitter (
 CREATE TABLE emission (
     id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     created_at       timestamptz NOT NULL DEFAULT now(),
-    data_source_id   uuid NOT NULL REFERENCES data_source(id) ON DELETE CASCADE,
+    data_source_id   uuid REFERENCES data_source(id) ON DELETE SET NULL,
     emitter_id       uuid REFERENCES emitter(id) ON DELETE SET NULL,
     session_id       uuid REFERENCES survey_session(id) ON DELETE SET NULL,
     observed_at      timestamptz NOT NULL,
@@ -141,7 +142,7 @@ CREATE TABLE zone_membership (
 );
 
 CREATE UNIQUE INDEX zone_membership_subject_zone_uidx
-    ON zone_membership(subject_type, subject_id, zone_id);
+    ON zone_membership(subject_type, subject_id, zone_id) NULLS NOT DISTINCT;
 
 -- ---------------------------------------------------------------------
 -- alert_method: a reusable, user-configured delivery channel.
@@ -194,7 +195,7 @@ CREATE TABLE alert_rule_method (
 CREATE TABLE notification (
     id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     created_at       timestamptz NOT NULL DEFAULT now(),
-    alert_rule_id    uuid REFERENCES alert_rule(id) ON DELETE CASCADE,
+    alert_rule_id    uuid REFERENCES alert_rule(id) ON DELETE SET NULL,
     alert_method_id  uuid REFERENCES alert_method(id) ON DELETE SET NULL,
     fired_at         timestamptz NOT NULL DEFAULT now(),
     payload          jsonb NOT NULL DEFAULT '{}'::jsonb,
