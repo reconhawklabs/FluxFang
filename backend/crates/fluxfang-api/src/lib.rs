@@ -42,6 +42,7 @@
 
 pub mod auth_routes;
 pub mod middleware;
+pub mod notify;
 pub mod state;
 
 use axum::routing::get;
