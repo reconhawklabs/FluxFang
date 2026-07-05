@@ -110,3 +110,49 @@ async fn single_active_session_index_rejects_a_second_active_row() {
     let db_err = err.as_database_error().expect("should be a database error");
     assert_eq!(db_err.code().as_deref(), Some("23505"), "unique_violation");
 }
+
+/// `one_active_session` is a *partial* index (`WHERE ended_at IS NULL`):
+/// it must not constrain *closed* rows at all. Two (or more) sessions with
+/// `ended_at IS NOT NULL` existing at once -- the normal steady state once
+/// a survey has run more than once -- must be perfectly fine.
+#[tokio::test]
+async fn multiple_closed_sessions_can_coexist() {
+    let pool = fresh_pool().await;
+
+    let first = SessionRepo::open(&pool).await.unwrap();
+    SessionRepo::close_active(&pool).await.unwrap();
+    let second = SessionRepo::open(&pool).await.unwrap();
+    SessionRepo::close_active(&pool).await.unwrap();
+
+    assert_ne!(first.id, second.id);
+    assert!(SessionRepo::active(&pool).await.unwrap().is_none());
+
+    let (first_ended, second_ended): (
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    ) = {
+        let row: (Option<chrono::DateTime<chrono::Utc>>,) =
+            sqlx::query_as("SELECT ended_at FROM survey_session WHERE id = $1")
+                .bind(first.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let row2: (Option<chrono::DateTime<chrono::Utc>>,) =
+            sqlx::query_as("SELECT ended_at FROM survey_session WHERE id = $1")
+                .bind(second.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        (row.0, row2.0)
+    };
+    assert!(first_ended.is_some());
+    assert!(second_ended.is_some());
+
+    let count: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM survey_session WHERE ended_at IS NOT NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count.0, 2, "both closed sessions must persist simultaneously");
+}

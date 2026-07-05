@@ -269,12 +269,24 @@ async fn run_ingest_loop<G: GpsSource>(
                             // session's ingest loop -- no tracing/log crate
                             // is wired into this workspace yet, so this is a
                             // deliberately visible stderr fallback rather
-                            // than silently swallowing the error.
-                            if let Err(e) = LocationRepo::insert_fix(&pool, new_fix).await {
-                                eprintln!("SessionManager: failed to write location_fix: {e}");
+                            // than silently swallowing the error. Critically,
+                            // the throttle only advances and the hook only
+                            // fires in the `Ok` arm: the documented contract
+                            // is "once per row actually WRITTEN", so a failed
+                            // insert must neither trigger 5.4's zone
+                            // evaluation on data that was never persisted nor
+                            // eat the next real write's throttle window.
+                            match LocationRepo::insert_fix(&pool, new_fix).await {
+                                Ok(_) => {
+                                    last_write = Some(Instant::now());
+                                    hook(fix).await;
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "SessionManager: failed to write location_fix: {e}"
+                                    );
+                                }
                             }
-                            last_write = Some(Instant::now());
-                            hook(fix).await;
                         }
                     }
                     None => break,
@@ -284,7 +296,13 @@ async fn run_ingest_loop<G: GpsSource>(
         }
     }
 
-    let _ = SessionRepo::close_active(&pool).await;
+    // Same rationale as the insert-failure path above: don't silently
+    // swallow this. An error here means the DB now disagrees with this
+    // process's view that the session ended (an in-memory/DB divergence)
+    // and that should be visible, not eaten by `let _ = ...`.
+    if let Err(e) = SessionRepo::close_active(&pool).await {
+        eprintln!("SessionManager: failed to close session on loop exit: {e}");
+    }
 }
 
 #[cfg(test)]
@@ -528,6 +546,144 @@ mod tests {
         let active = SessionRepo::active(&pool).await.unwrap().unwrap();
         assert_eq!(active.id, manager.current_session_id().unwrap());
         assert_ne!(active.id, dangling.id);
+    }
+
+    /// Regression test for the "hook fires / throttle advances on FAILED
+    /// writes" bug: after one fix writes successfully, this poisons
+    /// `location_fix` so every *subsequent* insert fails, then sends a
+    /// second fix and asserts the hook did NOT fire for it and no second
+    /// row was written.
+    ///
+    /// Failure injection: `ALTER TABLE ... ADD CONSTRAINT ... CHECK (false)
+    /// NOT VALID`. `NOT VALID` skips validating rows that already exist
+    /// (so the first, already-written fix's row is untouched) but is still
+    /// enforced against every subsequent `INSERT` -- exactly "make the next
+    /// write fail" without touching `session_id`/FK identity (which would
+    /// risk cascading deletes of the row we're trying to keep) and without
+    /// relying on connection/pool-level failures that Postgres's
+    /// superuser-by-default local role wouldn't even honor (e.g.
+    /// `REVOKE INSERT` is a no-op against a superuser connection).
+    #[tokio::test]
+    async fn hook_and_throttle_do_not_advance_on_a_failed_write() {
+        let pool = fresh_pool().await;
+        let (tx, rx) = mpsc::unbounded_channel();
+        let gps = ChannelGps(rx);
+        let (hook, count) = counting_hook();
+
+        let mut manager =
+            SessionManager::open(pool.clone(), gps, SessionManagerConfig::default(), hook)
+                .await
+                .unwrap();
+        let session_id = manager.current_session_id().unwrap();
+
+        let base = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let mut fixes =
+            MockGps::synthetic_track(base, -122.0, 37.0, 0.001, chrono::Duration::seconds(1), 2)
+                .into_iter();
+        let fix1 = fixes.next().unwrap();
+        let fix2 = fixes.next().unwrap();
+
+        // First fix: writes and hooks normally. Poll (bounded, so a
+        // regression that never fires the hook fails loudly instead of
+        // hanging the suite) until the async write/hook have landed.
+        tx.send(fix1).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while count.load(Ordering::SeqCst) < 1 {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("hook should fire for the first, successfully-written fix");
+        assert_eq!(
+            LocationRepo::list_for_session(&pool, session_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Poison every subsequent insert into `location_fix`.
+        pool.execute(
+            "ALTER TABLE location_fix ADD CONSTRAINT block_further_writes CHECK (false) NOT VALID",
+        )
+        .await
+        .unwrap();
+
+        // Second fix: insert_fix must now fail. Drop the sender right
+        // after so the loop exhausts the source and closes on its own --
+        // `join` then gives a deterministic point after which no more
+        // hook/write activity is possible for this test to observe.
+        tx.send(fix2).unwrap();
+        drop(tx);
+        manager.join().await;
+
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "hook must not fire for a fix whose write failed"
+        );
+        let rows = LocationRepo::list_for_session(&pool, session_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "the failed write must not have persisted a second row"
+        );
+    }
+
+    /// `write_interval > 0` throttles both persisted rows and hook
+    /// invocations to at most one per interval: fixes arriving faster than
+    /// that must be dropped from the write path (though `latest_fix`
+    /// itself is never throttled, per the module docs).
+    #[tokio::test]
+    async fn write_interval_throttles_writes_and_hook_calls() {
+        let pool = fresh_pool().await;
+        let (tx, rx) = mpsc::unbounded_channel();
+        let gps = ChannelGps(rx);
+        let (hook, count) = counting_hook();
+
+        let mut manager = SessionManager::open(
+            pool.clone(),
+            gps,
+            SessionManagerConfig {
+                inactivity_gap: Duration::from_secs(5 * 60),
+                write_interval: Duration::from_millis(200),
+            },
+            hook,
+        )
+        .await
+        .unwrap();
+        let session_id = manager.current_session_id().unwrap();
+
+        let base = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let fixes =
+            MockGps::synthetic_track(base, -122.0, 37.0, 0.001, chrono::Duration::seconds(1), 5);
+        let sent = fixes.len();
+
+        // All five fixes arrive back-to-back, far faster than the
+        // 200ms throttle -- only the first should pass `should_write`.
+        for fix in fixes {
+            tx.send(fix).unwrap();
+        }
+        // Source exhaustion (not the inactivity gap) ends the loop as soon
+        // as the channel drains, giving a deterministic stopping point.
+        drop(tx);
+        manager.join().await;
+
+        let rows = LocationRepo::list_for_session(&pool, session_id)
+            .await
+            .unwrap();
+        assert!(
+            rows.len() < sent,
+            "throttle must drop some of {sent} fast-arriving fixes, wrote {}",
+            rows.len()
+        );
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            rows.len(),
+            "hook count must match the number of rows actually written"
+        );
     }
 
     #[tokio::test]
