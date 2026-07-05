@@ -8,6 +8,7 @@
 //! signature header when a secret is configured).
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use hmac::{Hmac, Mac};
 use reqwest::Method;
@@ -23,6 +24,14 @@ type HmacSha256 = Hmac<Sha256>;
 /// Header carrying the HMAC-SHA256 signature of the raw JSON body, when
 /// `config.secret` is set: `X-FluxFang-Signature: sha256=<hex>`.
 const SIGNATURE_HEADER: &str = "X-FluxFang-Signature";
+
+/// Default per-request timeout for webhook dispatch. `dispatch` is called
+/// per-emission from the ingest/alert path (Task 5.3); without a timeout, a
+/// webhook endpoint that accepts the connection but never responds would
+/// block emission processing indefinitely. 10s is a conservative bound that
+/// comfortably covers slow-but-working endpoints while keeping the ingest
+/// path from stalling on a dead one.
+const DEFAULT_WEBHOOK_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn default_method() -> String {
     "POST".to_string()
@@ -42,12 +51,27 @@ pub(crate) struct WebhookConfig {
 
 /// Decrypt `method`'s config and POST (or whatever `config.method` says)
 /// `payload` as JSON to `config.url`. Never panics — bad key/config JSON,
-/// an invalid HTTP method string, a network error, or a non-2xx response
-/// all become `DeliveryStatus::Failed`.
+/// an invalid HTTP method string, a network error (including a request
+/// timeout), or a non-2xx response all become `DeliveryStatus::Failed`.
+///
+/// Requests are bounded by [`DEFAULT_WEBHOOK_TIMEOUT`] so a webhook endpoint
+/// that accepts the connection but never responds cannot stall the caller.
 pub(crate) async fn dispatch(
     method: &AlertMethod,
     key: &[u8; 32],
     payload: &NotificationPayload,
+) -> DeliveryStatus {
+    dispatch_with_timeout(method, key, payload, DEFAULT_WEBHOOK_TIMEOUT).await
+}
+
+/// Same as [`dispatch`] but with a caller-supplied request timeout, so tests
+/// can exercise the timeout path quickly without waiting on the production
+/// default. Production code should always go through [`dispatch`].
+async fn dispatch_with_timeout(
+    method: &AlertMethod,
+    key: &[u8; 32],
+    payload: &NotificationPayload,
+    timeout: Duration,
 ) -> DeliveryStatus {
     let config: WebhookConfig = match decrypt_config(method, key) {
         Ok(c) => c,
@@ -66,7 +90,10 @@ pub(crate) async fn dispatch(
         }
     };
 
-    let client = reqwest::Client::new();
+    let client = match reqwest::Client::builder().timeout(timeout).build() {
+        Ok(c) => c,
+        Err(e) => return DeliveryStatus::Failed(format!("failed to build HTTP client: {e}")),
+    };
     let mut request = client
         .request(http_method, &config.url)
         .header("content-type", "application/json");
@@ -251,6 +278,76 @@ mod tests {
 
         let method = method_with_config(serde_json::json!({
             "url": format!("http://{addr}/hook"),
+        }));
+
+        let status = dispatch(&method, &test_key(), &payload()).await;
+        assert!(matches!(status, DeliveryStatus::Failed(_)));
+    }
+
+    /// Spin up a real local HTTP server that ACCEPTS the connection but
+    /// never responds within `sleep_for` (far longer than the dispatcher's
+    /// timeout), to prove `dispatch` doesn't block forever on a hung
+    /// webhook endpoint. Regression test for the notify/webhook dispatcher
+    /// having no request timeout (Task 8.2 review finding).
+    async fn spawn_hanging_server(sleep_for: Duration) -> String {
+        async fn hang(sleep_for: Duration) -> StatusCode {
+            tokio::time::sleep(sleep_for).await;
+            StatusCode::OK
+        }
+
+        let sleep_for_captured = sleep_for;
+        let app = Router::new().route(
+            "/hook",
+            any(move || hang(sleep_for_captured)),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind hanging server");
+        let addr = listener.local_addr().expect("local_addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("hanging server crashed");
+        });
+
+        format!("http://{addr}/hook")
+    }
+
+    #[tokio::test]
+    async fn dispatch_fails_promptly_instead_of_hanging_on_unresponsive_server() {
+        // Server accepts the TCP connection but never writes a response,
+        // sleeping far longer (30s) than the short timeout we give
+        // `dispatch_with_timeout` (200ms) below. If the timeout weren't
+        // wired through to the `reqwest::Client`, this test would hang for
+        // 30s (or forever, absent a runtime-level test timeout).
+        let url = spawn_hanging_server(Duration::from_secs(30)).await;
+        let method = method_with_config(serde_json::json!({ "url": url }));
+
+        let started = std::time::Instant::now();
+        let status = tokio::time::timeout(
+            Duration::from_secs(5),
+            dispatch_with_timeout(&method, &test_key(), &payload(), Duration::from_millis(200)),
+        )
+        .await
+        .expect("dispatch must return well within 5s, not hang for 30s");
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(status, DeliveryStatus::Failed(_)),
+            "expected Failed(_) for a request that timed out, got {status:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "dispatch should fail promptly once its request timeout elapses, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_fails_without_panicking_on_invalid_method_string() {
+        let method = method_with_config(serde_json::json!({
+            "url": "http://example.invalid/hook",
+            "method": "NOT A METHOD",
         }));
 
         let status = dispatch(&method, &test_key(), &payload()).await;
