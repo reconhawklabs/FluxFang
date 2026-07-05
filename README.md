@@ -121,20 +121,28 @@ password. After that, log in with that password.
 
 A brief walk-through of the main flow once you're logged in:
 
-1. **Data Sources** — add a source:
-   - *WiFi*: pick `wifi` / mode `monitor`, and give the **interface name**
-     of a monitor-capable adapter (e.g. `wlan1`). This is the same string as
-     `WIFI_DEVICE`, just entered per-source rather than baked into the
-     container.
-   - *GPS*: pick `gps`, then either mode `gpsd` (`{host, port}` of a running
-     `gpsd`) or mode `serial` (`{device, baud}`, e.g. `/dev/ttyUSB0` at
-     `4800`/`9600`/`115200` — see `fluxfang_capture::gps::ALLOWED_BAUD_RATES`
-     for the exact allow-list).
-   - *Mock* (no hardware): a synthetic source that emits deterministic fake
-     WiFi/GPS traffic — good for trying out the rest of the app end to end.
+1. **Data Sources** — add a source. Hardware is **selected from a dropdown**
+   that the backend enumerates from the host — you don't type interface/device
+   names. If nothing compatible is attached you'll see e.g. *"No compatible WiFi
+   card found."* and can't add that source until a device is present (plug it in,
+   then **Refresh**).
+   - *WiFi*: pick `wifi`, then an operating **mode**:
+     - **Monitor Mode** — puts the adapter into monitor mode and captures all
+       802.11 frames (needs a monitor-capable adapter; the source goes to
+       `error` with a `last_error` if the card can't do it).
+     - **SSID Scan** — uses the adapter as-is (managed mode) and periodically
+       scans (`iw dev … scan`) for nearby access points' SSID/BSSID/signal —
+       works on an ordinary WiFi card without monitor mode.
+     Then choose the adapter from the enumerated **interface dropdown**.
+   - *GPS*: pick `gps`, then mode `gpsd` (`{host, port}` of a running `gpsd` — a
+     network address you type) or mode `serial` (pick the **device** from the
+     enumerated serial dropdown + a **baud** rate; see
+     `fluxfang_capture::gps::ALLOWED_BAUD_RATES` for the allow-list).
    - Click **Start** on the source. Status flips `starting` → `running` (or
-     `error` with `last_error` explaining what went wrong, e.g. a bad
-     interface name).
+     `error` with `last_error` explaining what went wrong).
+   - *No hardware?* The mock capturer (used by the test suite) lets the whole
+     pipeline run without any RF hardware; see the end-to-end test in
+     `backend/crates/fluxfang-api/tests/e2e.rs`.
 2. **Emissions** — browse/filter what's been captured (kind, payload fields
    like bssid/ssid/channel, time range, location). Select rows and **assign
    to an emitter** to start grouping them.
