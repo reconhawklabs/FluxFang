@@ -11,7 +11,7 @@ use uuid::Uuid;
 use fluxfang_core::catalog::{FieldDef, FieldType};
 use fluxfang_core::rule::Op;
 
-use fluxfang_db::models::{Emission, Emitter, Entity};
+use fluxfang_db::models::{Emission, Emitter, Entity, Zone};
 
 /// One operator as exposed over the wire: its `serde` code plus a
 /// plain-English label the frontend can render directly in a dropdown.
@@ -196,6 +196,41 @@ impl From<&Entity> for EntityDto {
             name: e.name.clone(),
             notes: e.notes.clone(),
             created_at: e.created_at,
+        }
+    }
+}
+
+/// One row in `GET /api/zones`/`POST /api/zones`/`PATCH /api/zones/:id`, and
+/// the base fields `GET /api/zones/:id`'s detail response (see
+/// `zones::ZoneDetailDto`) builds on top of (Task 6.7). Same "explicit DTO,
+/// not a re-export" rationale as [`EmissionDto`]/[`EmitterDto`]/
+/// [`EntityDto`]: `fluxfang_db::models::Zone` already `#[derive(Serialize)]`s
+/// with a wire-compatible shape, but this DTO keeps the zones API's response
+/// shape independently controlled here. `lon`/`lat` are flattened onto the
+/// top level (mirroring `Zone`'s own shape) rather than nested under a
+/// `center` object, matching every other geo-bearing DTO in this module
+/// (`EmissionDto`).
+#[derive(Debug, Clone, Serialize)]
+pub struct ZoneDto {
+    pub id: Uuid,
+    pub name: String,
+    pub lon: f64,
+    pub lat: f64,
+    pub radius_m: f64,
+    pub notes: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<&Zone> for ZoneDto {
+    fn from(z: &Zone) -> Self {
+        ZoneDto {
+            id: z.id,
+            name: z.name.clone(),
+            lon: z.lon,
+            lat: z.lat,
+            radius_m: z.radius_m,
+            notes: z.notes.clone(),
+            created_at: z.created_at,
         }
     }
 }

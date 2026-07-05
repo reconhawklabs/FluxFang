@@ -139,12 +139,71 @@ impl ZoneRepo {
     /// Delete a zone, returning whether a row was actually removed.
     /// `zone_membership` rows referencing it cascade-delete (see the FK in
     /// `0001_init.sql`).
+    ///
+    /// Callers that also need to detach any `alert_rule` referencing this
+    /// zone (Task 6.7's `DELETE /api/zones/:id`) should use
+    /// [`ZoneRepo::delete_and_disable_rules`] instead, so both changes land
+    /// atomically.
     pub async fn delete(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("DELETE FROM zone WHERE id = $1")
             .bind(id)
             .execute(pool)
             .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    /// Delete a zone and disable (never delete) any `alert_rule` whose
+    /// `trigger` JSON references it via `zone_id`, atomically.
+    ///
+    /// `zone_membership` rows referencing the zone cascade-delete as part of
+    /// the `DELETE FROM zone` statement itself (schema FK `ON DELETE
+    /// CASCADE` — see [`ZoneRepo::delete`]'s doc comment), so no separate
+    /// step is needed for those. `alert_rule.trigger`, however, is a JSONB
+    /// blob with **no FK** to `zone` (`0001_init.sql`'s `alert_rule` comment
+    /// notes `target_id` is deliberately unconstrained since it's
+    /// polymorphic on `target_type`, and `trigger.zone_id` is even less
+    /// constrained — a plain UUID string inside the blob): a zone-transition
+    /// rule (`trigger.on ∈ enters_zone | leaves_zone | host_enters_zone |
+    /// host_leaves_zone`) records the zone it watches there, with nothing in
+    /// the schema enforcing it still points at a real row. Deleting the zone
+    /// without touching those rules would leave them silently watching a
+    /// zone that no longer exists — so every `alert_rule` whose `trigger ->>
+    /// 'zone_id'` equals `id` has `enabled` set to `false` (not deleted: it
+    /// stays visible to the operator, still linked to whatever
+    /// `alert_rule_method`s it had, for them to re-target or remove
+    /// themselves) in the same transaction as the zone delete. That means a
+    /// caller (or a concurrent reader) can never observe the zone gone with
+    /// a referencing rule still `enabled`, or vice versa.
+    ///
+    /// Returns `(zone_existed, rules_disabled)`. If `id` doesn't name a real
+    /// zone, `zone_existed` is `false` and `rules_disabled` is always `0`
+    /// (the transaction still commits, but rewrites nothing) — matching
+    /// [`ZoneRepo::delete`]'s existing "no row affected" convention.
+    pub async fn delete_and_disable_rules(
+        pool: &PgPool,
+        id: Uuid,
+    ) -> Result<(bool, u64), sqlx::Error> {
+        let mut tx = pool.begin().await?;
+
+        let zone_existed = sqlx::query("DELETE FROM zone WHERE id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            > 0;
+
+        let rules_disabled = if zone_existed {
+            sqlx::query("UPDATE alert_rule SET enabled = false WHERE trigger ->> 'zone_id' = $1")
+                .bind(id.to_string())
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+        } else {
+            0
+        };
+
+        tx.commit().await?;
+        Ok((zone_existed, rules_disabled))
     }
 
     /// For every zone, whether the point `(lon, lat)` falls within it

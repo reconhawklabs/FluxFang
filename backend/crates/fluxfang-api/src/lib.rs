@@ -56,6 +56,7 @@ pub mod notify;
 pub mod state;
 #[cfg(test)]
 mod test_support;
+pub mod zones;
 
 use axum::routing::get;
 use axum::{Json, Router};
@@ -87,6 +88,7 @@ pub fn app(state: AppState) -> Router {
         .merge(emitters::protected_routes())
         .merge(entities::protected_routes())
         .merge(notifications::protected_routes())
+        .merge(zones::protected_routes())
         .route_layer(axum::middleware::from_fn(middleware::require_auth));
 
     Router::new()

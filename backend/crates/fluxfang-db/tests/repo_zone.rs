@@ -4,9 +4,9 @@ mod common;
 
 use chrono::{Duration, Utc};
 use common::{fresh_pool, seed_session, seed_wifi_source};
-use fluxfang_db::models::{NewEmission, NewEmitter, NewEntity, NewZone, Zone};
+use fluxfang_db::models::{NewAlertRule, NewEmission, NewEmitter, NewEntity, NewZone, Zone};
 use fluxfang_db::repo::zone::ZoneRepo;
-use fluxfang_db::{EmissionRepo, EmitterRepo, EntityRepo};
+use fluxfang_db::{AlertRuleRepo, EmissionRepo, EmitterRepo, EntityRepo, ZoneMembershipRepo};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -153,6 +153,77 @@ async fn delete_removes_zone() {
 
     let deleted_again = ZoneRepo::delete(&pool, z.id).await.unwrap();
     assert!(!deleted_again);
+}
+
+#[tokio::test]
+async fn delete_and_disable_rules_removes_zone_and_disables_only_its_own_referencing_rule() {
+    let pool = fresh_pool().await;
+    let doomed = seed_zone(&pool).await;
+    let other = seed_zone(&pool).await;
+
+    // A zone_membership row for the doomed zone -- should cascade-delete.
+    ZoneMembershipRepo::upsert(&pool, "host", None, doomed.id, true, Utc::now())
+        .await
+        .unwrap();
+
+    let rule_on_doomed = AlertRuleRepo::insert(
+        &pool,
+        NewAlertRule {
+            name: "watches doomed zone".to_string(),
+            enabled: true,
+            target_type: None,
+            target_id: None,
+            trigger: serde_json::json!({"on": "host_enters_zone", "zone_id": doomed.id}),
+        },
+    )
+    .await
+    .unwrap();
+    let rule_on_other = AlertRuleRepo::insert(
+        &pool,
+        NewAlertRule {
+            name: "watches other zone".to_string(),
+            enabled: true,
+            target_type: None,
+            target_id: None,
+            trigger: serde_json::json!({"on": "host_enters_zone", "zone_id": other.id}),
+        },
+    )
+    .await
+    .unwrap();
+
+    let (existed, disabled) = ZoneRepo::delete_and_disable_rules(&pool, doomed.id)
+        .await
+        .unwrap();
+    assert!(existed);
+    assert_eq!(disabled, 1);
+
+    assert!(ZoneRepo::get(&pool, doomed.id).await.unwrap().is_none());
+    assert!(ZoneMembershipRepo::get(&pool, "host", None, doomed.id)
+        .await
+        .unwrap()
+        .is_none());
+
+    let reloaded_doomed_rule = AlertRuleRepo::get(&pool, rule_on_doomed.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!reloaded_doomed_rule.enabled);
+
+    let reloaded_other_rule = AlertRuleRepo::get(&pool, rule_on_other.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(reloaded_other_rule.enabled);
+}
+
+#[tokio::test]
+async fn delete_and_disable_rules_on_unknown_id_is_a_noop() {
+    let pool = fresh_pool().await;
+    let (existed, disabled) = ZoneRepo::delete_and_disable_rules(&pool, Uuid::new_v4())
+        .await
+        .unwrap();
+    assert!(!existed);
+    assert_eq!(disabled, 0);
 }
 
 #[tokio::test]
