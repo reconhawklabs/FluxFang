@@ -447,6 +447,14 @@ impl CaptureSupervisor {
         }
     }
 
+    /// A fresh subscriber to the ingest `Event` broadcast channel (Task
+    /// 7.1's `/ws` handler). `broadcast::Sender::subscribe` only sees events
+    /// sent *after* this call, so a caller that must not miss the very next
+    /// emission (e.g. a test) needs to subscribe before triggering it.
+    pub fn subscribe_events(&self) -> broadcast::Receiver<Event> {
+        self.events.subscribe()
+    }
+
     fn ctx_for(&self, manager: Arc<SessionManager>) -> IngestCtx {
         IngestCtx {
             pool: self.pool.clone(),

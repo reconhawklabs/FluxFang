@@ -303,3 +303,28 @@ pub fn assert_status(resp: &Response<Body>, expected: StatusCode) {
         resp.status()
     );
 }
+
+/// Spawn `app` on a real, ephemeral TCP port and return its address.
+///
+/// Every other helper here drives the router in-process via
+/// `tower::ServiceExt::oneshot` (see [`call`]), which is enough for plain
+/// request/response endpoints but can't perform an HTTP `Upgrade` (a
+/// WebSocket handshake needs a genuine bidirectional byte stream to switch
+/// protocols on top of, not just one request paired with one response) —
+/// `tests/ws.rs` needs this to drive `GET /ws` with a real WS client
+/// (`tokio-tungstenite`). The spawned `axum::serve` task is simply detached;
+/// it's cleaned up when the test process exits, same as every other
+/// fire-and-forget background task this crate's tests already spawn (e.g.
+/// `CaptureSupervisor`'s reader tasks in `data_sources.rs`).
+pub async fn spawn_server(app: Router) -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind an ephemeral TCP port");
+    let addr = listener.local_addr().expect("read the bound local addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("axum::serve should not fail");
+    });
+    addr
+}
