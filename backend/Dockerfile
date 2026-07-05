@@ -3,6 +3,7 @@ FROM rust:1-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpcap-dev \
+    libudev-dev \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
@@ -15,6 +16,7 @@ FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpcap0.8 \
+    libudev1 \
     iw \
     && rm -rf /var/lib/apt/lists/*
 
