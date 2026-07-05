@@ -14,6 +14,7 @@
 //! timestamps in test data are supplied by the caller (e.g. a fixed base time
 //! plus `index * interval`), so tests never depend on wall-clock time.
 
+pub mod gps;
 pub mod mock;
 pub mod wifi;
 
