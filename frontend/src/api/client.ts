@@ -24,13 +24,19 @@ export class ApiError extends Error {
 }
 
 /**
- * Best-effort human-readable message for a failed response. The backend's
- * error responses are plain status codes with no JSON body today (see
- * `auth_routes::ApiError::into_response`), so this falls back to the status
- * text; if a later endpoint ever does send `{"message": "..."}"` this picks
- * it up automatically.
+ * Best-effort human-readable message for a failed response. Some endpoints
+ * (the original auth routes) send a bare status with no body, in which case
+ * this falls back to the status text; others send a JSON `{"message": ...}"`
+ * body. Several later endpoints (e.g. the emissions/emitters routes' `400`s
+ * — see `fluxfang-api::emissions`/`emitters`'s `ApiError::into_response`,
+ * which return `(StatusCode::BAD_REQUEST, msg).into_response()`) send the
+ * validation message as a **plain-text** body instead of JSON, so this tries
+ * JSON first and falls back to the raw text body (when non-empty) before
+ * finally falling back to `statusText`.
  */
 async function errorMessage(res: Response): Promise<string> {
+  const cloned = res.clone();
+
   try {
     const body: unknown = await res.clone().json();
     if (
@@ -44,6 +50,14 @@ async function errorMessage(res: Response): Promise<string> {
   } catch {
     // Response body wasn't JSON (or was empty) — fall through.
   }
+
+  try {
+    const text = await cloned.text();
+    if (text.length > 0) return text;
+  } catch {
+    // Body already consumed/unreadable — fall through to statusText.
+  }
+
   return res.statusText || `Request failed with status ${res.status}`;
 }
 
