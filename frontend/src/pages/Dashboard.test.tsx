@@ -89,6 +89,11 @@ const EMITTER_1: Emitter = {
   first_seen_at: null,
   last_seen_at: null,
   created_at: '2026-07-01T00:00:00Z',
+  emitter_type: null,
+  attributes: {},
+  match_enabled: true,
+  type_label: 'wifi-ap',
+  category: null,
 };
 
 const ENTITY_1: Entity = { id: 'entity-1', name: 'Bob', notes: null, created_at: '2026-06-01T00:00:00Z' };
