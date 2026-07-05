@@ -188,10 +188,21 @@ mod tests {
         let rule: Rule = serde_json::from_str(
             r#"{"match":"any","conditions":[
                 {"field":"ssid","op":"matches","value":"^Free"},
-                {"field":"channel","op":"gte","value":11}]}"#).unwrap();
-        assert!(eval(&rule, &serde_json::json!({"ssid":"FreeWifi","channel":1})));
-        assert!(eval(&rule, &serde_json::json!({"ssid":"Home","channel":11})));
-        assert!(!eval(&rule, &serde_json::json!({"ssid":"Home","channel":1})));
+                {"field":"channel","op":"gte","value":11}]}"#,
+        )
+        .unwrap();
+        assert!(eval(
+            &rule,
+            &serde_json::json!({"ssid":"FreeWifi","channel":1})
+        ));
+        assert!(eval(
+            &rule,
+            &serde_json::json!({"ssid":"Home","channel":11})
+        ));
+        assert!(!eval(
+            &rule,
+            &serde_json::json!({"ssid":"Home","channel":1})
+        ));
     }
 
     #[test]

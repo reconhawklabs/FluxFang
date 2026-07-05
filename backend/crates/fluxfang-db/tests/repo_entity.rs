@@ -42,13 +42,19 @@ async fn list_returns_all_entities() {
     let pool = fresh_pool().await;
     EntityRepo::insert(
         &pool,
-        NewEntity { name: "A".to_string(), notes: None },
+        NewEntity {
+            name: "A".to_string(),
+            notes: None,
+        },
     )
     .await
     .unwrap();
     EntityRepo::insert(
         &pool,
-        NewEntity { name: "B".to_string(), notes: None },
+        NewEntity {
+            name: "B".to_string(),
+            notes: None,
+        },
     )
     .await
     .unwrap();
@@ -62,7 +68,10 @@ async fn last_seen_is_none_when_entity_has_no_emitters_or_emissions() {
     let pool = fresh_pool().await;
     let entity = EntityRepo::insert(
         &pool,
-        NewEntity { name: "Lonely".to_string(), notes: None },
+        NewEntity {
+            name: "Lonely".to_string(),
+            notes: None,
+        },
     )
     .await
     .unwrap();
@@ -79,7 +88,10 @@ async fn last_seen_returns_max_observed_at_across_entitys_emitters_emissions() {
 
     let entity = EntityRepo::insert(
         &pool,
-        NewEntity { name: "Group".to_string(), notes: None },
+        NewEntity {
+            name: "Group".to_string(),
+            notes: None,
+        },
     )
     .await
     .unwrap();
@@ -111,17 +123,28 @@ async fn last_seen_returns_max_observed_at_across_entitys_emitters_emissions() {
     let earlier = NewEmission {
         emitter_id: Some(emitter_a.id),
         observed_at: now - Duration::hours(1),
-        ..NewEmission::wifi(ds, session, serde_json::json!({"bssid": "aa:aa:aa:aa:aa:aa"}))
+        ..NewEmission::wifi(
+            ds,
+            session,
+            serde_json::json!({"bssid": "aa:aa:aa:aa:aa:aa"}),
+        )
     };
     let later = NewEmission {
         emitter_id: Some(emitter_b.id),
         observed_at: now,
-        ..NewEmission::wifi(ds, session, serde_json::json!({"bssid": "bb:bb:bb:bb:bb:bb"}))
+        ..NewEmission::wifi(
+            ds,
+            session,
+            serde_json::json!({"bssid": "bb:bb:bb:bb:bb:bb"}),
+        )
     };
     EmissionRepo::insert(&pool, earlier).await.unwrap();
     EmissionRepo::insert(&pool, later).await.unwrap();
 
-    let last_seen = EntityRepo::last_seen(&pool, entity.id).await.unwrap().unwrap();
+    let last_seen = EntityRepo::last_seen(&pool, entity.id)
+        .await
+        .unwrap()
+        .unwrap();
     // Compare at second resolution to sidestep any driver-level sub-µs drift.
     assert_eq!(last_seen.timestamp(), now.timestamp());
 }

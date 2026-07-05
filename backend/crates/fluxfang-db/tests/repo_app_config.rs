@@ -25,7 +25,10 @@ async fn set_password_hash_creates_the_singleton_row() {
 
     assert_eq!(config.password_hash.as_deref(), Some("argon2$fake-hash-1"));
     assert_eq!(
-        AppConfigRepo::password_hash(&pool).await.unwrap().as_deref(),
+        AppConfigRepo::password_hash(&pool)
+            .await
+            .unwrap()
+            .as_deref(),
         Some("argon2$fake-hash-1")
     );
 }
@@ -48,7 +51,10 @@ async fn set_password_hash_twice_updates_in_place_not_a_second_row() {
     assert_eq!(count, 1, "expected exactly one app_config row, got {count}");
 
     assert_eq!(
-        AppConfigRepo::password_hash(&pool).await.unwrap().as_deref(),
+        AppConfigRepo::password_hash(&pool)
+            .await
+            .unwrap()
+            .as_deref(),
         Some("second-hash")
     );
 }

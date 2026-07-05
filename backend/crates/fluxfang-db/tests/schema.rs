@@ -42,8 +42,16 @@ async fn host_zone_membership_upsert_is_deduped_by_nulls_not_distinct_index() {
                   on conflict (subject_type, subject_id, zone_id) \
                   do update set inside = excluded.inside, since = excluded.since";
 
-    sqlx::query(upsert).bind(zone.0).execute(&pool).await.unwrap();
-    sqlx::query(upsert).bind(zone.0).execute(&pool).await.unwrap();
+    sqlx::query(upsert)
+        .bind(zone.0)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(upsert)
+        .bind(zone.0)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let count: (i64,) = sqlx::query_as(
         "select count(*) from zone_membership where subject_type = 'host' and zone_id = $1",
@@ -64,8 +72,11 @@ async fn host_zone_membership_upsert_is_deduped_by_nulls_not_distinct_index() {
 async fn emission_accepts_geography_point() {
     let pool = fresh_pool().await;
     let ds: (uuid::Uuid,) = sqlx::query_as(
-        "insert into data_source(kind,mode,status) values('wifi','monitor','stopped') returning id")
-        .fetch_one(&pool).await.unwrap();
+        "insert into data_source(kind,mode,status) values('wifi','monitor','stopped') returning id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     let row: (uuid::Uuid,) = sqlx::query_as(
         "insert into emission(data_source_id, observed_at, kind, payload, location) \
          values($1, now(), 'wifi', '{}'::jsonb, ST_SetSRID(ST_MakePoint(-122.4,37.7),4326)::geography) returning id")

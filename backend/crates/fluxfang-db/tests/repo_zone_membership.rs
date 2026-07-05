@@ -68,7 +68,10 @@ async fn upsert_updates_existing_membership_row_in_place() {
         .await
         .unwrap();
 
-    assert_eq!(first.id, second.id, "upsert on same subject/zone should update, not insert a row");
+    assert_eq!(
+        first.id, second.id,
+        "upsert on same subject/zone should update, not insert a row"
+    );
     assert!(!second.inside);
     assert_eq!(second.since.timestamp(), t2.timestamp());
 }
@@ -80,9 +83,10 @@ async fn get_finds_row_via_subject_type_and_id() {
     let subject_id = Uuid::new_v4();
     let since = Utc::now();
 
-    let inserted = ZoneMembershipRepo::upsert(&pool, "entity", Some(subject_id), zone_id, true, since)
-        .await
-        .unwrap();
+    let inserted =
+        ZoneMembershipRepo::upsert(&pool, "entity", Some(subject_id), zone_id, true, since)
+            .await
+            .unwrap();
 
     let got = ZoneMembershipRepo::get(&pool, "entity", Some(subject_id), zone_id)
         .await
@@ -128,7 +132,10 @@ async fn upsert_host_subject_twice_yields_exactly_one_row_and_updates_it() {
         .await
         .unwrap();
 
-    assert_eq!(first.id, second.id, "second host upsert should update the same row, not insert a duplicate");
+    assert_eq!(
+        first.id, second.id,
+        "second host upsert should update the same row, not insert a duplicate"
+    );
     assert!(!second.inside);
     assert_eq!(second.since.timestamp(), t2.timestamp());
 

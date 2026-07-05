@@ -22,7 +22,11 @@ fn new_emitter(name: &str) -> NewEmitter {
 async fn insert_unassigned_wifi(pool: &PgPool, ds: Uuid, session: Uuid, bssid: &str) -> Uuid {
     let e = EmissionRepo::insert(
         pool,
-        NewEmission::wifi(ds, session, serde_json::json!({"bssid": bssid, "channel": 6})),
+        NewEmission::wifi(
+            ds,
+            session,
+            serde_json::json!({"bssid": bssid, "channel": 6}),
+        ),
     )
     .await
     .unwrap();
@@ -44,7 +48,9 @@ fn bssid_rule(bssid: &str) -> Rule {
 async fn insert_and_get_emitter_roundtrips() {
     let pool = fresh_pool().await;
 
-    let e = EmitterRepo::insert(&pool, new_emitter("Home AP")).await.unwrap();
+    let e = EmitterRepo::insert(&pool, new_emitter("Home AP"))
+        .await
+        .unwrap();
     assert_eq!(e.name, "Home AP");
     assert_eq!(e.type_.as_deref(), Some("Access Point"));
     assert_eq!(e.entity_id, None);
@@ -79,7 +85,10 @@ async fn set_entity_associates_then_detaches() {
     let emitter = EmitterRepo::insert(&pool, new_emitter("AP")).await.unwrap();
     let entity = EntityRepo::insert(
         &pool,
-        NewEntity { name: "Bob".to_string(), notes: None },
+        NewEntity {
+            name: "Bob".to_string(),
+            notes: None,
+        },
     )
     .await
     .unwrap();
@@ -89,7 +98,9 @@ async fn set_entity_associates_then_detaches() {
         .unwrap();
     assert_eq!(associated.entity_id, Some(entity.id));
 
-    let detached = EmitterRepo::set_entity(&pool, emitter.id, None).await.unwrap();
+    let detached = EmitterRepo::set_entity(&pool, emitter.id, None)
+        .await
+        .unwrap();
     assert_eq!(detached.entity_id, None);
 }
 
@@ -130,10 +141,16 @@ async fn attach_emissions_matching_assigns_only_matching_unassigned_wifi_emissio
 
     let a = EmissionRepo::get(&pool, matching_a).await.unwrap().unwrap();
     let b = EmissionRepo::get(&pool, matching_b).await.unwrap().unwrap();
-    let non = EmissionRepo::get(&pool, non_matching).await.unwrap().unwrap();
+    let non = EmissionRepo::get(&pool, non_matching)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(a.emitter_id, Some(emitter.id));
     assert_eq!(b.emitter_id, Some(emitter.id));
-    assert_eq!(non.emitter_id, None, "non-matching emission must stay unassigned");
+    assert_eq!(
+        non.emitter_id, None,
+        "non-matching emission must stay unassigned"
+    );
 
     let refreshed = EmitterRepo::get(&pool, emitter.id).await.unwrap().unwrap();
     assert!(refreshed.first_seen_at.is_some());
@@ -183,7 +200,10 @@ async fn attach_emissions_matching_rejects_invalid_rule_instead_of_silently_skip
     let err = EmitterRepo::attach_emissions_matching(&pool, emitter.id, &invalid_rule)
         .await
         .unwrap_err();
-    assert!(matches!(err, EmitterRuleError::Rule(_)), "expected a Rule error, got {err:?}");
+    assert!(
+        matches!(err, EmitterRuleError::Rule(_)),
+        "expected a Rule error, got {err:?}"
+    );
 }
 
 #[tokio::test]

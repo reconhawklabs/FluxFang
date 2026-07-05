@@ -22,9 +22,12 @@ async fn insert_wifi(
     bssid: &str,
     channel: i64,
 ) -> Emission {
-    EmissionRepo::insert(pool, NewEmission::wifi(ds, session, wifi_payload(bssid, channel)))
-        .await
-        .unwrap()
+    EmissionRepo::insert(
+        pool,
+        NewEmission::wifi(ds, session, wifi_payload(bssid, channel)),
+    )
+    .await
+    .unwrap()
 }
 
 #[tokio::test]
@@ -66,7 +69,10 @@ async fn insert_with_location_roundtrips_lon_lat() {
     assert!((inserted.lon.unwrap() - -122.4).abs() < 1e-9);
     assert!((inserted.lat.unwrap() - 37.7).abs() < 1e-9);
 
-    let got = EmissionRepo::get(&pool, inserted.id).await.unwrap().unwrap();
+    let got = EmissionRepo::get(&pool, inserted.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert!((got.lon.unwrap() - -122.4).abs() < 1e-9);
     assert!((got.lat.unwrap() - 37.7).abs() < 1e-9);
 }
@@ -204,7 +210,10 @@ async fn query_field_conditions_numeric_gte_filters_correctly() {
         ..EmissionFilter::default()
     };
     let (rows, total) = EmissionRepo::query(&pool, filter).await.unwrap();
-    assert_eq!(total, 1, "expected only the channel=11 row to satisfy channel gte 6");
+    assert_eq!(
+        total, 1,
+        "expected only the channel=11 row to satisfy channel gte 6"
+    );
     assert_eq!(rows[0].id, high.id);
     assert_ne!(rows[0].id, low.id);
 }
@@ -235,7 +244,14 @@ async fn query_mixed_field_conditions_filters_correctly_without_bind_desync() {
     let ds = seed_wifi_source(&pool).await;
     let session = seed_session(&pool).await;
 
-    async fn insert(pool: &PgPool, ds: Uuid, session: Uuid, bssid: &str, ssid: &str, channel: i64) -> Emission {
+    async fn insert(
+        pool: &PgPool,
+        ds: Uuid,
+        session: Uuid,
+        bssid: &str,
+        ssid: &str,
+        channel: i64,
+    ) -> Emission {
         EmissionRepo::insert(
             pool,
             NewEmission::wifi(

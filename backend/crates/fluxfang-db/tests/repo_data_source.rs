@@ -46,13 +46,18 @@ async fn insert_rejects_mismatched_kind_and_mode() {
     };
 
     let result = DataSourceRepo::insert(&pool, bad).await;
-    assert!(result.is_err(), "expected the kind/mode CHECK constraint to reject wifi+gpsd");
+    assert!(
+        result.is_err(),
+        "expected the kind/mode CHECK constraint to reject wifi+gpsd"
+    );
 }
 
 #[tokio::test]
 async fn get_returns_none_for_unknown_id() {
     let pool = fresh_pool().await;
-    let got = DataSourceRepo::get(&pool, uuid::Uuid::new_v4()).await.unwrap();
+    let got = DataSourceRepo::get(&pool, uuid::Uuid::new_v4())
+        .await
+        .unwrap();
     assert!(got.is_none());
 }
 

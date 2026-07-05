@@ -103,7 +103,10 @@ pub enum RuleSqlError {
     /// `condition.value` (or, for `Op::In`, one of its array elements)
     /// isn't the JSON type expected by the field's `FieldType` (JSON
     /// number for `FieldType::Number`, JSON string for `Text`/`Mac`/`Enum`).
-    InvalidValueType { field: String, expected: &'static str },
+    InvalidValueType {
+        field: String,
+        expected: &'static str,
+    },
     /// `condition.op` isn't in the matched field's [`FieldDef::ops`] (e.g.
     /// `Gte`/`Lte` on a `Text` field, or `Matches` on a `Number` field).
     /// Without this check, an op/field-type mismatch would otherwise pass
@@ -111,7 +114,10 @@ pub enum RuleSqlError {
     /// caught later by [`condition_clause`] silently collapsing to a
     /// bindless `FALSE` clause — which desyncs the bind list from a caller
     /// (like `EmissionRepo::query`) that assumes one bind per condition.
-    InvalidOp { field: String, op: Op },
+    InvalidOp {
+        field: String,
+        op: Op,
+    },
 }
 
 impl fmt::Display for RuleSqlError {
@@ -202,7 +208,9 @@ pub fn conditions_to_sql_checked(
         // for having the wrong JSON type.
         let type_ok = match c.op {
             Op::In => match c.value.as_array() {
-                Some(items) => items.iter().all(|item| value_matches_type(item, &field_def.ty)),
+                Some(items) => items
+                    .iter()
+                    .all(|item| value_matches_type(item, &field_def.ty)),
                 None => false,
             },
             _ => value_matches_type(&c.value, &field_def.ty),

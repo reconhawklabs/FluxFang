@@ -60,7 +60,11 @@ async fn insert_located_emission(
         emitter_id: Some(emitter_id),
         observed_at,
         location: Some(loc),
-        ..NewEmission::wifi(ds, session, serde_json::json!({"bssid": "aa:bb:cc:dd:ee:ff"}))
+        ..NewEmission::wifi(
+            ds,
+            session,
+            serde_json::json!({"bssid": "aa:bb:cc:dd:ee:ff"}),
+        )
     };
     EmissionRepo::insert(pool, new).await.unwrap();
 }
@@ -68,7 +72,11 @@ async fn insert_located_emission(
 async fn insert_unlocated_emission(pool: &PgPool, ds: Uuid, session: Uuid, emitter_id: Uuid) {
     let new = NewEmission {
         emitter_id: Some(emitter_id),
-        ..NewEmission::wifi(ds, session, serde_json::json!({"bssid": "aa:bb:cc:dd:ee:ff"}))
+        ..NewEmission::wifi(
+            ds,
+            session,
+            serde_json::json!({"bssid": "aa:bb:cc:dd:ee:ff"}),
+        )
     };
     EmissionRepo::insert(pool, new).await.unwrap();
 }
@@ -122,16 +130,9 @@ async fn update_replaces_all_fields() {
     let pool = fresh_pool().await;
     let z = seed_zone(&pool).await;
 
-    let updated = ZoneRepo::update(
-        &pool,
-        z.id,
-        "Renamed Zone",
-        OUTSIDE,
-        250.0,
-        Some("moved"),
-    )
-    .await
-    .unwrap();
+    let updated = ZoneRepo::update(&pool, z.id, "Renamed Zone", OUTSIDE, 250.0, Some("moved"))
+        .await
+        .unwrap();
 
     assert_eq!(updated.id, z.id);
     assert_eq!(updated.name, "Renamed Zone");
@@ -195,7 +196,15 @@ async fn subjects_in_zone_uses_most_recent_located_emission_not_oldest() {
     // Older observation: outside. Newer observation: inside. The emitter
     // must still be reported as "in zone" — proves membership is judged by
     // the MOST RECENT located emission, not by "any" or "oldest".
-    insert_located_emission(&pool, ds, session, emitter, OUTSIDE, now - Duration::hours(1)).await;
+    insert_located_emission(
+        &pool,
+        ds,
+        session,
+        emitter,
+        OUTSIDE,
+        now - Duration::hours(1),
+    )
+    .await;
     insert_located_emission(&pool, ds, session, emitter, INSIDE, now).await;
 
     let subjects = ZoneRepo::subjects_in_zone(&pool, zone.id).await.unwrap();
@@ -215,7 +224,15 @@ async fn subjects_in_zone_excludes_emitter_whose_latest_is_outside_even_if_older
 
     let emitter = seed_emitter(&pool, "left-emitter", None).await;
     let now = Utc::now();
-    insert_located_emission(&pool, ds, session, emitter, INSIDE, now - Duration::hours(1)).await;
+    insert_located_emission(
+        &pool,
+        ds,
+        session,
+        emitter,
+        INSIDE,
+        now - Duration::hours(1),
+    )
+    .await;
     insert_located_emission(&pool, ds, session, emitter, OUTSIDE, now).await;
 
     let subjects = ZoneRepo::subjects_in_zone(&pool, zone.id).await.unwrap();
@@ -249,13 +266,19 @@ async fn subjects_in_zone_includes_entity_iff_one_of_its_emitters_is_in() {
 
     let entity_in = EntityRepo::insert(
         &pool,
-        NewEntity { name: "In Entity".to_string(), notes: None },
+        NewEntity {
+            name: "In Entity".to_string(),
+            notes: None,
+        },
     )
     .await
     .unwrap();
     let entity_out = EntityRepo::insert(
         &pool,
-        NewEntity { name: "Out Entity".to_string(), notes: None },
+        NewEntity {
+            name: "Out Entity".to_string(),
+            notes: None,
+        },
     )
     .await
     .unwrap();
@@ -276,5 +299,12 @@ async fn subjects_in_zone_includes_entity_iff_one_of_its_emitters_is_in() {
     assert!(subjects.entities.iter().all(|e| e.id != entity_out.id));
     // No duplicate entity rows even though entity_in has an in-zone emitter
     // plus an out-of-zone one.
-    assert_eq!(subjects.entities.iter().filter(|e| e.id == entity_in.id).count(), 1);
+    assert_eq!(
+        subjects
+            .entities
+            .iter()
+            .filter(|e| e.id == entity_in.id)
+            .count(),
+        1
+    );
 }

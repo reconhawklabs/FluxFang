@@ -151,7 +151,10 @@ impl ZoneRepo {
     /// exact membership rule (each emitter's most recent *located*
     /// emission vs. `ST_DWithin`; an entity is in iff any of its emitters
     /// is). Returns empty vectors (not an error) if `zone_id` doesn't exist.
-    pub async fn subjects_in_zone(pool: &PgPool, zone_id: Uuid) -> Result<ZoneSubjects, sqlx::Error> {
+    pub async fn subjects_in_zone(
+        pool: &PgPool,
+        zone_id: Uuid,
+    ) -> Result<ZoneSubjects, sqlx::Error> {
         let emitter_sql = format!(
             "WITH z AS ( \
                  SELECT center, radius_m FROM zone WHERE id = $1 \

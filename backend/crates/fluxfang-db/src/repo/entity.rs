@@ -14,9 +14,8 @@ const ENTITY_COLUMNS: &str = "id, created_at, name, notes";
 
 impl EntityRepo {
     pub async fn insert(pool: &PgPool, new: NewEntity) -> Result<Entity, sqlx::Error> {
-        let sql = format!(
-            "INSERT INTO entity (name, notes) VALUES ($1, $2) RETURNING {ENTITY_COLUMNS}"
-        );
+        let sql =
+            format!("INSERT INTO entity (name, notes) VALUES ($1, $2) RETURNING {ENTITY_COLUMNS}");
         sqlx::query_as::<_, Entity>(&sql)
             .bind(new.name)
             .bind(new.notes)
@@ -48,10 +47,8 @@ impl EntityRepo {
                    FROM emission \
                    JOIN emitter ON emitter.id = emission.emitter_id \
                    WHERE emitter.entity_id = $1";
-        let (max,): (Option<DateTime<Utc>>,) = sqlx::query_as(sql)
-            .bind(entity_id)
-            .fetch_one(pool)
-            .await?;
+        let (max,): (Option<DateTime<Utc>>,) =
+            sqlx::query_as(sql).bind(entity_id).fetch_one(pool).await?;
         Ok(max)
     }
 }

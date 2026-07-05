@@ -34,7 +34,11 @@ impl NotificationRepo {
         limit: i64,
         offset: i64,
     ) -> Result<(Vec<Notification>, i64), sqlx::Error> {
-        let where_clause = if unread_only { "WHERE read_at IS NULL" } else { "" };
+        let where_clause = if unread_only {
+            "WHERE read_at IS NULL"
+        } else {
+            ""
+        };
 
         let list_sql = format!(
             "SELECT * FROM notification {where_clause} \

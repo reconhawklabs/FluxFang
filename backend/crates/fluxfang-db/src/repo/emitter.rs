@@ -119,9 +119,8 @@ impl EmitterRepo {
         emitter_id: Uuid,
         entity_id: Option<Uuid>,
     ) -> Result<Emitter, sqlx::Error> {
-        let sql = format!(
-            "UPDATE emitter SET entity_id = $2 WHERE id = $1 RETURNING {EMITTER_COLUMNS}"
-        );
+        let sql =
+            format!("UPDATE emitter SET entity_id = $2 WHERE id = $1 RETURNING {EMITTER_COLUMNS}");
         sqlx::query_as::<_, Emitter>(&sql)
             .bind(emitter_id)
             .bind(entity_id)
@@ -158,7 +157,8 @@ impl EmitterRepo {
         let catalog = catalog_for("wifi");
         // `$1` is the emitter id (bound below), so the translator's own
         // placeholders continue from `$2`.
-        let (frag, binds) = conditions_to_sql_checked(&rule.conditions, rule.match_mode, 2, &catalog)?;
+        let (frag, binds) =
+            conditions_to_sql_checked(&rule.conditions, rule.match_mode, 2, &catalog)?;
 
         let update_sql = format!(
             "UPDATE emission SET emitter_id = $1 \
@@ -206,10 +206,12 @@ impl EmitterRepo {
     /// [`Self::attach_emissions_matching`], minus the `UPDATE`.
     pub async fn count_matching(pool: &PgPool, rule: &Rule) -> Result<i64, EmitterRuleError> {
         let catalog = catalog_for("wifi");
-        let (frag, binds) = conditions_to_sql_checked(&rule.conditions, rule.match_mode, 1, &catalog)?;
+        let (frag, binds) =
+            conditions_to_sql_checked(&rule.conditions, rule.match_mode, 1, &catalog)?;
 
-        let sql =
-            format!("SELECT COUNT(*) FROM emission WHERE emitter_id IS NULL AND kind = 'wifi' AND {frag}");
+        let sql = format!(
+            "SELECT COUNT(*) FROM emission WHERE emitter_id IS NULL AND kind = 'wifi' AND {frag}"
+        );
         let mut q = sqlx::query_as::<_, (i64,)>(&sql);
         for v in &binds {
             let text = match v.clone() {

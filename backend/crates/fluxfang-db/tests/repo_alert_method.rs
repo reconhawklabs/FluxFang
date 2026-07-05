@@ -30,9 +30,15 @@ async fn insert_and_get_alert_method_roundtrips() {
     assert_eq!(inserted.name, "Ops Email");
     assert_eq!(inserted.type_, "email");
     assert!(inserted.enabled);
-    assert_eq!(inserted.config_encrypted.as_deref(), Some(&b"secret-bytes"[..]));
+    assert_eq!(
+        inserted.config_encrypted.as_deref(),
+        Some(&b"secret-bytes"[..])
+    );
 
-    let got = AlertMethodRepo::get(&pool, inserted.id).await.unwrap().unwrap();
+    let got = AlertMethodRepo::get(&pool, inserted.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(got.id, inserted.id);
     assert_eq!(got.name, "Ops Email");
 }
@@ -54,7 +60,10 @@ async fn config_encrypted_bytea_roundtrips_exactly() {
     .await
     .unwrap();
 
-    let got = AlertMethodRepo::get(&pool, inserted.id).await.unwrap().unwrap();
+    let got = AlertMethodRepo::get(&pool, inserted.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(got.config_encrypted, Some(bytes));
 }
 
@@ -70,7 +79,10 @@ async fn insert_rejects_invalid_type_via_check_constraint() {
     };
 
     let result = AlertMethodRepo::insert(&pool, bad).await;
-    assert!(result.is_err(), "expected the type CHECK constraint to reject an invalid type");
+    assert!(
+        result.is_err(),
+        "expected the type CHECK constraint to reject an invalid type"
+    );
 }
 
 #[tokio::test]

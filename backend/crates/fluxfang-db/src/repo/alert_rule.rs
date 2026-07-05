@@ -100,7 +100,11 @@ impl AlertRuleRepo {
 
     /// Link `method_id` to `rule_id`. Idempotent: linking the same pair
     /// twice leaves exactly one `alert_rule_method` row.
-    pub async fn link_method(pool: &PgPool, rule_id: Uuid, method_id: Uuid) -> Result<(), sqlx::Error> {
+    pub async fn link_method(
+        pool: &PgPool,
+        rule_id: Uuid,
+        method_id: Uuid,
+    ) -> Result<(), sqlx::Error> {
         sqlx::query(
             "INSERT INTO alert_rule_method (alert_rule_id, alert_method_id) \
              VALUES ($1, $2) \
@@ -114,7 +118,11 @@ impl AlertRuleRepo {
     }
 
     /// Remove one rule/method link, if it exists.
-    pub async fn unlink_method(pool: &PgPool, rule_id: Uuid, method_id: Uuid) -> Result<(), sqlx::Error> {
+    pub async fn unlink_method(
+        pool: &PgPool,
+        rule_id: Uuid,
+        method_id: Uuid,
+    ) -> Result<(), sqlx::Error> {
         sqlx::query(
             "DELETE FROM alert_rule_method WHERE alert_rule_id = $1 AND alert_method_id = $2",
         )

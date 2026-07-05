@@ -104,7 +104,10 @@ async fn insert_rejects_invalid_delivery_status_via_check_constraint() {
     };
 
     let result = NotificationRepo::insert(&pool, bad).await;
-    assert!(result.is_err(), "expected the delivery_status CHECK constraint to reject an invalid value");
+    assert!(
+        result.is_err(),
+        "expected the delivery_status CHECK constraint to reject an invalid value"
+    );
 }
 
 #[tokio::test]
@@ -117,7 +120,10 @@ async fn list_orders_by_fired_at_desc_and_reports_total() {
 
     let (rows, total) = NotificationRepo::list(&pool, false, 10, 0).await.unwrap();
     assert_eq!(total, 3);
-    assert_eq!(rows.iter().map(|n| n.id).collect::<Vec<_>>(), vec![newest, middle, oldest]);
+    assert_eq!(
+        rows.iter().map(|n| n.id).collect::<Vec<_>>(),
+        vec![newest, middle, oldest]
+    );
 }
 
 #[tokio::test]
@@ -180,8 +186,15 @@ async fn deleting_alert_rule_sets_notification_alert_rule_id_to_null() {
 
     let (rows, _total) = NotificationRepo::list(&pool, false, 10, 0).await.unwrap();
     let notif = rows.iter().find(|n| n.id == notif_id).unwrap();
-    assert_eq!(notif.alert_rule_id, None, "deleting the alert_rule should SET NULL, not delete the notification");
-    assert_eq!(notif.alert_method_id, Some(method), "unrelated alert_method_id should be untouched");
+    assert_eq!(
+        notif.alert_rule_id, None,
+        "deleting the alert_rule should SET NULL, not delete the notification"
+    );
+    assert_eq!(
+        notif.alert_method_id,
+        Some(method),
+        "unrelated alert_method_id should be untouched"
+    );
 }
 
 #[tokio::test]
@@ -195,6 +208,13 @@ async fn deleting_alert_method_sets_notification_alert_method_id_to_null() {
 
     let (rows, _total) = NotificationRepo::list(&pool, false, 10, 0).await.unwrap();
     let notif = rows.iter().find(|n| n.id == notif_id).unwrap();
-    assert_eq!(notif.alert_method_id, None, "deleting the alert_method should SET NULL, not delete the notification");
-    assert_eq!(notif.alert_rule_id, Some(rule), "unrelated alert_rule_id should be untouched");
+    assert_eq!(
+        notif.alert_method_id, None,
+        "deleting the alert_method should SET NULL, not delete the notification"
+    );
+    assert_eq!(
+        notif.alert_rule_id,
+        Some(rule),
+        "unrelated alert_rule_id should be untouched"
+    );
 }

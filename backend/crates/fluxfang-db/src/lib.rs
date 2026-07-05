@@ -12,7 +12,7 @@ pub mod repo;
 
 pub use repo::{
     AlertMethodRepo, AlertRuleRepo, AppConfigRepo, DataSourceRepo, EmissionRepo, EmitterRepo,
-    EntityRepo, NotificationRepo, SessionRepo, ZoneRepo, ZoneMembershipRepo,
+    EntityRepo, NotificationRepo, SessionRepo, ZoneMembershipRepo, ZoneRepo,
 };
 
 /// Connect to Postgres and return a ready-to-use connection pool.

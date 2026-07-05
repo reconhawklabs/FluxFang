@@ -333,7 +333,10 @@ impl EmissionRepo {
         for b in &binds {
             count_q = bind_one(count_q, b);
         }
-        let (total,) = count_q.fetch_one(pool).await.map_err(EmissionQueryError::Sql)?;
+        let (total,) = count_q
+            .fetch_one(pool)
+            .await
+            .map_err(EmissionQueryError::Sql)?;
 
         let limit_idx = next_bind;
         let offset_idx = next_bind + 1;
