@@ -103,6 +103,11 @@ const EMITTER_1: Emitter = {
   created_at: '2026-07-01T00:00:00Z',
 };
 
+const WIFI_EMITTER_TYPES = [
+  { key: 'wifi_access_point', label: 'WiFi Access Point' },
+  { key: 'wifi_client', label: 'WiFi Client' },
+];
+
 const EMISSION_PROBE: Emission = {
   id: 'e3',
   data_source_id: 'ds1',
@@ -146,6 +151,7 @@ test('selecting an emission and assigning prefills RuleBuilder with bssid eq <va
     'GET /api/emissions': () => ({ items: [EMISSION_1, EMISSION_2], total: 2 }),
     'GET /api/emitters': () => [EMITTER_1],
     'GET /api/catalog/wifi': () => WIFI_CATALOG,
+    'GET /api/emitter-types/wifi': () => WIFI_EMITTER_TYPES,
     'GET /api/emitters/preview': () => ({ match_count: 4 }),
     'POST /api/emitters': () => ({
       emitter: { ...EMITTER_1, id: 'emitter-2', name: 'Coffee Shop AP' },
@@ -274,4 +280,111 @@ test('a beacon emission (payload.bssid, no src_mac) renders "—" in the Src MAC
   const row = screen.getByTestId('emission-row-e1');
   const srcMacCell = within(row).getByTestId('emission-src-mac');
   expect(srcMacCell).toHaveTextContent('—');
+});
+
+// --- Task C: Assign-modal Type dropdown (GET /api/emitter-types/:kind) ---
+
+test('the Assign modal shows a Type <select> (not a text input) with options from the emitter-types endpoint plus "Other"', async () => {
+  const fetchMock = mockRoutes({
+    'GET /api/emissions': () => ({ items: [EMISSION_1, EMISSION_2], total: 2 }),
+    'GET /api/emitters': () => [EMITTER_1],
+    'GET /api/catalog/wifi': () => WIFI_CATALOG,
+    'GET /api/emitter-types/wifi': () => WIFI_EMITTER_TYPES,
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Emissions />, { wrapper });
+  await waitFor(() => expect(screen.getByTestId('emission-row-e1')).toBeInTheDocument());
+
+  fireEvent.click(screen.getByLabelText('Select emission e1'));
+  fireEvent.click(screen.getByRole('button', { name: /assign to emitter/i }));
+  await screen.findByRole('heading', { name: /assign 1 emission to emitter/i });
+
+  const typeSelect = await screen.findByLabelText(/^type$/i);
+  expect(typeSelect.tagName).toBe('SELECT');
+  const optionLabels = within(typeSelect as HTMLSelectElement)
+    .getAllByRole('option')
+    .map((option) => option.textContent);
+  expect(optionLabels).toEqual(
+    expect.arrayContaining(['WiFi Access Point', 'WiFi Client', expect.stringMatching(/other/i)]),
+  );
+});
+
+test('selecting a known emitter type and submitting POSTs emitter_type (key) and type (label)', async () => {
+  const fetchMock = mockRoutes({
+    'GET /api/emissions': () => ({ items: [EMISSION_1, EMISSION_2], total: 2 }),
+    'GET /api/emitters': () => [EMITTER_1],
+    'GET /api/catalog/wifi': () => WIFI_CATALOG,
+    'GET /api/emitter-types/wifi': () => WIFI_EMITTER_TYPES,
+    'GET /api/emitters/preview': () => ({ match_count: 4 }),
+    'POST /api/emitters': () => ({
+      emitter: { ...EMITTER_1, id: 'emitter-2', name: 'Coffee Shop AP' },
+      attached_count: 4,
+    }),
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Emissions />, { wrapper });
+  await waitFor(() => expect(screen.getByTestId('emission-row-e1')).toBeInTheDocument());
+
+  fireEvent.click(screen.getByLabelText('Select emission e1'));
+  fireEvent.click(screen.getByRole('button', { name: /assign to emitter/i }));
+  await screen.findByRole('heading', { name: /assign 1 emission to emitter/i });
+
+  const typeSelect = await screen.findByLabelText(/^type$/i);
+  fireEvent.change(typeSelect, { target: { value: 'wifi_access_point' } });
+  fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: 'Coffee Shop AP' } });
+  fireEvent.click(screen.getByRole('button', { name: /^assign$/i }));
+
+  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/assigned 4 emission/i));
+
+  const postCall = fetchMock.mock.calls.find(([, init]) => init?.method === 'POST');
+  expect(postCall).toBeDefined();
+  const [, init] = postCall as [RequestInfo | URL, RequestInit];
+  const body = JSON.parse(init.body as string);
+  expect(body.emitter_type).toBe('wifi_access_point');
+  expect(body.type).toBe('WiFi Access Point');
+});
+
+test('selecting "Other (custom)" reveals a text input; submitting sends type (custom text) and omits emitter_type', async () => {
+  const fetchMock = mockRoutes({
+    'GET /api/emissions': () => ({ items: [EMISSION_1, EMISSION_2], total: 2 }),
+    'GET /api/emitters': () => [EMITTER_1],
+    'GET /api/catalog/wifi': () => WIFI_CATALOG,
+    'GET /api/emitter-types/wifi': () => WIFI_EMITTER_TYPES,
+    'GET /api/emitters/preview': () => ({ match_count: 4 }),
+    'POST /api/emitters': () => ({
+      emitter: { ...EMITTER_1, id: 'emitter-2', name: 'Custom Thing' },
+      attached_count: 4,
+    }),
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Emissions />, { wrapper });
+  await waitFor(() => expect(screen.getByTestId('emission-row-e1')).toBeInTheDocument());
+
+  fireEvent.click(screen.getByLabelText('Select emission e1'));
+  fireEvent.click(screen.getByRole('button', { name: /assign to emitter/i }));
+  await screen.findByRole('heading', { name: /assign 1 emission to emitter/i });
+
+  const typeSelect = await screen.findByLabelText(/^type$/i);
+  const otherOption = within(typeSelect as HTMLSelectElement)
+    .getAllByRole('option')
+    .find((option) => /other/i.test(option.textContent ?? ''));
+  expect(otherOption).toBeDefined();
+  fireEvent.change(typeSelect, { target: { value: (otherOption as HTMLOptionElement).value } });
+
+  const customInput = await screen.findByLabelText(/custom type/i);
+  fireEvent.change(customInput, { target: { value: 'Custom Thing' } });
+  fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: 'Custom Thing' } });
+  fireEvent.click(screen.getByRole('button', { name: /^assign$/i }));
+
+  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/assigned 4 emission/i));
+
+  const postCall = fetchMock.mock.calls.find(([, init]) => init?.method === 'POST');
+  expect(postCall).toBeDefined();
+  const [, init] = postCall as [RequestInfo | URL, RequestInit];
+  const body = JSON.parse(init.body as string);
+  expect(body.type).toBe('Custom Thing');
+  expect(body).not.toHaveProperty('emitter_type');
 });

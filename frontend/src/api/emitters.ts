@@ -57,6 +57,12 @@ export interface Emitter {
 export interface CreateEmitterInput {
   name: string;
   type?: string;
+  /** Machine classification key (e.g. `"wifi_access_point"`) — a valid
+   * option from `listEmitterTypes(kind)`. Omit (don't send `null`) for a
+   * free-text/custom type, which leaves the backend's `emitter_type` column
+   * `null` (see `fluxfang-api::emitters`'s `CreateEmitterRequest`). An
+   * invalid key 400s. */
+  emitter_type?: string;
   match_criteria: Rule;
 }
 
@@ -88,6 +94,24 @@ export interface PatchEmitterInput {
   entity_id?: string | null;
   match_enabled?: boolean;
   attributes?: EmitterAttributes;
+}
+
+/** One valid `emitter_type` choice for a given emission `kind` — `key` is
+ * the machine classification value sent as `CreateEmitterInput.emitter_type`
+ * / `PatchEmitterInput`'s equivalent, `label` the human-readable name (also
+ * sent as the free-text `type` alongside it, so `Emitter.type` stays
+ * populated for older UI that only reads `type`, not `emitter_type`). */
+export interface EmitterType {
+  key: string;
+  label: string;
+}
+
+/** `GET /api/emitter-types/:kind` — the valid `emitter_type` keys/labels for
+ * an emission kind's data source (e.g. `"wifi"` → wifi access point/client),
+ * used by the Emissions "Assign to emitter" modal's Type dropdown. Empty
+ * array for an unknown kind. */
+export function listEmitterTypes(kind: string): Promise<EmitterType[]> {
+  return get<EmitterType[]>(`/api/emitter-types/${encodeURIComponent(kind)}`);
 }
 
 export function listEmitters(): Promise<Emitter[]> {

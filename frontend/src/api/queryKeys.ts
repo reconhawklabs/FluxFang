@@ -26,6 +26,11 @@
 //   also NOT invalidated by `useLiveEvents`: it's a live *hardware* read, not
 //   data driven by emissions/notifications, so the form's own Refresh
 //   control (a manual `refetch()`) is how it re-runs, not the WS stream.
+// - `emitterTypes(kind)` (`GET /api/emitter-types/:kind` — valid
+//   `emitter_type` key/label options for an emission kind, used by the
+//   Emissions "Assign to emitter" modal's Type dropdown) is, like
+//   `catalog(kind)`, static server-side config — NOT invalidated by
+//   `useLiveEvents`.
 export const queryKeys = {
   dashboard: ['dashboard'] as const,
   dataSources: ['dataSources'] as const,
@@ -38,4 +43,5 @@ export const queryKeys = {
   alertRules: ['alertRules'] as const,
   notifications: ['notifications'] as const,
   catalog: (kind: string) => ['catalog', kind] as const,
+  emitterTypes: (kind: string) => ['emitterTypes', kind] as const,
 };

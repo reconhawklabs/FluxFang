@@ -23,6 +23,15 @@
 // in the modal before submitting. Submitting calls `POST /api/emitters` with
 // `{name, type, match_criteria: <rule>}` and surfaces the returned
 // `attached_count`.
+//
+// Task C: the modal's Type field is a `<select>` populated from
+// `GET /api/emitter-types/:kind` (keyed off the seed emission's own `kind`,
+// e.g. "wifi") — each option's key is sent as `emitter_type` alongside its
+// label as `type`, so the emitter is machine-classified the same way
+// ingest's auto-classification (Phase B) would tag it. The final "Other
+// (custom)…" option is an escape hatch: it reveals a free-text input and
+// sends only `type` (the typed text) with `emitter_type` omitted, same as
+// this form's original free-text behavior.
 import { useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -30,7 +39,8 @@ import { ApiError } from '../api/client';
 import { queryKeys } from '../api/queryKeys';
 import type { Emission } from '../api/emissions';
 import { listEmissions } from '../api/emissions';
-import { createEmitter, listEmitters } from '../api/emitters';
+import { createEmitter, listEmitters, listEmitterTypes } from '../api/emitters';
+import type { EmitterType } from '../api/emitters';
 import FilterBar from '../components/FilterBar';
 import { EMPTY_FILTER_STATE, filterToQueryParams } from '../components/filterState';
 import type { FilterState } from '../components/filterState';
@@ -75,6 +85,14 @@ function defaultRuleFor(emission: Emission): Rule {
   return { match: 'all', conditions: [] };
 }
 
+/** Sentinel `<select>` value for the escape-hatch "Other (custom)…" option
+ * — never a real `EmitterType.key` (those come from the backend's
+ * `emitter_type` enum, which doesn't use double-underscore keys). Selecting
+ * it reveals a free-text input and, on submit, sends that text as `type`
+ * with `emitter_type` omitted (kept `null` server-side), same as today's
+ * free-text field. */
+const OTHER_TYPE_VALUE = '__other__';
+
 interface AssignModalProps {
   /** The emission the default rule is derived from — list order's first
    * selected row, not necessarily click order. */
@@ -86,8 +104,32 @@ interface AssignModalProps {
 
 function AssignModal({ seedEmission, selectedCount, onCancel, onAssigned }: AssignModalProps) {
   const [name, setName] = useState('');
-  const [type, setType] = useState('');
+  // Which `<select>` option is chosen: an `EmitterType.key` (a known type,
+  // e.g. "wifi_access_point") or `OTHER_TYPE_VALUE` (the custom-text escape
+  // hatch). `''` means "not yet chosen" — the select falls back to the
+  // first fetched option (or `OTHER_TYPE_VALUE` if the list is empty/still
+  // loading) below, so the field always has a sensible selection without an
+  // effect.
+  const [typeSelection, setTypeSelection] = useState('');
+  const [customType, setCustomType] = useState('');
   const [rule, setRule] = useState<Rule>(() => defaultRuleFor(seedEmission));
+
+  // The emitter-types dropdown is scoped to this emission's `kind` (e.g.
+  // "wifi") — mirrors `RuleBuilder`'s own `useCatalog(kind)` fetch below,
+  // just against the emitter-types endpoint instead of the field catalog.
+  const emitterTypesQuery = useQuery({
+    queryKey: queryKeys.emitterTypes(seedEmission.kind),
+    queryFn: () => listEmitterTypes(seedEmission.kind),
+  });
+  const emitterTypes = useMemo(() => emitterTypesQuery.data ?? [], [emitterTypesQuery.data]);
+
+  const effectiveTypeSelection =
+    typeSelection.length > 0
+      ? typeSelection
+      : emitterTypes.length > 0
+        ? emitterTypes[0].key
+        : OTHER_TYPE_VALUE;
+  const isOtherSelected = effectiveTypeSelection === OTHER_TYPE_VALUE;
 
   const createMutation = useMutation({
     mutationFn: createEmitter,
@@ -103,10 +145,22 @@ function AssignModal({ seedEmission, selectedCount, onCancel, onAssigned }: Assi
 
   function handleSubmit(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
-    const trimmedType = type.trim();
+
+    if (isOtherSelected) {
+      const trimmedType = customType.trim();
+      createMutation.mutate({
+        name: name.trim(),
+        type: trimmedType.length > 0 ? trimmedType : undefined,
+        match_criteria: rule,
+      });
+      return;
+    }
+
+    const selected = emitterTypes.find((entry: EmitterType) => entry.key === effectiveTypeSelection);
     createMutation.mutate({
       name: name.trim(),
-      type: trimmedType.length > 0 ? trimmedType : undefined,
+      type: selected?.label,
+      emitter_type: selected?.key,
       match_criteria: rule,
     });
   }
@@ -137,16 +191,37 @@ function AssignModal({ seedEmission, selectedCount, onCancel, onAssigned }: Assi
 
         <div className="space-y-1">
           <label htmlFor="emitter-type" className={labelClassName}>
-            Type (optional)
+            Type
           </label>
-          <input
+          <select
             id="emitter-type"
-            type="text"
-            value={type}
-            onChange={(event) => setType(event.target.value)}
+            value={effectiveTypeSelection}
+            onChange={(event) => setTypeSelection(event.target.value)}
             className={inputClassName}
-          />
+          >
+            {emitterTypes.map((entry: EmitterType) => (
+              <option key={entry.key} value={entry.key}>
+                {entry.label}
+              </option>
+            ))}
+            <option value={OTHER_TYPE_VALUE}>Other (custom)…</option>
+          </select>
         </div>
+
+        {isOtherSelected && (
+          <div className="space-y-1">
+            <label htmlFor="emitter-type-custom" className={labelClassName}>
+              Custom type (optional)
+            </label>
+            <input
+              id="emitter-type-custom"
+              type="text"
+              value={customType}
+              onChange={(event) => setCustomType(event.target.value)}
+              className={inputClassName}
+            />
+          </div>
+        )}
 
         <div className="space-y-1">
           <span className={labelClassName}>Match rule</span>
