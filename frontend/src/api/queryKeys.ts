@@ -16,6 +16,11 @@
 //   `ws.rs`'s `WireOutcome::Send` lagged case) `useLiveEvents` invalidates
 //   *everything* (`invalidateQueries()` with no key) since it's unknown
 //   which of these were affected by the dropped messages.
+// - `catalog(kind)` (Task 9.2, `useCatalog`) is a per-`kind` key
+//   (`GET /api/catalog/:kind` — field/op definitions for `RuleBuilder`/
+//   `FilterBar`). It's intentionally NOT invalidated by `useLiveEvents`: the
+//   catalog is server-side static configuration, not data that changes from
+//   live emissions/notifications.
 export const queryKeys = {
   dashboard: ['dashboard'] as const,
   dataSources: ['dataSources'] as const,
@@ -26,4 +31,5 @@ export const queryKeys = {
   alertMethods: ['alertMethods'] as const,
   alertRules: ['alertRules'] as const,
   notifications: ['notifications'] as const,
+  catalog: (kind: string) => ['catalog', kind] as const,
 };
