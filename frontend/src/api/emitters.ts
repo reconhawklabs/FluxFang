@@ -1,11 +1,11 @@
-// `GET /api/emitters` + `POST /api/emitters` (Task 6.4 backend,
-// `fluxfang-api::emitters`). Only the two calls Task 9.4's Emissions page
-// needs: the list (to resolve an emission's `emitter_id` to a display name)
-// and creating a new emitter from a `RuleBuilder` rule ("assign to
-// emitter"). A dedicated Emitters page (Task 9.5) can grow this module with
-// update/delete/preview/etc. as needed then — YAGNI for this slice.
+// `GET/PATCH/DELETE /api/emitters[/:id]` + `POST /api/emitters` (Task 6.4
+// backend, `fluxfang-api::emitters`). Originally only carried the two calls
+// Task 9.4's Emissions page needed (list + create); Task 9.5's Emitters page
+// grows this with `patchEmitter` (rename / associate-to-entity / detach) and
+// `deleteEmitter` — still YAGNI beyond that (no `/rule` or `/preview` calls
+// here; `RuleBuilder`/`Emissions.tsx` own those directly).
 import type { Rule } from '../types/rule';
-import { get, post } from './client';
+import { del, get, patch, post } from './client';
 
 /** Mirrors `fluxfang-api::dto::EmitterDto`. */
 export interface Emitter {
@@ -38,10 +38,32 @@ export interface CreateEmitterResult {
   attached_count: number;
 }
 
+/** `PATCH /api/emitters/:id` body — mirrors the backend's
+ * `UpdateEmitterRequest`. Every field is optional and independently
+ * omittable: `entity_id` in particular distinguishes "key absent" (leave
+ * alone) from `entity_id: null` (detach) from `entity_id: "<uuid>"`
+ * (associate) — see that struct's `some` deserializer doc comment. Callers
+ * here only ever send the keys they mean to change (e.g. `{ entity_id:
+ * null }` to detach, never a full object), so that distinction is
+ * preserved on the wire. */
+export interface PatchEmitterInput {
+  name?: string;
+  type?: string | null;
+  entity_id?: string | null;
+}
+
 export function listEmitters(): Promise<Emitter[]> {
   return get<Emitter[]>('/api/emitters');
 }
 
 export function createEmitter(input: CreateEmitterInput): Promise<CreateEmitterResult> {
   return post<CreateEmitterResult>('/api/emitters', input);
+}
+
+export function patchEmitter(id: string, body: PatchEmitterInput): Promise<Emitter> {
+  return patch<Emitter>(`/api/emitters/${id}`, body);
+}
+
+export function deleteEmitter(id: string): Promise<void> {
+  return del<void>(`/api/emitters/${id}`);
 }
