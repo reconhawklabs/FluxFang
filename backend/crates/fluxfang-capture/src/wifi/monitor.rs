@@ -52,6 +52,22 @@ pub struct WifiMonitorCapturer {
 /// enough to notice `stop()` even with no traffic on the channel.
 const READ_TIMEOUT_MS: i32 = 200;
 
+/// Run an external command (`iw`/`ip`), surfacing its stderr in the error so
+/// the UI shows *why* it failed (e.g. "Device or resource busy") instead of a
+/// bare exit code like "exit status: 240".
+fn run_cmd(bin: &str, args: &[&str]) -> anyhow::Result<()> {
+    let output = std::process::Command::new(bin).args(args).output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        if stderr.is_empty() {
+            anyhow::bail!("`{bin} {}` exited with {}", args.join(" "), output.status);
+        }
+        anyhow::bail!("`{bin} {}` failed: {stderr}", args.join(" "));
+    }
+    Ok(())
+}
+
 impl WifiMonitorCapturer {
     /// Create a capturer bound to `interface` (e.g. `"wlan0"`). Monitor mode
     /// is not set until [`Capturer::start`] is called.
@@ -64,29 +80,30 @@ impl WifiMonitorCapturer {
     }
 
     fn run_iw(&self, args: &[&str]) -> anyhow::Result<()> {
-        let status = std::process::Command::new("iw").args(args).status()?;
-        if !status.success() {
-            anyhow::bail!("`iw {}` exited with {status}", args.join(" "));
-        }
-        Ok(())
+        run_cmd("iw", args)
     }
 
     fn run_ip(&self, args: &[&str]) -> anyhow::Result<()> {
-        let status = std::process::Command::new("ip").args(args).status()?;
-        if !status.success() {
-            anyhow::bail!("`ip {}` exited with {status}", args.join(" "));
-        }
-        Ok(())
+        run_cmd("ip", args)
     }
 
     fn set_monitor_mode(&self) -> anyhow::Result<()> {
+        // The interface must be DOWN before its type can change: most drivers
+        // reject `iw ... set type monitor` with EBUSY ("Device or resource
+        // busy", `iw` exit status 240) while the interface is up. So bring it
+        // down, switch type, then bring it back up.
+        self.run_ip(&["link", "set", &self.interface, "down"])?;
         self.run_iw(&["dev", &self.interface, "set", "type", "monitor"])?;
         self.run_ip(&["link", "set", &self.interface, "up"])?;
         Ok(())
     }
 
     fn restore_managed_mode(&self) -> anyhow::Result<()> {
-        self.run_iw(&["dev", &self.interface, "set", "type", "managed"])
+        // Same down-before-type-change requirement as monitor mode.
+        self.run_ip(&["link", "set", &self.interface, "down"])?;
+        self.run_iw(&["dev", &self.interface, "set", "type", "managed"])?;
+        self.run_ip(&["link", "set", &self.interface, "up"])?;
+        Ok(())
     }
 
     /// Opens the (already monitor-mode) interface with `pcap`. Split out of
