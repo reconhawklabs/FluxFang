@@ -364,6 +364,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fluxfang-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fluxfang-db"
 version = "0.1.0"
 dependencies = [
