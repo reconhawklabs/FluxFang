@@ -107,6 +107,13 @@ pub struct AppState {
     /// Task 6.2's data-source start/stop orchestrator. See `crate::capture`
     /// module docs for the full design.
     pub capture: Arc<CaptureSupervisor>,
+    /// AES-256-GCM key used to encrypt/decrypt `alert_method.config_encrypted`
+    /// (Task 6.6). The same 32 bytes handed to `CaptureSupervisor`/`IngestCtx`
+    /// for alert dispatch during ingest — duplicated here (rather than routed
+    /// through `capture`) so `alert_methods`/`alert_rules` handlers can
+    /// encrypt a freshly-submitted config or decrypt one for a test-send
+    /// without reaching into `CaptureSupervisor`'s private internals.
+    pub secret_key: [u8; 32],
 }
 
 impl AppState {
@@ -144,6 +151,7 @@ impl AppState {
             pool,
             login_limiter: Arc::new(LoginLimiter::default()),
             capture,
+            secret_key,
         }
     }
 }

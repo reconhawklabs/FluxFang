@@ -39,6 +39,8 @@
 //! security payoff here today. It's left wired up in the environment for
 //! whichever future task adds a persistent, signed/private-cookie store.
 
+pub mod alert_methods;
+pub mod alert_rules;
 pub mod auth_routes;
 pub mod capture;
 pub mod catalog_routes;
@@ -49,6 +51,7 @@ pub mod emitters;
 pub mod entities;
 pub mod ingest;
 pub mod middleware;
+pub mod notifications;
 pub mod notify;
 pub mod state;
 #[cfg(test)]
@@ -76,11 +79,14 @@ pub fn app(state: AppState) -> Router {
     // other protected route rather than living in the public group.
     let protected = Router::new()
         .merge(auth_routes::protected_routes())
+        .merge(alert_methods::protected_routes())
+        .merge(alert_rules::protected_routes())
         .merge(catalog_routes::protected_routes())
         .merge(data_sources::protected_routes())
         .merge(emissions::protected_routes())
         .merge(emitters::protected_routes())
         .merge(entities::protected_routes())
+        .merge(notifications::protected_routes())
         .route_layer(axum::middleware::from_fn(middleware::require_auth));
 
     Router::new()
