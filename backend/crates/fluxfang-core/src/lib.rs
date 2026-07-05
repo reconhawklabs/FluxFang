@@ -8,6 +8,8 @@
 
 pub mod catalog;
 pub mod rule;
+pub mod rule_sql;
 
 pub use catalog::{catalog_for, FieldDef, FieldType};
 pub use rule::{Condition, MatchMode, Op, Rule};
+pub use rule_sql::{conditions_to_sql, conditions_to_sql_checked, RuleSqlError};
