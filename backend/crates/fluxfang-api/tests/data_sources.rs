@@ -405,6 +405,36 @@ async fn create_wifi_scan_mode_is_accepted_with_201() {
     assert_eq!(created["status"], "stopped");
 }
 
+/// Phase A5: `config.auto_create_emitters` (the Add-Source "automatically
+/// create emitters" toggle) is arbitrary JSON inside `config` — no new
+/// column, no special-cased validation — so it must simply survive
+/// create -> `GET` unchanged, same as any other `config` key.
+#[tokio::test]
+async fn create_wifi_with_auto_create_emitters_config_round_trips_through_get() {
+    let (app, _pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    let resp = post_json_with_cookie(
+        &app,
+        "/api/data-sources",
+        r#"{"kind":"wifi","mode":"monitor","interface":"wlan0","config":{"auto_create_emitters":true}}"#,
+        &cookie,
+    )
+    .await;
+    assert_status(&resp, StatusCode::CREATED);
+    let created = body_json(resp).await;
+    assert_eq!(created["config"]["auto_create_emitters"], true);
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let resp = get_with_cookie(&app, &format!("/api/data-sources/{id}"), &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let fetched = body_json(resp).await;
+    assert_eq!(
+        fetched["config"]["auto_create_emitters"], true,
+        "body: {fetched}"
+    );
+}
+
 /// An unrecognized wifi mode is still rejected with 400, both at
 /// create-time and update-time -- confirms widening `monitor` -> `{monitor,
 /// scan}` didn't accidentally open validation up to arbitrary strings.

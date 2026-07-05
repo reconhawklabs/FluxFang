@@ -486,4 +486,145 @@ impl EmitterRepoInsertHelper {
         .expect("seed emitter")
         .id
     }
+
+    /// Seed an emitter with the Phase A5 classification columns
+    /// (`emitter_type`/`attributes`) set directly, bypassing the API, for
+    /// tests asserting on `EmitterDto`'s derived `type_label`/`category`.
+    async fn insert_classified(
+        pool: &PgPool,
+        name: &str,
+        emitter_type: &str,
+        attributes: serde_json::Value,
+    ) -> Uuid {
+        use fluxfang_db::models::NewEmitter;
+        use fluxfang_db::EmitterRepo;
+
+        EmitterRepo::insert(
+            pool,
+            NewEmitter {
+                name: name.to_string(),
+                type_: None,
+                entity_id: None,
+                match_criteria: json!({}),
+                emitter_type: Some(emitter_type.to_string()),
+                attributes,
+                match_enabled: true,
+                identity_key: None,
+            },
+        )
+        .await
+        .expect("seed classified emitter")
+        .id
+    }
+}
+
+// ---------------------------------------------------------------------
+// Phase A5: EmitterDto's classification fields (`emitter_type`,
+// `attributes`, `match_enabled`) and its derived `type_label`/`category`.
+// ---------------------------------------------------------------------
+
+/// A `wifi_access_point`-classified emitter's `GET` response exposes the raw
+/// classification columns plus `type_label`/`category` derived from
+/// `fluxfang_core::{emitter_type_label, emitter_category}` — not a stale
+/// snapshot, computed fresh from `emitter_type` on every read.
+#[tokio::test]
+async fn get_emitter_shows_classification_fields_and_derived_labels_for_wifi_ap() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    let attrs = json!({"ssid": "Cafe Free WiFi", "bssid": "aa:bb:cc:dd:ee:ff"});
+    let id =
+        EmitterRepoInsertHelper::insert_classified(&pool, "Cafe AP", "wifi_access_point", attrs)
+            .await;
+
+    let resp = get_with_cookie(&app, &format!("/api/emitters/{id}"), &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let body = body_json(resp).await;
+
+    assert_eq!(body["emitter_type"], "wifi_access_point", "body: {body}");
+    assert_eq!(
+        body["attributes"],
+        json!({"ssid": "Cafe Free WiFi", "bssid": "aa:bb:cc:dd:ee:ff"})
+    );
+    assert_eq!(body["match_enabled"], true, "body: {body}");
+    assert_eq!(body["type_label"], "WiFi Access Point", "body: {body}");
+    assert_eq!(body["category"], "wifi", "body: {body}");
+}
+
+/// A plain, unclassified emitter (`emitter_type` NULL) falls back to its
+/// stored free-text `type` for `type_label`, and has no `category` at all.
+#[tokio::test]
+async fn get_emitter_plain_type_falls_back_to_free_text_type_label_with_no_category() {
+    let (app, _pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    let body = json!({"name": "Hand-made emitter", "type": "Custom Sensor"}).to_string();
+    let resp = post_json_with_cookie(&app, "/api/emitters", &body, &cookie).await;
+    assert_status(&resp, StatusCode::CREATED);
+    let created = body_json(resp).await;
+    let id = created["emitter"]["id"].as_str().unwrap().to_string();
+
+    let resp = get_with_cookie(&app, &format!("/api/emitters/{id}"), &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let fetched = body_json(resp).await;
+
+    assert!(fetched["emitter_type"].is_null(), "body: {fetched}");
+    assert_eq!(fetched["attributes"], json!({}));
+    assert_eq!(fetched["match_enabled"], true, "body: {fetched}");
+    assert_eq!(fetched["type_label"], "Custom Sensor", "body: {fetched}");
+    assert!(fetched["category"].is_null(), "body: {fetched}");
+}
+
+// ---------------------------------------------------------------------
+// Phase A5: PATCH /api/emitters/:id accepting match_enabled/attributes.
+// ---------------------------------------------------------------------
+
+/// `PATCH {match_enabled: false}` disables the emitter's auto-attach rule;
+/// a subsequent `GET` reflects it.
+#[tokio::test]
+async fn patch_match_enabled_false_then_get_shows_false() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    let id = EmitterRepoInsertHelper::insert_unassigned(&pool, "Target").await;
+
+    let patch_body = json!({"match_enabled": false}).to_string();
+    let resp =
+        patch_json_with_cookie(&app, &format!("/api/emitters/{id}"), &patch_body, &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let patched = body_json(resp).await;
+    assert_eq!(patched["match_enabled"], false, "body: {patched}");
+
+    let resp = get_with_cookie(&app, &format!("/api/emitters/{id}"), &cookie).await;
+    let fetched = body_json(resp).await;
+    assert_eq!(fetched["match_enabled"], false, "body: {fetched}");
+}
+
+/// `PATCH {attributes: {...}}` is a full replace and round-trips through a
+/// subsequent `GET` — the manual-override path (e.g. flipping
+/// `randomized_mac`).
+#[tokio::test]
+async fn patch_attributes_round_trips() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    let id = EmitterRepoInsertHelper::insert_classified(
+        &pool,
+        "Target",
+        "wifi_client",
+        json!({"src_mac": "aa:bb:cc:dd:ee:ff", "randomized_mac": true}),
+    )
+    .await;
+
+    let new_attrs = json!({"src_mac": "aa:bb:cc:dd:ee:ff", "randomized_mac": false});
+    let patch_body = json!({"attributes": new_attrs}).to_string();
+    let resp =
+        patch_json_with_cookie(&app, &format!("/api/emitters/{id}"), &patch_body, &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let patched = body_json(resp).await;
+    assert_eq!(patched["attributes"], new_attrs, "body: {patched}");
+
+    let resp = get_with_cookie(&app, &format!("/api/emitters/{id}"), &cookie).await;
+    let fetched = body_json(resp).await;
+    assert_eq!(fetched["attributes"], new_attrs, "body: {fetched}");
 }

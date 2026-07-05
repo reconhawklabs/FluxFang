@@ -94,6 +94,17 @@ pub struct EmissionFilter {
     pub match_mode: MatchMode,
     /// Substring search over `payload::text`.
     pub text: Option<String>,
+    /// Phase A5: exact match on the emission's *emitter's* `emitter_type`
+    /// (e.g. `"wifi_access_point"`) — a subquery join, since `emitter_type`
+    /// lives on `emitter`, not `emission`. `None`/NULL-`emitter_id` rows are
+    /// excluded whenever this is `Some` (see module docs on `query`).
+    pub emitter_type: Option<String>,
+    /// Phase A5: matches emitters whose `emitter_type LIKE '<category>_%'`
+    /// (e.g. `"wifi"` -> `wifi_access_point`/`wifi_client`) — a coarser,
+    /// prefix-based sibling of `emitter_type` for the map's category
+    /// layers. Independent of `emitter_type`: both may be set at once
+    /// (ANDed), though in practice a caller sends one or the other.
+    pub emitter_category: Option<String>,
     pub limit: i64,
     pub offset: i64,
 }
@@ -112,6 +123,8 @@ impl Default for EmissionFilter {
             field_conditions: Vec::new(),
             match_mode: MatchMode::All,
             text: None,
+            emitter_type: None,
+            emitter_category: None,
             limit: 50,
             offset: 0,
         }
@@ -302,6 +315,37 @@ impl EmissionRepo {
         if let Some(ref text) = filter.text {
             clauses.push(format!("payload::text ILIKE ${next_bind}"));
             binds.push(BindVal::Text(format!("%{text}%")));
+            next_bind += 1;
+        }
+        if let Some(ref emitter_type) = filter.emitter_type {
+            // Subquery join (see module docs): `emitter_type` lives on
+            // `emitter`, not `emission`. A NULL `emitter_id` can never
+            // appear in an `IN (SELECT ...)` result set, so this
+            // automatically excludes unassigned emissions once this
+            // filter is set, as intended.
+            clauses.push(format!(
+                "emitter_id IN (SELECT id FROM emitter WHERE emitter_type = ${next_bind})"
+            ));
+            binds.push(BindVal::Text(emitter_type.clone()));
+            next_bind += 1;
+        }
+        if let Some(ref category) = filter.emitter_category {
+            // Prefix match on the `<category>_<subtype>` naming convention
+            // (e.g. `wifi` -> `wifi_access_point`/`wifi_client`) rather
+            // than a Rust-side enumeration of every `emitter_type` in that
+            // category: this stays correct as new subtypes are added to
+            // the classification registry with no code change here. The
+            // category value is bound as a plain parameter (concatenated
+            // to `'_%'` in SQL, not in the Rust format string), so this
+            // is not susceptible to SQL injection; a category value that
+            // itself contains `%`/`_` wildcard characters only affects
+            // match precision; it's not a security concern since it's the
+            // same trust boundary as every other filter this endpoint
+            // accepts from an authenticated caller.
+            clauses.push(format!(
+                "emitter_id IN (SELECT id FROM emitter WHERE emitter_type LIKE ${next_bind} || '_%')"
+            ));
+            binds.push(BindVal::Text(category.clone()));
             next_bind += 1;
         }
         if !filter.field_conditions.is_empty() {

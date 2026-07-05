@@ -3,6 +3,19 @@
 //! `lib.rs::app`'s protected router group, behind `require_auth`, same as
 //! every other non-setup/login route.
 //!
+//! ## Phase A5: `emitter_type`/`emitter_category`
+//!
+//! Two more recognized keys, both plain scalar strings (no special parse
+//! rule, unlike `cond`): `emitter_type` (exact match on the emission's
+//! *emitter's* `emitter_type`, e.g. `wifi_access_point`) and
+//! `emitter_category` (a coarser prefix match, e.g. `wifi` matches both
+//! `wifi_access_point` and `wifi_client`) — see
+//! `fluxfang_db::repo::emission::EmissionFilter`'s doc comments for the
+//! exact SQL. These power the overview map's toggleable per-category
+//! heatmap layers. Setting either excludes emissions with no emitter at
+//! all (`emitter_id IS NULL`), since a NULL emitter can't match any
+//! `emitter_type`/`emitter_category`.
+//!
 //! ## Why raw query-string parsing instead of `axum::extract::Query`
 //!
 //! `axum::extract::Query<T>` deserializes via `serde_urlencoded`, which has
@@ -139,6 +152,8 @@ fn parse_filter(raw: &str) -> Result<EmissionFilter, ApiError> {
     let mut limit = DEFAULT_LIMIT;
     let mut offset: i64 = 0;
     let mut cond_raw: Vec<String> = Vec::new();
+    let mut emitter_type = None;
+    let mut emitter_category = None;
 
     for (key, value) in form_urlencoded::parse(raw.as_bytes()) {
         match key.as_ref() {
@@ -155,6 +170,8 @@ fn parse_filter(raw: &str) -> Result<EmissionFilter, ApiError> {
             "limit" => limit = parse_limit(&value)?,
             "offset" => offset = parse_offset(&value)?,
             "cond" => cond_raw.push(value.into_owned()),
+            "emitter_type" => emitter_type = Some(value.into_owned()),
+            "emitter_category" => emitter_category = Some(value.into_owned()),
             _ => {}
         }
     }
@@ -183,6 +200,8 @@ fn parse_filter(raw: &str) -> Result<EmissionFilter, ApiError> {
         field_conditions,
         match_mode,
         text,
+        emitter_type,
+        emitter_category,
         limit,
         offset,
     })

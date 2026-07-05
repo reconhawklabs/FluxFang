@@ -5,11 +5,32 @@ mod common;
 use chrono::{Duration, Utc};
 use common::{fresh_pool, seed_session, seed_wifi_source};
 use fluxfang_core::{Condition, MatchMode, Op};
-use fluxfang_db::models::{Emission, NewEmission};
+use fluxfang_db::models::{Emission, NewEmission, NewEmitter};
 use fluxfang_db::repo::emission::{EmissionFilter, EmissionQueryError};
-use fluxfang_db::EmissionRepo;
+use fluxfang_db::{EmissionRepo, EmitterRepo};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+/// Seed an emitter classified as `emitter_type`, for the Phase A5
+/// `emitter_type`/`emitter_category` filter tests below.
+async fn seed_classified_emitter(pool: &PgPool, name: &str, emitter_type: &str) -> Uuid {
+    EmitterRepo::insert(
+        pool,
+        NewEmitter {
+            name: name.to_string(),
+            type_: None,
+            entity_id: None,
+            match_criteria: serde_json::json!({}),
+            emitter_type: Some(emitter_type.to_string()),
+            attributes: serde_json::json!({}),
+            match_enabled: true,
+            identity_key: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id
+}
 
 fn wifi_payload(bssid: &str, channel: i64) -> serde_json::Value {
     serde_json::json!({"bssid": bssid, "channel": channel})
@@ -432,4 +453,79 @@ async fn query_rejects_unknown_field_in_conditions() {
     };
     let err = EmissionRepo::query(&pool, filter).await.unwrap_err();
     assert!(matches!(err, EmissionQueryError::Rule(_)));
+}
+
+// ---------------------------------------------------------------------
+// Phase A5: `emitter_type`/`emitter_category` filters (join emission ->
+// emitter, for the overview map's category-layer heatmaps).
+// ---------------------------------------------------------------------
+
+/// `emitter_category=wifi` matches every emission attached to a
+/// `wifi_access_point` *or* `wifi_client` emitter (prefix match on
+/// `emitter_type`), while excluding both a differently-classified emitter's
+/// emission and an entirely unassigned one.
+#[tokio::test]
+async fn query_filters_by_emitter_category_prefix_matches_all_subtypes() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+
+    let ap = seed_classified_emitter(&pool, "AP", "wifi_access_point").await;
+    let client = seed_classified_emitter(&pool, "Client", "wifi_client").await;
+
+    let ap_emission = insert_wifi(&pool, ds, session, "aa:aa:aa:aa:aa:aa", 1).await;
+    EmissionRepo::set_emitter(&pool, ap_emission.id, ap)
+        .await
+        .unwrap();
+
+    let client_emission = insert_wifi(&pool, ds, session, "bb:bb:bb:bb:bb:bb", 1).await;
+    EmissionRepo::set_emitter(&pool, client_emission.id, client)
+        .await
+        .unwrap();
+
+    // Unassigned -- must never appear once emitter_category is set.
+    insert_wifi(&pool, ds, session, "cc:cc:cc:cc:cc:cc", 1).await;
+
+    let filter = EmissionFilter {
+        emitter_category: Some("wifi".to_string()),
+        ..EmissionFilter::default()
+    };
+    let (rows, total) = EmissionRepo::query(&pool, filter).await.unwrap();
+    assert_eq!(total, 2, "rows: {rows:?}");
+    let ids: Vec<Uuid> = rows.iter().map(|e| e.id).collect();
+    assert!(ids.contains(&ap_emission.id));
+    assert!(ids.contains(&client_emission.id));
+}
+
+/// `emitter_type=wifi_access_point` is an exact match: only the
+/// AP-attached emission is returned, not the client-attached or unassigned
+/// ones.
+#[tokio::test]
+async fn query_filters_by_emitter_type_exact_match_excludes_other_subtypes_and_unassigned() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+
+    let ap = seed_classified_emitter(&pool, "AP", "wifi_access_point").await;
+    let client = seed_classified_emitter(&pool, "Client", "wifi_client").await;
+
+    let ap_emission = insert_wifi(&pool, ds, session, "aa:aa:aa:aa:aa:aa", 1).await;
+    EmissionRepo::set_emitter(&pool, ap_emission.id, ap)
+        .await
+        .unwrap();
+
+    let client_emission = insert_wifi(&pool, ds, session, "bb:bb:bb:bb:bb:bb", 1).await;
+    EmissionRepo::set_emitter(&pool, client_emission.id, client)
+        .await
+        .unwrap();
+
+    insert_wifi(&pool, ds, session, "cc:cc:cc:cc:cc:cc", 1).await;
+
+    let filter = EmissionFilter {
+        emitter_type: Some("wifi_access_point".to_string()),
+        ..EmissionFilter::default()
+    };
+    let (rows, total) = EmissionRepo::query(&pool, filter).await.unwrap();
+    assert_eq!(total, 1, "rows: {rows:?}");
+    assert_eq!(rows[0].id, ap_emission.id);
 }

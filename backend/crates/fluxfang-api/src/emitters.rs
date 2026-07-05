@@ -9,6 +9,17 @@
 //! Every handler returns [`crate::dto::EmitterDto`] (see its doc comment)
 //! rather than `fluxfang_db::models::Emitter` directly.
 //!
+//! ## Phase A5: `PATCH` accepts `match_enabled`/`attributes`
+//!
+//! Alongside the existing `name`/`type`/`entity_id` fields, `PATCH
+//! /api/emitters/:id` accepts `match_enabled: bool` (toggle the emitter's
+//! auto-attach rule on/off, via `EmitterRepo::set_match_enabled`) and
+//! `attributes: <json object>` (a manual override — e.g. flipping a
+//! `randomized_mac` flag the classifier auto-detected — via
+//! `EmitterRepo::set_attributes`, a **full replace**, not a merge). See
+//! [`UpdateEmitterRequest`]'s own doc comment for why these two are plain
+//! `Option<T>` rather than the `entity_id`/`type` "absent vs. null" dance.
+//!
 //! ## Rule validation happens before any mutation
 //!
 //! Three endpoints here (`create_emitter`, `set_rule`, `create_with_entity`)
@@ -245,6 +256,19 @@ async fn get_emitter(
     Ok(Json(EmitterDto::from(&emitter)))
 }
 
+/// `match_enabled`/`attributes` (Phase A5) are plain `Option<T>` fields, not
+/// the `Option<Option<T>>` "absent vs. explicit null" dance `type_`/
+/// `entity_id` use: neither is nullable on the wire (`match_enabled` is a
+/// bool, `attributes` is always a JSON object), so there's nothing for an
+/// explicit `null` to mean — the key is either present (apply it) or
+/// absent (leave it alone).
+///
+/// `attributes`, when present, is a **full replace**, not a merge: the
+/// simplest, least-surprising semantics for a manual override (e.g.
+/// setting `randomized_mac`) — a caller wanting to tweak one key reads the
+/// current `GET` response's `attributes` first and posts back the whole
+/// object with that key changed, same pattern as `match_criteria`
+/// elsewhere in this file.
 #[derive(Debug, Deserialize)]
 struct UpdateEmitterRequest {
     #[serde(default)]
@@ -253,6 +277,10 @@ struct UpdateEmitterRequest {
     type_: Option<Option<String>>,
     #[serde(default, deserialize_with = "some")]
     entity_id: Option<Option<Uuid>>,
+    #[serde(default)]
+    match_enabled: Option<bool>,
+    #[serde(default)]
+    attributes: Option<serde_json::Value>,
 }
 
 async fn update_emitter(
@@ -277,6 +305,14 @@ async fn update_emitter(
 
     if let Some(entity_id) = req.entity_id {
         current = EmitterRepo::set_entity(&state.pool, id, entity_id).await?;
+    }
+
+    if let Some(enabled) = req.match_enabled {
+        current = EmitterRepo::set_match_enabled(&state.pool, id, enabled).await?;
+    }
+
+    if let Some(attributes) = req.attributes {
+        current = EmitterRepo::set_attributes(&state.pool, id, &attributes).await?;
     }
 
     Ok(Json(EmitterDto::from(&current)))

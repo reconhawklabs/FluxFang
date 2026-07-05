@@ -134,12 +134,30 @@ impl From<&Emission> for EmissionDto {
 }
 
 /// One row in a `GET /api/emitters`/`GET /api/emitters/:id` response (Task
-/// 6.4). Same "explicit DTO, not a re-export" rationale as [`EmissionDto`]:
-/// `fluxfang_db::models::Emitter` already `#[derive(Serialize)]`s with a
-/// wire-compatible shape (its `#[sqlx(rename = "type")]` dance only affects
-/// the SQL column mapping, not `serde`), but this DTO keeps the emitters
-/// API's response shape independently controlled here rather than coupled
-/// to the DB row's exact field set.
+/// 6.4, extended Phase A5). Same "explicit DTO, not a re-export" rationale
+/// as [`EmissionDto`]: `fluxfang_db::models::Emitter` already
+/// `#[derive(Serialize)]`s with a wire-compatible shape (its `#[sqlx(rename
+/// = "type")]` dance only affects the SQL column mapping, not `serde`), but
+/// this DTO keeps the emitters API's response shape independently
+/// controlled here rather than coupled to the DB row's exact field set.
+///
+/// ## Phase A5 additions: `emitter_type`/`attributes`/`match_enabled` +
+/// derived `type_label`/`category`
+///
+/// `emitter_type`, `attributes`, and `match_enabled` are plain passthroughs
+/// of the DB row's Phase A1 classification columns. `type_label` and
+/// `category` are *derived on every read* rather than stored: this
+/// resolves the Phase A4 "`type_` snapshot" concern (an auto-created
+/// emitter's free-text `type_` field was a point-in-time label render that
+/// could go stale if the classification registry's labels ever changed) by
+/// always recomputing them from the current `emitter_type` via
+/// `fluxfang_core::{emitter_type_label, emitter_category}`:
+/// - `type_label`: `emitter_type_label(&t)` when `emitter_type` is `Some`
+///   (e.g. `"wifi_access_point"` -> `"WiFi Access Point"`); otherwise falls
+///   back to the stored free-text `type_` field (or `"Emitter"` if that's
+///   also absent, since `type_label` itself is not optional on the wire).
+/// - `category`: `emitter_category(&t)` when `emitter_type` is `Some`;
+///   `None` for a plain user-made emitter (no classification to group by).
 #[derive(Debug, Clone, Serialize)]
 pub struct EmitterDto {
     pub id: Uuid,
@@ -151,10 +169,31 @@ pub struct EmitterDto {
     pub first_seen_at: Option<DateTime<Utc>>,
     pub last_seen_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    pub emitter_type: Option<String>,
+    pub attributes: serde_json::Value,
+    pub match_enabled: bool,
+    /// Human-readable label, derived on read (see struct docs) — never
+    /// stored, so it can never go stale relative to the classification
+    /// registry.
+    pub type_label: String,
+    /// Grouping key for map/UI category layers (e.g. `"wifi"`), derived on
+    /// read from `emitter_type`. `None` for a plain, unclassified emitter.
+    pub category: Option<String>,
 }
 
 impl From<&Emitter> for EmitterDto {
     fn from(e: &Emitter) -> Self {
+        let (type_label, category) = match &e.emitter_type {
+            Some(t) => (
+                fluxfang_core::emitter_type_label(t).to_string(),
+                Some(fluxfang_core::emitter_category(t).to_string()),
+            ),
+            None => (
+                e.type_.clone().unwrap_or_else(|| "Emitter".to_string()),
+                None,
+            ),
+        };
+
         EmitterDto {
             id: e.id,
             name: e.name.clone(),
@@ -164,6 +203,11 @@ impl From<&Emitter> for EmitterDto {
             first_seen_at: e.first_seen_at,
             last_seen_at: e.last_seen_at,
             created_at: e.created_at,
+            emitter_type: e.emitter_type.clone(),
+            attributes: e.attributes.clone(),
+            match_enabled: e.match_enabled,
+            type_label,
+            category,
         }
     }
 }
