@@ -29,6 +29,14 @@ use crate::{Capturer, GpsFix, GpsSource, RawObservation};
 /// Stop mechanism: `stop` flips a shared `Arc<AtomicBool>` that the spawned
 /// task checks before every send, and aborts the stored `JoinHandle` as a
 /// backstop so the task cannot outlive `stop()` even if it were blocked.
+///
+/// Double-start guard: dropping a tokio `JoinHandle` detaches rather than
+/// aborts the task, so unconditionally overwriting `self.handle` on a second
+/// `start()` call would orphan the first task (it keeps running, sharing the
+/// same `running` flag, and for a looping capturer runs forever). `start()`
+/// therefore returns an error if a capture is already active (`self.handle`
+/// is `Some`). Calling `stop()` clears `self.handle`, so a subsequent
+/// `start()` is a legitimate restart, not a rejected double-start.
 pub struct MockCapturer {
     observations: Vec<RawObservation>,
     interval: Duration,
@@ -60,6 +68,9 @@ impl MockCapturer {
 
 impl Capturer for MockCapturer {
     fn start(&mut self, tx: mpsc::Sender<RawObservation>) -> anyhow::Result<()> {
+        if self.handle.is_some() {
+            anyhow::bail!("capturer already running");
+        }
         self.running.store(true, Ordering::SeqCst);
         let running = self.running.clone();
         let observations = self.observations.clone();
@@ -240,6 +251,63 @@ mod tests {
         // After stop, the channel should close (sender dropped/aborted)
         // rather than yielding forever.
         while rx.recv().await.is_some() {}
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mock_capturer_start_twice_without_stop_errors_and_does_not_duplicate() {
+        let base = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let observations = vec![
+            wifi_obs("AA:AA:AA:AA:AA:01", base),
+            wifi_obs("AA:AA:AA:AA:AA:02", base + chrono::Duration::seconds(1)),
+        ];
+
+        let mut capturer = MockCapturer::new(observations.clone(), Duration::from_millis(10));
+        let (tx, mut rx) = mpsc::channel(8);
+
+        capturer.start(tx.clone()).unwrap();
+
+        // A second start() while the first task is still active must be
+        // rejected rather than spawning a competing task that shares the
+        // same `running` flag.
+        let err = capturer.start(tx).unwrap_err();
+        assert_eq!(err.to_string(), "capturer already running");
+
+        // Exactly one copy of the observation set should come through - if
+        // the second start() had spawned another task, we'd see the set
+        // twice (or interleaved).
+        let mut received = Vec::new();
+        while let Some(obs) = rx.recv().await {
+            received.push(obs);
+        }
+        assert_eq!(received, observations);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mock_capturer_restart_after_stop_emits_again() {
+        let base = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let observations = vec![wifi_obs("AA:AA:AA:AA:AA:01", base)];
+
+        let mut capturer = MockCapturer::new(observations.clone(), Duration::from_millis(10));
+
+        let (tx1, mut rx1) = mpsc::channel(8);
+        capturer.start(tx1).unwrap();
+        let mut first_run = Vec::new();
+        while let Some(obs) = rx1.recv().await {
+            first_run.push(obs);
+        }
+        assert_eq!(first_run, observations);
+
+        // stop() clears self.handle, so the guard added for double-start
+        // must not reject this legitimate restart.
+        capturer.stop();
+
+        let (tx2, mut rx2) = mpsc::channel(8);
+        capturer.start(tx2).unwrap();
+        let mut second_run = Vec::new();
+        while let Some(obs) = rx2.recv().await {
+            second_run.push(obs);
+        }
+        assert_eq!(second_run, observations);
     }
 
     #[tokio::test]
