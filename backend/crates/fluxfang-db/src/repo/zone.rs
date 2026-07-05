@@ -147,6 +147,35 @@ impl ZoneRepo {
         Ok(result.rows_affected() > 0)
     }
 
+    /// For every zone, whether the point `(lon, lat)` falls within it
+    /// (`ST_DWithin` against each zone's own `center`/`radius_m`), in one
+    /// query. Used by `fluxfang-api::ingest::zones` (Task 5.4) to
+    /// recompute a subject's (emitter/entity/host) membership across
+    /// every zone at once, rather than issuing one `ST_DWithin` query per
+    /// zone per subject.
+    ///
+    /// Returns `(zone_id, inside)` pairs, one per row in `zone` — an empty
+    /// `zone` table yields an empty `Vec`, not an error.
+    pub async fn memberships_for_point(
+        pool: &PgPool,
+        lon: f64,
+        lat: f64,
+    ) -> Result<Vec<(Uuid, bool)>, sqlx::Error> {
+        sqlx::query_as::<_, (Uuid, bool)>(
+            "SELECT id, \
+                 ST_DWithin( \
+                     ST_SetSRID(ST_MakePoint($1::double precision, $2::double precision), 4326)::geography, \
+                     center, \
+                     radius_m \
+                 ) AS inside \
+             FROM zone",
+        )
+        .bind(lon)
+        .bind(lat)
+        .fetch_all(pool)
+        .await
+    }
+
     /// Emitters/entities currently "in" `zone_id`. See module docs for the
     /// exact membership rule (each emitter's most recent *located*
     /// emission vs. `ST_DWithin`; an entity is in iff any of its emitters

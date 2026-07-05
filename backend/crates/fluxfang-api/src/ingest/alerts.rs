@@ -205,6 +205,10 @@ fn detected_payload(
 /// 'failed'`; see [`DeliveryStatus::as_db_str`]'s own doc comment), so it's
 /// folded into the JSON payload instead.
 ///
+/// **Disabled methods are skipped entirely**: a linked `alert_method` with
+/// `enabled == false` gets no dispatch attempt, no `notification` row, and
+/// no broadcast -- as if it weren't linked at all for this firing.
+///
 /// **Never panics; a failure for one method never aborts the others**: a
 /// `dispatch` failure records `DeliveryStatus::Failed` and the loop
 /// continues to the next method; a DB error loading the linked methods, or
@@ -219,6 +223,16 @@ pub(crate) async fn fire_rule(ctx: &IngestCtx, rule: &AlertRule, payload: &Notif
     };
 
     for method in methods {
+        // A disabled `alert_method` must be skipped entirely, not just
+        // "dispatched but doesn't matter" -- no dispatch attempt, no
+        // `notification` row, no broadcast. An operator disabling a channel
+        // (e.g. taking a broken webhook offline) must actually stop it from
+        // firing, not merely stop it from being *linked* (which would
+        // require editing every rule that references it).
+        if !method.enabled {
+            continue;
+        }
+
         let status = dispatch(&method, &ctx.secret_key, payload).await;
         let stored_payload = notification_payload_json(payload, &status);
 
@@ -819,5 +833,255 @@ mod tests {
             .find(|r| r.alert_rule_id == Some(rule_b.id))
             .expect("rule B's notification should exist");
         assert_eq!(ok.delivery_status, "sent");
+    }
+
+    /// Carried-over fix (this task's brief): `fire_rule` must skip a
+    /// disabled `alert_method` entirely -- one rule linked to both an
+    /// enabled and a disabled `in_app` method must produce exactly one
+    /// notification (the enabled one's), not two.
+    #[tokio::test]
+    async fn disabled_method_is_skipped_and_only_the_enabled_method_fires() {
+        let pool = fresh_pool().await;
+        let ds = seed_wifi_source(&pool).await;
+        let base = ChronoUtc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+
+        let emitter = EmitterRepo::insert(
+            &pool,
+            NewEmitter {
+                name: "AP".to_string(),
+                type_: Some("wifi".to_string()),
+                entity_id: None,
+                match_criteria: serde_json::json!({
+                    "match": "all",
+                    "conditions": [{"field": "bssid", "op": "eq", "value": "aa:bb:cc:dd:ee:ff"}]
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+        let rule = AlertRuleRepo::insert(
+            &pool,
+            NewAlertRule {
+                name: "AP detected".to_string(),
+                enabled: true,
+                target_type: Some("emitter".to_string()),
+                target_id: Some(emitter.id),
+                trigger: serde_json::json!({"on": "detected"}),
+            },
+        )
+        .await
+        .unwrap();
+
+        let enabled_method = AlertMethodRepo::insert(
+            &pool,
+            NewAlertMethod {
+                name: "enabled in-app".to_string(),
+                type_: "in_app".to_string(),
+                enabled: true,
+                config_encrypted: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        let disabled_method = AlertMethodRepo::insert(
+            &pool,
+            NewAlertMethod {
+                name: "disabled in-app".to_string(),
+                type_: "in_app".to_string(),
+                enabled: false,
+                config_encrypted: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        AlertRuleRepo::link_method(&pool, rule.id, enabled_method.id)
+            .await
+            .unwrap();
+        AlertRuleRepo::link_method(&pool, rule.id, disabled_method.id)
+            .await
+            .unwrap();
+
+        let (ctx, _events_rx) = full_ctx(pool.clone(), manager).await;
+
+        super::super::ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", 6, base))
+            .await
+            .expect("ingest should succeed");
+
+        let (rows, total) = NotificationRepo::list(&pool, false, 10, 0).await.unwrap();
+        assert_eq!(
+            total, 1,
+            "exactly one notification: the disabled method must not fire"
+        );
+        assert_eq!(rows[0].alert_method_id, Some(enabled_method.id));
+    }
+
+    /// Within a SINGLE rule linked to two methods -- one that fails to
+    /// dispatch (unreachable webhook) and one that succeeds (in_app) --
+    /// both `notification` rows must be recorded (failed + sent); the
+    /// failing method must not abort or skip the other. This differs from
+    /// `a_failing_method_is_recorded_failed_without_aborting_other_rules_or_methods`
+    /// above, which spreads the failing/succeeding methods across two
+    /// separate rules.
+    #[tokio::test]
+    async fn one_rule_with_one_failing_and_one_succeeding_method_records_both() {
+        let pool = fresh_pool().await;
+        let ds = seed_wifi_source(&pool).await;
+        let base = ChronoUtc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+
+        let emitter = EmitterRepo::insert(
+            &pool,
+            NewEmitter {
+                name: "AP".to_string(),
+                type_: Some("wifi".to_string()),
+                entity_id: None,
+                match_criteria: serde_json::json!({
+                    "match": "all",
+                    "conditions": [{"field": "bssid", "op": "eq", "value": "aa:bb:cc:dd:ee:ff"}]
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+        let rule = AlertRuleRepo::insert(
+            &pool,
+            NewAlertRule {
+                name: "AP detected".to_string(),
+                enabled: true,
+                target_type: Some("emitter".to_string()),
+                target_id: Some(emitter.id),
+                trigger: serde_json::json!({"on": "detected"}),
+            },
+        )
+        .await
+        .unwrap();
+
+        let webhook_config = serde_json::json!({"url": "http://127.0.0.1:1/hook"});
+        let ciphertext = encrypt(&test_key(), webhook_config.to_string().as_bytes());
+        let failing_method = AlertMethodRepo::insert(
+            &pool,
+            NewAlertMethod {
+                name: "unreachable webhook".to_string(),
+                type_: "webhook".to_string(),
+                enabled: true,
+                config_encrypted: ciphertext,
+            },
+        )
+        .await
+        .unwrap();
+        let ok_method = AlertMethodRepo::insert(
+            &pool,
+            NewAlertMethod {
+                name: "in-app".to_string(),
+                type_: "in_app".to_string(),
+                enabled: true,
+                config_encrypted: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        AlertRuleRepo::link_method(&pool, rule.id, failing_method.id)
+            .await
+            .unwrap();
+        AlertRuleRepo::link_method(&pool, rule.id, ok_method.id)
+            .await
+            .unwrap();
+
+        let (ctx, _events_rx) = full_ctx(pool.clone(), manager).await;
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(15),
+            super::super::ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", 6, base)),
+        )
+        .await
+        .expect("ingest must not hang");
+        result.expect("ingest should succeed even though one method fails to dispatch");
+
+        let (rows, total) = NotificationRepo::list(&pool, false, 10, 0).await.unwrap();
+        assert_eq!(
+            total, 2,
+            "both methods of the one rule should have recorded a notification"
+        );
+
+        let failed = rows
+            .iter()
+            .find(|r| r.alert_method_id == Some(failing_method.id))
+            .expect("failing method's notification should exist");
+        assert_eq!(failed.delivery_status, "failed");
+
+        let ok = rows
+            .iter()
+            .find(|r| r.alert_method_id == Some(ok_method.id))
+            .expect("ok method's notification should exist");
+        assert_eq!(ok.delivery_status, "sent");
+    }
+
+    /// A host rule (`target_type`/`target_id` both `None`) with
+    /// `trigger.on == "detected"` must never fire via `evaluate_alerts` --
+    /// `detected` triggers only ever match an `emitter`/`entity` target
+    /// (see this module's own doc comment); a host rule with that trigger
+    /// kind is simply never matched by any emission.
+    #[tokio::test]
+    async fn host_rule_with_detected_trigger_never_fires() {
+        let pool = fresh_pool().await;
+        let ds = seed_wifi_source(&pool).await;
+        let base = ChronoUtc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+
+        EmitterRepo::insert(
+            &pool,
+            NewEmitter {
+                name: "AP".to_string(),
+                type_: Some("wifi".to_string()),
+                entity_id: None,
+                match_criteria: serde_json::json!({
+                    "match": "all",
+                    "conditions": [{"field": "bssid", "op": "eq", "value": "aa:bb:cc:dd:ee:ff"}]
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+        let rule = AlertRuleRepo::insert(
+            &pool,
+            NewAlertRule {
+                name: "host rule with a detected trigger (nonsensical, must never fire)"
+                    .to_string(),
+                enabled: true,
+                target_type: None,
+                target_id: None,
+                trigger: serde_json::json!({"on": "detected"}),
+            },
+        )
+        .await
+        .unwrap();
+
+        let method = AlertMethodRepo::insert(
+            &pool,
+            NewAlertMethod {
+                name: "in-app".to_string(),
+                type_: "in_app".to_string(),
+                enabled: true,
+                config_encrypted: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        AlertRuleRepo::link_method(&pool, rule.id, method.id)
+            .await
+            .unwrap();
+
+        let (ctx, _events_rx) = full_ctx(pool.clone(), manager).await;
+
+        super::super::ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", 6, base))
+            .await
+            .expect("ingest should succeed");
+
+        let (_rows, total) = NotificationRepo::list(&pool, false, 10, 0).await.unwrap();
+        assert_eq!(total, 0, "a host rule's detected trigger must never fire");
     }
 }

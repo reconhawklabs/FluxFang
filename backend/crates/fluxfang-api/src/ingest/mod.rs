@@ -51,6 +51,7 @@
 
 pub mod alerts;
 pub mod session;
+pub mod zones;
 
 use std::sync::Arc;
 
@@ -135,14 +136,19 @@ pub struct IngestCtx {
 ///    itself (see that module for the full pipeline). Returns `()` and
 ///    self-contains every error — a problem evaluating alerts must never
 ///    prevent the emission itself from finishing its own insert/broadcast.
-///    Task 5.4's `update_target_zones(ctx, &emission).await` (zone-
-///    membership enter/leave transitions) will be added as a sibling call
-///    here, operating on the same finalized emission.
-/// 5. Broadcast `Event::Emission(emission)` on `ctx.events`. `send` returns
+/// 5. `zones::update_target_zones(ctx, &emission).await` (Task 5.4) —
+///    recomputes zone membership for the emission's emitter (and, if
+///    grouped, its entity) against every zone, firing any
+///    `enters_zone`/`leaves_zone` `alert_rule` whose target and zone match
+///    a just-happened transition (state-diffed against `zone_membership`,
+///    so a still-inside/still-outside emission fires nothing). Same
+///    self-containment guarantee as `evaluate_alerts` — see that module's
+///    own doc comment for the full pipeline.
+/// 6. Broadcast `Event::Emission(emission)` on `ctx.events`. `send` returns
 ///    `Err` when there are currently no subscribers (nobody has a WS
 ///    connection open) — an expected, benign state, not a failure of
 ///    `ingest` itself, so the result is deliberately discarded.
-/// 6. Return the stored (and possibly auto-attached) emission.
+/// 7. Return the stored (and possibly auto-attached) emission.
 pub async fn ingest(
     ctx: &IngestCtx,
     data_source_id: Uuid,
@@ -191,7 +197,7 @@ pub async fn ingest(
     }
 
     alerts::evaluate_alerts(ctx, &emission).await;
-    // Task 5.4: update_target_zones(ctx, &emission).await?;
+    zones::update_target_zones(ctx, &emission).await;
 
     // No subscribers is a normal, expected state (see doc comment above) --
     // deliberately not propagated as an ingest failure.

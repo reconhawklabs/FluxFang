@@ -308,3 +308,37 @@ async fn subjects_in_zone_includes_entity_iff_one_of_its_emitters_is_in() {
         1
     );
 }
+
+#[tokio::test]
+async fn memberships_for_point_reports_inside_and_outside_across_every_zone() {
+    let pool = fresh_pool().await;
+    let near = seed_zone(&pool).await;
+    let far = ZoneRepo::insert(
+        &pool,
+        NewZone {
+            name: "Far Zone".to_string(),
+            center: OUTSIDE,
+            radius_m: RADIUS_M,
+            notes: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let memberships = ZoneRepo::memberships_for_point(&pool, INSIDE.0, INSIDE.1)
+        .await
+        .unwrap();
+    assert_eq!(memberships.len(), 2, "one row per zone in the table");
+
+    let near_result = memberships
+        .iter()
+        .find(|(id, _)| *id == near.id)
+        .expect("near zone present");
+    assert!(near_result.1, "point is inside the near zone");
+
+    let far_result = memberships
+        .iter()
+        .find(|(id, _)| *id == far.id)
+        .expect("far zone present");
+    assert!(!far_result.1, "point is outside the far zone");
+}
