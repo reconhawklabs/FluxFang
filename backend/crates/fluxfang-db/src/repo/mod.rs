@@ -23,6 +23,8 @@ pub mod emission;
 pub mod emitter;
 pub mod entity;
 pub mod session;
+pub mod zone;
+pub mod zone_membership;
 
 pub use app_config::AppConfigRepo;
 pub use data_source::DataSourceRepo;
@@ -30,3 +32,5 @@ pub use emission::EmissionRepo;
 pub use emitter::EmitterRepo;
 pub use entity::EntityRepo;
 pub use session::SessionRepo;
+pub use zone::ZoneRepo;
+pub use zone_membership::ZoneMembershipRepo;

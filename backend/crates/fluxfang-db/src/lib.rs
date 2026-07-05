@@ -10,7 +10,10 @@ use sqlx::PgPool;
 pub mod models;
 pub mod repo;
 
-pub use repo::{AppConfigRepo, DataSourceRepo, EmissionRepo, EmitterRepo, EntityRepo, SessionRepo};
+pub use repo::{
+    AppConfigRepo, DataSourceRepo, EmissionRepo, EmitterRepo, EntityRepo, SessionRepo, ZoneRepo,
+    ZoneMembershipRepo,
+};
 
 /// Connect to Postgres and return a ready-to-use connection pool.
 pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {

@@ -205,3 +205,51 @@ pub struct NewEmitter {
     pub entity_id: Option<Uuid>,
     pub match_criteria: serde_json::Value,
 }
+
+/// `zone`: a user-named geofence. `center` is `geography(Point,4326)` in
+/// the DB (same undecodable-by-sqlx situation as `Emission::location`, see
+/// module docs above) — every query producing this type projects it via
+/// `ST_X(center::geometry) AS lon, ST_Y(center::geometry) AS lat` rather
+/// than `SELECT *`/`RETURNING *`. Unlike `Emission::location`, `zone.center`
+/// is `NOT NULL`, so `lon`/`lat` here are plain `f64`, not `Option<f64>`.
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]
+pub struct Zone {
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub name: String,
+    /// Longitude, decoded from `ST_X(center::geometry)`.
+    pub lon: f64,
+    /// Latitude, decoded from `ST_Y(center::geometry)`.
+    pub lat: f64,
+    pub radius_m: f64,
+    pub notes: Option<String>,
+}
+
+/// Fields required to create (or fully replace, via `ZoneRepo::update`) a
+/// `zone`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewZone {
+    pub name: String,
+    /// `(lon, lat)`.
+    pub center: (f64, f64),
+    pub radius_m: f64,
+    pub notes: Option<String>,
+}
+
+/// `zone_membership`: ingest-maintained last-known-membership state for one
+/// subject (`emitter`, `entity`, or the singular `host`) in one `zone`, used
+/// so enter/leave alert triggers fire once per transition rather than once
+/// per emission. `subject_id` is `NULL` for `subject_type = "host"` (there
+/// is only one host); the `(subject_type, subject_id, zone_id)` unique
+/// index uses `NULLS NOT DISTINCT` so exactly one host row exists per zone
+/// — see `repo::zone_membership` for how `get`/`upsert` handle that NULL.
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]
+pub struct ZoneMembership {
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub subject_type: String,
+    pub subject_id: Option<Uuid>,
+    pub zone_id: Uuid,
+    pub inside: bool,
+    pub since: DateTime<Utc>,
+}
