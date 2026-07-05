@@ -1,23 +1,23 @@
 //! Row structs mapping `backend/migrations/0001_init.sql` tables to Rust.
 //!
-//! Only the tables needed by Task 1.3a's three repos (AppConfigRepo,
-//! DataSourceRepo, SessionRepo) are modeled here. Later sub-tasks add
-//! `Emission`, `Emitter`, `Entity`, `Zone`, `ZoneMembership`, `AlertMethod`,
-//! `AlertRule`, `Notification`, etc. to this same file — keep that
-//! convention (one `models.rs` for every row type in the crate) rather than
-//! splitting per-aggregate model files.
+//! Task 1.3a modeled the three tables with no geography column
+//! (AppConfigRepo, DataSourceRepo, SessionRepo). Task 1.3b adds `Emission`
+//! (the first geography-bearing table). Later sub-tasks add `Emitter`,
+//! `Entity`, `Zone`, `ZoneMembership`, `AlertMethod`, `AlertRule`,
+//! `Notification`, etc. to this same file — keep that convention (one
+//! `models.rs` for every row type in the crate) rather than splitting
+//! per-aggregate model files.
 //!
 //! ## Geography columns
 //!
-//! Several tables not modeled yet (`emission`, `zone`, `location_fix`) have
-//! `geography(Point,4326)` columns. sqlx cannot decode PostGIS `geography`
-//! directly into a Rust type, so the established pattern (see
-//! `tests/schema.rs` for a precedent) is: never `SELECT location` as-is.
-//! Instead project it in SQL via `ST_X(location::geometry) AS lon`,
-//! `ST_Y(location::geometry) AS lat` (or `ST_AsText(location)`) and decode
-//! those as plain `f64`/`String` columns on the Rust side. None of the
-//! three tables in this sub-task have a geography column, so no helper is
-//! introduced yet — add one alongside the first repo that needs it.
+//! `emission`, `zone`, and `location_fix` have `geography(Point,4326)`
+//! columns. sqlx cannot decode PostGIS `geography` directly into a Rust
+//! type, so the established pattern (see `tests/schema.rs` for a
+//! precedent, and `repo::emission` for the first repo to use it) is: never
+//! `SELECT location`/`RETURNING *` as-is. Instead project it in SQL via
+//! `ST_X(location::geometry) AS lon`, `ST_Y(location::geometry) AS lat`
+//! and decode those as plain `Option<f64>` columns on the Rust side (write
+//! it back with `ST_SetSRID(ST_MakePoint(lon, lat), 4326)::geography`).
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -92,4 +92,70 @@ pub struct SurveySession {
     pub started_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
     pub label: Option<String>,
+}
+
+/// `emission`: one captured observation (currently only `kind = "wifi"`).
+/// High-volume, time-indexed.
+///
+/// `location` is `geography(Point,4326)` in the DB, which sqlx cannot
+/// decode directly (see the module docs above) — every query that
+/// produces this type must project it via `ST_X(location::geometry) AS
+/// lon, ST_Y(location::geometry) AS lat` rather than `SELECT *`, so the
+/// column list is spelled out explicitly in every `repo::emission` query
+/// rather than relying on `RETURNING *`/`SELECT *`.
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]
+pub struct Emission {
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub data_source_id: Option<Uuid>,
+    pub emitter_id: Option<Uuid>,
+    /// Nullable in the DB (`ON DELETE SET NULL` when the referenced
+    /// session is deleted), even though [`NewEmission::session_id`] is
+    /// required at insert time.
+    pub session_id: Option<Uuid>,
+    pub observed_at: DateTime<Utc>,
+    pub signal_strength: Option<i32>,
+    pub kind: String,
+    pub payload: serde_json::Value,
+    /// Longitude, decoded from `ST_X(location::geometry)`. `None` when
+    /// `location` is NULL.
+    pub lon: Option<f64>,
+    /// Latitude, decoded from `ST_Y(location::geometry)`. `None` when
+    /// `location` is NULL.
+    pub lat: Option<f64>,
+}
+
+/// Fields required to create a new `emission`. `session_id` is required
+/// here (unlike the DB column, which is nullable to tolerate the
+/// referenced session later being deleted) — capture always happens within
+/// a known survey session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewEmission {
+    pub data_source_id: Option<Uuid>,
+    pub emitter_id: Option<Uuid>,
+    pub session_id: Uuid,
+    pub observed_at: DateTime<Utc>,
+    pub signal_strength: Option<i32>,
+    /// `(lon, lat)`. `None` when the emission wasn't geo-located.
+    pub location: Option<(f64, f64)>,
+    pub kind: String,
+    pub payload: serde_json::Value,
+}
+
+impl NewEmission {
+    /// Convenience constructor for a wifi emission captured right now, with
+    /// no emitter/signal/location set yet. Callers that need those fields
+    /// populated at insert time should build `NewEmission` directly.
+    pub fn wifi(data_source_id: Uuid, session_id: Uuid, payload: serde_json::Value) -> Self {
+        Self {
+            data_source_id: Some(data_source_id),
+            emitter_id: None,
+            session_id,
+            observed_at: Utc::now(),
+            signal_strength: None,
+            location: None,
+            kind: "wifi".to_string(),
+            payload,
+        }
+    }
 }

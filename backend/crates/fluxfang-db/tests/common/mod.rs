@@ -31,10 +31,12 @@
 //! no "drop this schema after my session ends" primitive short of a
 //! temporary-table-like mechanism, and dropping from inside the same
 //! connection that's using it isn't possible). Since `fluxfang_test` is a
-//! disposable, non-production database, an occasional
-//! `DROP SCHEMA test_* CASCADE` sweep (or just recreating the database) is
-//! sufficient housekeeping; this harness does not automate it to keep the
-//! per-test path simple.
+//! disposable, non-production database, [`sweep_leftover_test_schemas`]
+//! performs a best-effort `DROP SCHEMA test_* CASCADE` sweep once per test
+//! *binary process*, before that binary creates any schema of its own —
+//! see its doc comment for why that ordering makes it safe under cargo
+//! test's default (one-binary-at-a-time, multi-threaded-within-a-binary)
+//! execution model.
 
 // Each integration test binary compiles this module fresh and only uses a
 // subset of its helpers, so an unused-fn lint would fire in most of them.
@@ -42,13 +44,65 @@
 
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Executor, PgPool};
+use tokio::sync::OnceCell;
 use uuid::Uuid;
+
+/// Guards [`sweep_leftover_test_schemas`] so it runs at most once per test
+/// binary process, no matter how many concurrent test threads call
+/// [`fresh_pool`] simultaneously (`OnceCell::get_or_init` makes every
+/// caller but the first `.await` the first caller's in-flight sweep rather
+/// than each running their own).
+static SWEEP_DONE: OnceCell<()> = OnceCell::const_new();
+
+/// Best-effort cleanup of `test_*` schemas left behind by earlier test
+/// runs. Never panics — every step swallows its own errors — because this
+/// is pure housekeeping and must never be allowed to break test setup.
+///
+/// Safety note: this is only safe to call *before* the current binary has
+/// created its own `test_*` schema (otherwise a slow-starting sibling
+/// thread could sweep away a schema a faster thread just created and is
+/// actively migrating/using). [`fresh_pool`] guarantees that ordering by
+/// running the (deduped, one-shot) sweep before its own `CREATE SCHEMA`.
+/// `cargo test` runs one integration-test binary at a time by default (only
+/// threads *within* a binary run concurrently), so by the time this sweep
+/// runs, any schemas matching `test_*` were left behind by a prior,
+/// already-exited binary process — never a currently-running one.
+async fn sweep_leftover_test_schemas(database_url: &str) {
+    let Ok(admin) = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(database_url)
+        .await
+    else {
+        return;
+    };
+
+    let schemas: Result<Vec<(String,)>, _> = sqlx::query_as(
+        "SELECT schema_name FROM information_schema.schemata \
+         WHERE schema_name LIKE 'test\\_%' ESCAPE '\\'",
+    )
+    .fetch_all(&admin)
+    .await;
+
+    if let Ok(schemas) = schemas {
+        for (schema,) in schemas {
+            let _ = admin
+                .execute(format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE"#).as_str())
+                .await;
+        }
+    }
+
+    admin.close().await;
+}
 
 /// Build a pool bound to a fresh, isolated schema with all migrations
 /// applied. See module docs for the isolation approach.
 pub async fn fresh_pool() -> PgPool {
     let database_url = std::env::var("DATABASE_URL")
         .expect("DATABASE_URL must be set for fluxfang-db tests (see task-1.3a-report.md)");
+
+    SWEEP_DONE
+        .get_or_init(|| sweep_leftover_test_schemas(&database_url))
+        .await;
 
     let schema = format!("test_{}", Uuid::new_v4().simple());
 
@@ -109,4 +163,14 @@ pub async fn seed_gps_source(pool: &PgPool) -> Uuid {
         .await
         .expect("seed gps data_source");
     ds.id
+}
+
+/// Open a `survey_session` row, returning its id. `emission.session_id`
+/// (via `NewEmission::session_id`) is a required FK, so `EmissionRepo`
+/// tests need a real session row to attach rows to.
+pub async fn seed_session(pool: &PgPool) -> Uuid {
+    use fluxfang_db::SessionRepo;
+
+    let session = SessionRepo::open(pool).await.expect("seed survey_session");
+    session.id
 }

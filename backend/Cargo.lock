@@ -389,6 +389,7 @@ name = "fluxfang-db"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "fluxfang-core",
  "serde",
  "serde_json",
  "sqlx",

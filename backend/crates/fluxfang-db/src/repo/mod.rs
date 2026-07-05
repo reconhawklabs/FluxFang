@@ -19,8 +19,10 @@
 
 pub mod app_config;
 pub mod data_source;
+pub mod emission;
 pub mod session;
 
 pub use app_config::AppConfigRepo;
 pub use data_source::DataSourceRepo;
+pub use emission::EmissionRepo;
 pub use session::SessionRepo;
