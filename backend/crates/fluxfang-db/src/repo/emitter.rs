@@ -130,10 +130,16 @@ pub struct EmitterRepo;
 /// `attributes`/`match_criteria` columns (not the plain `name`/`type`
 /// columns) still finds the emitter. See [`EmitterRepo::query`]'s own doc
 /// comment for the exact SQL and why it's injection-safe.
+///
+/// `emitter_type`, when `Some`, is an exact match against the `emitter_type`
+/// column (e.g. `"wifi_access_point"`) — the Emitters page's Type-filter
+/// dropdown. A `NULL` (unclassified) `emitter_type` never matches, same as a
+/// plain SQL `=` comparison against `NULL`.
 #[derive(Debug, Clone)]
 pub struct EmitterListFilter {
     pub search: Option<String>,
     pub entity_id: Option<Uuid>,
+    pub emitter_type: Option<String>,
     pub limit: i64,
     pub offset: i64,
 }
@@ -143,6 +149,7 @@ impl Default for EmitterListFilter {
         Self {
             search: None,
             entity_id: None,
+            emitter_type: None,
             limit: 50,
             offset: 0,
         }
@@ -348,12 +355,15 @@ impl EmitterRepo {
     /// `filter.search` (case-insensitive substring over `name`, `type`,
     /// `attributes::text`, and `match_criteria::text` — so a MAC/BSSID/SSID
     /// typed into search finds an emitter even when it only appears inside
-    /// the JSON columns, not the plain `name`/`type` columns) and
-    /// `filter.entity_id` (exact match) are ANDed together when both are
-    /// given. `search` is parameterized as `'%' || $n || '%'` bound as a
-    /// plain string parameter — never interpolated into the SQL text — so
-    /// it's not susceptible to SQL injection (same approach
-    /// `repo::emission::EmissionRepo::query`'s `text`/ILIKE filter uses).
+    /// the JSON columns, not the plain `name`/`type` columns), `filter.entity_id`
+    /// (exact match), and `filter.emitter_type` (exact match against the
+    /// `emitter_type` column, e.g. `"wifi_access_point"` — the Type-filter
+    /// dropdown) are ANDed together when given. `search` is parameterized as
+    /// `'%' || $n || '%'` bound as a plain string parameter — never
+    /// interpolated into the SQL text — so it's not susceptible to SQL
+    /// injection (same approach `repo::emission::EmissionRepo::query`'s
+    /// `text`/ILIKE filter uses); `emitter_type` is likewise bound as a plain
+    /// string parameter, never interpolated.
     ///
     /// Ordered `created_at ASC`, same as [`Self::list`]/[`Self::list_by_entity`].
     /// Returns the requested page plus `total`, the count of matching rows
@@ -378,6 +388,10 @@ impl EmitterRepo {
             clauses.push(format!("entity_id = ${next_bind}"));
             next_bind += 1;
         }
+        if filter.emitter_type.is_some() {
+            clauses.push(format!("emitter_type = ${next_bind}"));
+            next_bind += 1;
+        }
 
         let where_sql = clauses.join(" AND ");
 
@@ -389,6 +403,9 @@ impl EmitterRepo {
                 }
                 if let Some(entity_id) = filter.entity_id {
                     q = q.bind(entity_id);
+                }
+                if let Some(ref emitter_type) = filter.emitter_type {
+                    q = q.bind(emitter_type.clone());
                 }
                 q
             }};

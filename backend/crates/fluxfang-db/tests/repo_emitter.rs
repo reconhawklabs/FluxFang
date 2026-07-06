@@ -836,6 +836,151 @@ async fn query_paginates_with_correct_total_ignoring_limit_offset() {
     assert_eq!(page3[0].name, "E");
 }
 
+/// `filter.emitter_type` restricts the list to emitters with that exact
+/// `emitter_type` value, excluding both a different type and a `NULL`
+/// (unclassified) one — the Emitters page's Type-filter dropdown.
+#[tokio::test]
+async fn query_emitter_type_filters_to_only_that_type() {
+    let pool = fresh_pool().await;
+    let ap = EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            emitter_type: Some("wifi_access_point".to_string()),
+            ..new_emitter("AP One")
+        },
+    )
+    .await
+    .unwrap();
+    EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            emitter_type: Some("wifi_client".to_string()),
+            ..new_emitter("Client One")
+        },
+    )
+    .await
+    .unwrap();
+    // Unclassified (NULL emitter_type) must be excluded when the filter is set.
+    EmitterRepo::insert(&pool, new_emitter("Unclassified"))
+        .await
+        .unwrap();
+
+    let (rows, total) = EmitterRepo::query(
+        &pool,
+        EmitterListFilter {
+            emitter_type: Some("wifi_access_point".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(total, 1, "rows: {rows:?}");
+    assert_eq!(rows[0].id, ap.id);
+}
+
+/// `emitter_type` combines (ANDed) with `search`/`entity_id`: a matching
+/// type but non-matching search excludes the row, and vice versa.
+#[tokio::test]
+async fn query_emitter_type_combines_with_search_and_entity_id() {
+    let pool = fresh_pool().await;
+    let entity = EntityRepo::insert(
+        &pool,
+        NewEntity {
+            name: "Bob".to_string(),
+            notes: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let target = EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            entity_id: Some(entity.id),
+            emitter_type: Some("wifi_access_point".to_string()),
+            ..new_emitter("Bob's Cafe AP")
+        },
+    )
+    .await
+    .unwrap();
+    // Same type, different entity/name — should be excluded by the combined filter.
+    EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            emitter_type: Some("wifi_access_point".to_string()),
+            ..new_emitter("Unrelated AP")
+        },
+    )
+    .await
+    .unwrap();
+    // Same entity/search match, different type — should also be excluded.
+    EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            entity_id: Some(entity.id),
+            emitter_type: Some("wifi_client".to_string()),
+            ..new_emitter("Bob's Cafe Client")
+        },
+    )
+    .await
+    .unwrap();
+
+    let (rows, total) = EmitterRepo::query(
+        &pool,
+        EmitterListFilter {
+            search: Some("cafe".to_string()),
+            entity_id: Some(entity.id),
+            emitter_type: Some("wifi_access_point".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(total, 1, "rows: {rows:?}");
+    assert_eq!(rows[0].id, target.id);
+}
+
+/// `emitter_type` also constrains the `total` count, not just the returned
+/// page.
+#[tokio::test]
+async fn query_emitter_type_total_respects_filter_with_pagination() {
+    let pool = fresh_pool().await;
+    for name in ["A", "B", "C"] {
+        EmitterRepo::insert(
+            &pool,
+            NewEmitter {
+                emitter_type: Some("wifi_access_point".to_string()),
+                ..new_emitter(name)
+            },
+        )
+        .await
+        .unwrap();
+    }
+    EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            emitter_type: Some("wifi_client".to_string()),
+            ..new_emitter("Client")
+        },
+    )
+    .await
+    .unwrap();
+
+    let (rows, total) = EmitterRepo::query(
+        &pool,
+        EmitterListFilter {
+            emitter_type: Some("wifi_access_point".to_string()),
+            limit: 2,
+            offset: 0,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(total, 3, "rows: {rows:?}");
+    assert_eq!(rows.len(), 2);
+}
+
 // ---------------------------------------------------------------------
 // Phase 1c: EmitterRepo::{delete_bulk, delete_all} + the emission.emitter_id
 // SET NULL cascade.

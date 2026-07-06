@@ -11,8 +11,8 @@
 //!
 //! ## Phase 1b: `GET /api/emitters` search + entity filter + pagination
 //!
-//! `GET /api/emitters` accepts `search`, `entity_id`, `limit` (default 50,
-//! clamped to a max of 500, same convention as `emissions.rs`/
+//! `GET /api/emitters` accepts `search`, `entity_id`, `emitter_type`, `limit`
+//! (default 50, clamped to a max of 500, same convention as `emissions.rs`/
 //! `notifications.rs`), and `offset` query params, delegating to
 //! `EmitterRepo::query`/`EmitterListFilter` — see that repo module's doc
 //! comment for the exact search SQL. **This is a response-shape change**:
@@ -20,6 +20,10 @@
 //! `{items, total}`, the same pagination envelope `GET /api/emissions`/`GET
 //! /api/notifications` already use. The frontend is updated in a later
 //! phase.
+//!
+//! `emitter_type` (added alongside the Type-filter dropdown) is an
+//! exact-match filter on the `emitter_type` column, ANDed with `search`/
+//! `entity_id` when combined — see [`EmitterListFilter`]'s doc comment.
 //!
 //! ## Phase A5: `PATCH` accepts `match_enabled`/`attributes`
 //!
@@ -171,14 +175,23 @@ where
 }
 
 /// `GET /api/emitters` query params (Phase 1b: search + entity filter +
-/// pagination). All optional; see [`EmitterListFilter`] for search
-/// semantics.
+/// pagination; this phase adds `emitter_type`). All optional; see
+/// [`EmitterListFilter`] for search/`emitter_type` semantics.
 #[derive(Debug, Deserialize)]
 struct ListEmittersQuery {
     #[serde(default)]
     search: Option<String>,
     #[serde(default)]
     entity_id: Option<Uuid>,
+    /// Exact-match filter on the `emitter_type` column (e.g.
+    /// `"wifi_access_point"`) — the Emitters page's Type-filter dropdown.
+    /// Not validated against `fluxfang_core::is_known_emitter_type`: an
+    /// unrecognized value simply matches nothing, same as any other filter
+    /// value that happens not to exist in the data (unlike `POST
+    /// /api/emitters`'s `emitter_type`, which is rejected up front because
+    /// it's about to be persisted).
+    #[serde(default)]
+    emitter_type: Option<String>,
     #[serde(default)]
     limit: Option<i64>,
     #[serde(default)]
@@ -201,6 +214,7 @@ async fn list_emitters(
     let filter = EmitterListFilter {
         search: q.search,
         entity_id: q.entity_id,
+        emitter_type: q.emitter_type,
         limit: q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT),
         offset: q.offset.unwrap_or(0).max(0),
     };

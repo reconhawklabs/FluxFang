@@ -861,6 +861,37 @@ async fn list_emitters_supports_search_entity_id_and_pagination() {
     assert_eq!(body["items"].as_array().unwrap().len(), 1, "body: {body}");
 }
 
+/// `GET /api/emitters?emitter_type=wifi_client` returns only emitters
+/// classified as `wifi_client`, excluding a `wifi_access_point` one and an
+/// unclassified one — the Emitters page's Type-filter dropdown.
+#[tokio::test]
+async fn list_emitters_supports_emitter_type_filter() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    EmitterRepoInsertHelper::insert_classified(
+        &pool,
+        "Some Client",
+        "wifi_client",
+        json!({"src_mac": "aa:bb:cc:dd:ee:ff"}),
+    )
+    .await;
+    EmitterRepoInsertHelper::insert_classified(
+        &pool,
+        "Some AP",
+        "wifi_access_point",
+        json!({"bssid": "11:22:33:44:55:66"}),
+    )
+    .await;
+    EmitterRepoInsertHelper::insert_unassigned(&pool, "Unclassified").await;
+
+    let resp = get_with_cookie(&app, "/api/emitters?emitter_type=wifi_client", &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["total"], 1, "body: {body}");
+    assert_eq!(body["items"][0]["name"], "Some Client", "body: {body}");
+}
+
 // ---------------------------------------------------------------------
 // Phase 1c: POST /api/emitters/bulk-delete and POST /api/emitters/clear.
 // ---------------------------------------------------------------------
