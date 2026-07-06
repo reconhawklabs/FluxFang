@@ -17,7 +17,8 @@ use fluxfang_db::{DataSourceRepo, EmissionRepo, SessionRepo};
 
 mod common;
 use common::{
-    assert_status, body_json, get, get_with_cookie, session_cookie, test_app_with_factory,
+    assert_status, body_json, get, get_with_cookie, post_json, post_json_with_cookie,
+    post_with_cookie, session_cookie, test_app_with_factory,
 };
 
 /// Log in against a fresh app and return its session cookie, running setup
@@ -269,4 +270,129 @@ async fn limit_above_max_is_clamped_not_rejected() {
 
     let resp = get_with_cookie(&app, "/api/emissions?limit=999999", &cookie).await;
     assert_status(&resp, StatusCode::OK);
+}
+
+// ---------------------------------------------------------------------
+// Phase 1c: POST /api/emissions/bulk-delete and POST /api/emissions/clear.
+// ---------------------------------------------------------------------
+
+/// `POST /api/emissions/bulk-delete {ids:[a,b]}` deletes exactly those two
+/// rows, leaves the third alone, and reports `{deleted: 2}` — confirmed via
+/// a subsequent `GET` no longer listing the deleted ids.
+#[tokio::test]
+async fn bulk_delete_removes_only_listed_ids_and_reports_count() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+    let ds = seed_data_source(&pool).await;
+    let session = seed_session(&pool).await;
+    let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+
+    let a = insert_wifi(&pool, ds, session, "aa:aa:aa:aa:aa:aa", "A", 1, base).await;
+    let b = insert_wifi(
+        &pool,
+        ds,
+        session,
+        "bb:bb:bb:bb:bb:bb",
+        "B",
+        1,
+        base + chrono::Duration::seconds(1),
+    )
+    .await;
+    insert_wifi(
+        &pool,
+        ds,
+        session,
+        "cc:cc:cc:cc:cc:cc",
+        "C",
+        1,
+        base + chrono::Duration::seconds(2),
+    )
+    .await;
+
+    let body = json!({"ids": [a, b]}).to_string();
+    let resp = post_json_with_cookie(&app, "/api/emissions/bulk-delete", &body, &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let resp_body = body_json(resp).await;
+    assert_eq!(resp_body["deleted"], 2, "body: {resp_body}");
+
+    let list_resp = get_with_cookie(&app, "/api/emissions", &cookie).await;
+    let list = body_json(list_resp).await;
+    assert_eq!(list["total"], 1, "body: {list}");
+    let remaining_ids: Vec<String> = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap().to_string())
+        .collect();
+    assert!(!remaining_ids.contains(&a.to_string()));
+    assert!(!remaining_ids.contains(&b.to_string()));
+}
+
+/// An empty `ids` list deletes nothing and is not an error.
+#[tokio::test]
+async fn bulk_delete_with_empty_ids_deletes_nothing() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+    let ds = seed_data_source(&pool).await;
+    let session = seed_session(&pool).await;
+    let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+    insert_wifi(&pool, ds, session, "aa:aa:aa:aa:aa:aa", "A", 1, base).await;
+
+    let body = json!({"ids": []}).to_string();
+    let resp = post_json_with_cookie(&app, "/api/emissions/bulk-delete", &body, &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let resp_body = body_json(resp).await;
+    assert_eq!(resp_body["deleted"], 0, "body: {resp_body}");
+
+    let list_resp = get_with_cookie(&app, "/api/emissions", &cookie).await;
+    let list = body_json(list_resp).await;
+    assert_eq!(list["total"], 1, "body: {list}");
+}
+
+/// `POST /api/emissions/clear` deletes every emission and reports the total
+/// count, confirmed via a subsequent `GET` showing an empty list.
+#[tokio::test]
+async fn clear_deletes_all_emissions() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+    let ds = seed_data_source(&pool).await;
+    let session = seed_session(&pool).await;
+    let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+
+    insert_wifi(&pool, ds, session, "aa:aa:aa:aa:aa:aa", "A", 1, base).await;
+    insert_wifi(
+        &pool,
+        ds,
+        session,
+        "bb:bb:bb:bb:bb:bb",
+        "B",
+        1,
+        base + chrono::Duration::seconds(1),
+    )
+    .await;
+
+    let resp = post_with_cookie(&app, "/api/emissions/clear", &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let resp_body = body_json(resp).await;
+    assert_eq!(resp_body["deleted"], 2, "body: {resp_body}");
+
+    let list_resp = get_with_cookie(&app, "/api/emissions", &cookie).await;
+    let list = body_json(list_resp).await;
+    assert_eq!(list["total"], 0, "body: {list}");
+    assert_eq!(list["items"].as_array().unwrap().len(), 0, "body: {list}");
+}
+
+/// Both bulk-delete and clear are behind auth.
+#[tokio::test]
+async fn bulk_delete_and_clear_require_auth() {
+    let (app, _pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+
+    assert_status(
+        &post_json(&app, "/api/emissions/bulk-delete", r#"{"ids":[]}"#).await,
+        StatusCode::UNAUTHORIZED,
+    );
+    assert_status(
+        &post_json(&app, "/api/emissions/clear", "").await,
+        StatusCode::UNAUTHORIZED,
+    );
 }

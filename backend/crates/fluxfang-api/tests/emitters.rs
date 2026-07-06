@@ -19,7 +19,7 @@ use fluxfang_db::{DataSourceRepo, EmissionRepo, EntityRepo, SessionRepo};
 mod common;
 use common::{
     assert_status, body_json, delete_with_cookie, get, get_with_cookie, patch_json_with_cookie,
-    post_json, post_json_with_cookie, session_cookie, test_app_with_factory,
+    post_json, post_json_with_cookie, post_with_cookie, session_cookie, test_app_with_factory,
 };
 
 /// Log in against a fresh app and return its session cookie, running setup
@@ -859,4 +859,83 @@ async fn list_emitters_supports_search_entity_id_and_pagination() {
     let body = body_json(resp).await;
     assert_eq!(body["total"], 3, "body: {body}");
     assert_eq!(body["items"].as_array().unwrap().len(), 1, "body: {body}");
+}
+
+// ---------------------------------------------------------------------
+// Phase 1c: POST /api/emitters/bulk-delete and POST /api/emitters/clear.
+// ---------------------------------------------------------------------
+
+/// `POST /api/emitters/bulk-delete {ids:[a,b]}` deletes exactly those two
+/// rows, leaves the third alone, and reports `{deleted: 2}`.
+#[tokio::test]
+async fn bulk_delete_removes_only_listed_ids_and_reports_count() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    let a = EmitterRepoInsertHelper::insert_unassigned(&pool, "A").await;
+    let b = EmitterRepoInsertHelper::insert_unassigned(&pool, "B").await;
+    EmitterRepoInsertHelper::insert_unassigned(&pool, "Keep").await;
+
+    let body = json!({"ids": [a, b]}).to_string();
+    let resp = post_json_with_cookie(&app, "/api/emitters/bulk-delete", &body, &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let resp_body = body_json(resp).await;
+    assert_eq!(resp_body["deleted"], 2, "body: {resp_body}");
+
+    let list_resp = get_with_cookie(&app, "/api/emitters", &cookie).await;
+    let list = body_json(list_resp).await;
+    assert_eq!(list["total"], 1, "body: {list}");
+    assert_eq!(list["items"][0]["name"], "Keep", "body: {list}");
+}
+
+/// An empty `ids` list deletes nothing and is not an error.
+#[tokio::test]
+async fn bulk_delete_with_empty_ids_deletes_nothing() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+    EmitterRepoInsertHelper::insert_unassigned(&pool, "Survivor").await;
+
+    let body = json!({"ids": []}).to_string();
+    let resp = post_json_with_cookie(&app, "/api/emitters/bulk-delete", &body, &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let resp_body = body_json(resp).await;
+    assert_eq!(resp_body["deleted"], 0, "body: {resp_body}");
+
+    let list_resp = get_with_cookie(&app, "/api/emitters", &cookie).await;
+    let list = body_json(list_resp).await;
+    assert_eq!(list["total"], 1, "body: {list}");
+}
+
+/// `POST /api/emitters/clear` deletes every emitter and reports the total
+/// count.
+#[tokio::test]
+async fn clear_deletes_all_emitters() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+    EmitterRepoInsertHelper::insert_unassigned(&pool, "A").await;
+    EmitterRepoInsertHelper::insert_unassigned(&pool, "B").await;
+
+    let resp = post_with_cookie(&app, "/api/emitters/clear", &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let resp_body = body_json(resp).await;
+    assert_eq!(resp_body["deleted"], 2, "body: {resp_body}");
+
+    let list_resp = get_with_cookie(&app, "/api/emitters", &cookie).await;
+    let list = body_json(list_resp).await;
+    assert_eq!(list["total"], 0, "body: {list}");
+}
+
+/// Both bulk-delete and clear are behind auth.
+#[tokio::test]
+async fn bulk_delete_and_clear_require_auth() {
+    let (app, _pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+
+    assert_status(
+        &post_json(&app, "/api/emitters/bulk-delete", r#"{"ids":[]}"#).await,
+        StatusCode::UNAUTHORIZED,
+    );
+    assert_status(
+        &post_json(&app, "/api/emitters/clear", "").await,
+        StatusCode::UNAUTHORIZED,
+    );
 }

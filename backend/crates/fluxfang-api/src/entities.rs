@@ -55,11 +55,22 @@
 //! case of this module's own (unlike `emitters.rs`'s rule validation) —
 //! malformed request bodies are rejected by axum's `Json` extractor itself
 //! before a handler here ever runs.
+//!
+//! ## Phase 1c: bulk-delete / clear-all
+//!
+//! `POST /api/entities/bulk-delete` (`{ids: [uuid]}`) and `POST
+//! /api/entities/clear` (no body) back the entities list page's
+//! mass-select "Delete selected" and "Clear All" actions, alongside the
+//! existing single-row `DELETE /api/entities/:id`. Both return `200
+//! {deleted: <u64>}` — see `emissions.rs`'s module docs for why `POST`
+//! (not `DELETE`-with-a-body) is used for the two bulk/clear routes. Same
+//! `emitter.entity_id` `ON DELETE SET NULL` cascade as the existing
+//! single-row delete applies to every entity removed this way.
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -84,6 +95,8 @@ const MAX_LIMIT: i64 = 500;
 pub fn protected_routes() -> Router<AppState> {
     Router::new()
         .route("/api/entities", get(list_entities).post(create_entity))
+        .route("/api/entities/bulk-delete", post(bulk_delete_entities))
+        .route("/api/entities/clear", post(clear_entities))
         .route(
             "/api/entities/:id",
             get(get_entity).patch(update_entity).delete(delete_entity),
@@ -262,6 +275,32 @@ async fn delete_entity(
     } else {
         Err(ApiError::NotFound)
     }
+}
+
+/// `POST /api/entities/bulk-delete` request body — see module docs.
+#[derive(Debug, Deserialize)]
+struct BulkDeleteRequest {
+    ids: Vec<Uuid>,
+}
+
+/// Shared response shape for both `bulk-delete` and `clear` — see module
+/// docs.
+#[derive(Debug, Serialize)]
+struct DeletedCountDto {
+    deleted: u64,
+}
+
+async fn bulk_delete_entities(
+    State(state): State<AppState>,
+    Json(req): Json<BulkDeleteRequest>,
+) -> Result<Json<DeletedCountDto>, ApiError> {
+    let deleted = EntityRepo::delete_bulk(&state.pool, &req.ids).await?;
+    Ok(Json(DeletedCountDto { deleted }))
+}
+
+async fn clear_entities(State(state): State<AppState>) -> Result<Json<DeletedCountDto>, ApiError> {
+    let deleted = EntityRepo::delete_all(&state.pool).await?;
+    Ok(Json(DeletedCountDto { deleted }))
 }
 
 /// Small internal error type, same convention as `emitters::ApiError`/

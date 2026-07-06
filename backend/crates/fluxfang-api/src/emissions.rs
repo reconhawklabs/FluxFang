@@ -3,6 +3,24 @@
 //! `lib.rs::app`'s protected router group, behind `require_auth`, same as
 //! every other non-setup/login route.
 //!
+//! ## Phase 1c: bulk-delete / clear-all
+//!
+//! `POST /api/emissions/bulk-delete` (`{ids: [uuid]}`) and `POST
+//! /api/emissions/clear` (no body) back the emissions list page's
+//! mass-select "Delete selected" and "Clear All" actions. Both return `200
+//! {deleted: <u64>}`, never an error for an empty/all-unknown `ids` list —
+//! see `EmissionRepo::delete_bulk`'s doc comment.
+//!
+//! **`POST`, not `DELETE`, and why**: a `DELETE` request with a JSON body is
+//! technically legal HTTP, but some proxies/load balancers strip bodies
+//! from `DELETE` requests (the semantics of a body on `DELETE` are
+//! historically underspecified), which would silently turn "delete these
+//! N ids" into "delete nothing" in front of such a proxy. `POST` to a
+//! dedicated, distinctly-named path sidesteps that risk entirely and is
+//! unambiguous about carrying a body. Both routes are static path segments
+//! (`/bulk-delete`, `/clear`), so they don't collide with any future
+//! `/api/emissions/:id`-shaped route.
+//!
 //! ## Phase A5: `emitter_type`/`emitter_category`
 //!
 //! Two more recognized keys, both plain scalar strings (no special parse
@@ -90,10 +108,10 @@
 use axum::extract::{RawQuery, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use fluxfang_core::rule::{Condition, MatchMode, Op};
@@ -114,7 +132,10 @@ const MAX_CONDITIONS: usize = 20;
 const MAX_IN_ELEMENTS: usize = 1000;
 
 pub fn protected_routes() -> Router<AppState> {
-    Router::new().route("/api/emissions", get(list_emissions))
+    Router::new()
+        .route("/api/emissions", get(list_emissions))
+        .route("/api/emissions/bulk-delete", post(bulk_delete_emissions))
+        .route("/api/emissions/clear", post(clear_emissions))
 }
 
 #[derive(Debug, Serialize)]
@@ -133,6 +154,32 @@ async fn list_emissions(
         items: rows.iter().map(EmissionDto::from).collect(),
         total,
     }))
+}
+
+/// `POST /api/emissions/bulk-delete` request body — see module docs.
+#[derive(Debug, Deserialize)]
+struct BulkDeleteRequest {
+    ids: Vec<Uuid>,
+}
+
+/// Shared response shape for both `bulk-delete` and `clear` — see module
+/// docs.
+#[derive(Debug, Serialize)]
+struct DeletedCountDto {
+    deleted: u64,
+}
+
+async fn bulk_delete_emissions(
+    State(state): State<AppState>,
+    Json(req): Json<BulkDeleteRequest>,
+) -> Result<Json<DeletedCountDto>, ApiError> {
+    let deleted = EmissionRepo::delete_bulk(&state.pool, &req.ids).await?;
+    Ok(Json(DeletedCountDto { deleted }))
+}
+
+async fn clear_emissions(State(state): State<AppState>) -> Result<Json<DeletedCountDto>, ApiError> {
+    let deleted = EmissionRepo::delete_all(&state.pool).await?;
+    Ok(Json(DeletedCountDto { deleted }))
 }
 
 /// Build an [`EmissionFilter`] from a raw (undecoded) query string. See the
@@ -334,6 +381,16 @@ impl From<EmissionQueryError> for ApiError {
                 ApiError::Internal
             }
         }
+    }
+}
+
+/// For `EmissionRepo::delete_bulk`/`delete_all` (Phase 1c), which return a
+/// plain `sqlx::Error` rather than `EmissionQueryError` — always a `500`,
+/// same as `EmissionQueryError::Sql` above.
+impl From<sqlx::Error> for ApiError {
+    fn from(err: sqlx::Error) -> Self {
+        eprintln!("fluxfang-api: db error in emissions route: {err}");
+        ApiError::Internal
     }
 }
 

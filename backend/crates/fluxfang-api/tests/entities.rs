@@ -18,7 +18,7 @@ use fluxfang_db::{DataSourceRepo, EmissionRepo, EmitterRepo, EntityRepo, Session
 mod common;
 use common::{
     assert_status, body_json, delete_with_cookie, get, get_with_cookie, patch_json_with_cookie,
-    post_json, post_json_with_cookie, session_cookie, test_app_with_factory,
+    post_json, post_json_with_cookie, post_with_cookie, session_cookie, test_app_with_factory,
 };
 
 /// Log in against a fresh app and return its session cookie, running setup
@@ -397,4 +397,133 @@ async fn list_entities_supports_search_and_pagination() {
     let body = body_json(resp).await;
     assert_eq!(body["total"], 3, "body: {body}");
     assert_eq!(body["items"].as_array().unwrap().len(), 1, "body: {body}");
+}
+
+// ---------------------------------------------------------------------
+// Phase 1c: POST /api/entities/bulk-delete and POST /api/entities/clear.
+// ---------------------------------------------------------------------
+
+/// `POST /api/entities/bulk-delete {ids:[a,b]}` deletes exactly those two
+/// rows, leaves the third alone, and reports `{deleted: 2}`.
+#[tokio::test]
+async fn bulk_delete_removes_only_listed_ids_and_reports_count() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    let a = EntityRepo::insert(
+        &pool,
+        NewEntity {
+            name: "A".to_string(),
+            notes: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    let b = EntityRepo::insert(
+        &pool,
+        NewEntity {
+            name: "B".to_string(),
+            notes: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    EntityRepo::insert(
+        &pool,
+        NewEntity {
+            name: "Keep".to_string(),
+            notes: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let body = json!({"ids": [a, b]}).to_string();
+    let resp = post_json_with_cookie(&app, "/api/entities/bulk-delete", &body, &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let resp_body = body_json(resp).await;
+    assert_eq!(resp_body["deleted"], 2, "body: {resp_body}");
+
+    let list_resp = get_with_cookie(&app, "/api/entities", &cookie).await;
+    let list = body_json(list_resp).await;
+    assert_eq!(list["total"], 1, "body: {list}");
+    assert_eq!(list["items"][0]["name"], "Keep", "body: {list}");
+}
+
+/// An empty `ids` list deletes nothing and is not an error.
+#[tokio::test]
+async fn bulk_delete_with_empty_ids_deletes_nothing() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+    EntityRepo::insert(
+        &pool,
+        NewEntity {
+            name: "Survivor".to_string(),
+            notes: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let body = json!({"ids": []}).to_string();
+    let resp = post_json_with_cookie(&app, "/api/entities/bulk-delete", &body, &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let resp_body = body_json(resp).await;
+    assert_eq!(resp_body["deleted"], 0, "body: {resp_body}");
+
+    let list_resp = get_with_cookie(&app, "/api/entities", &cookie).await;
+    let list = body_json(list_resp).await;
+    assert_eq!(list["total"], 1, "body: {list}");
+}
+
+/// `POST /api/entities/clear` deletes every entity and reports the total
+/// count.
+#[tokio::test]
+async fn clear_deletes_all_entities() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+    EntityRepo::insert(
+        &pool,
+        NewEntity {
+            name: "A".to_string(),
+            notes: None,
+        },
+    )
+    .await
+    .unwrap();
+    EntityRepo::insert(
+        &pool,
+        NewEntity {
+            name: "B".to_string(),
+            notes: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let resp = post_with_cookie(&app, "/api/entities/clear", &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let resp_body = body_json(resp).await;
+    assert_eq!(resp_body["deleted"], 2, "body: {resp_body}");
+
+    let list_resp = get_with_cookie(&app, "/api/entities", &cookie).await;
+    let list = body_json(list_resp).await;
+    assert_eq!(list["total"], 0, "body: {list}");
+}
+
+/// Both bulk-delete and clear are behind auth.
+#[tokio::test]
+async fn bulk_delete_and_clear_require_auth() {
+    let (app, _pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+
+    assert_status(
+        &post_json(&app, "/api/entities/bulk-delete", r#"{"ids":[]}"#).await,
+        StatusCode::UNAUTHORIZED,
+    );
+    assert_status(
+        &post_json(&app, "/api/entities/clear", "").await,
+        StatusCode::UNAUTHORIZED,
+    );
 }

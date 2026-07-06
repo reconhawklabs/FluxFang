@@ -529,3 +529,88 @@ async fn query_filters_by_emitter_type_exact_match_excludes_other_subtypes_and_u
     assert_eq!(total, 1, "rows: {rows:?}");
     assert_eq!(rows[0].id, ap_emission.id);
 }
+
+// ---------------------------------------------------------------------
+// Phase 1c: EmissionRepo::{delete_bulk, delete_all}.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn delete_bulk_removes_only_the_listed_ids() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+
+    let a = insert_wifi(&pool, ds, session, "aa:aa:aa:aa:aa:aa", 1).await;
+    let b = insert_wifi(&pool, ds, session, "bb:bb:bb:bb:bb:bb", 1).await;
+    let keep = insert_wifi(&pool, ds, session, "cc:cc:cc:cc:cc:cc", 1).await;
+
+    let deleted = EmissionRepo::delete_bulk(&pool, &[a.id, b.id])
+        .await
+        .unwrap();
+    assert_eq!(deleted, 2);
+
+    assert!(EmissionRepo::get(&pool, a.id).await.unwrap().is_none());
+    assert!(EmissionRepo::get(&pool, b.id).await.unwrap().is_none());
+    assert!(
+        EmissionRepo::get(&pool, keep.id).await.unwrap().is_some(),
+        "the emission not in the ids list must survive"
+    );
+}
+
+#[tokio::test]
+async fn delete_bulk_with_empty_ids_deletes_nothing() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+    let survivor = insert_wifi(&pool, ds, session, "aa:aa:aa:aa:aa:aa", 1).await;
+
+    let deleted = EmissionRepo::delete_bulk(&pool, &[]).await.unwrap();
+    assert_eq!(deleted, 0);
+    assert!(
+        EmissionRepo::get(&pool, survivor.id)
+            .await
+            .unwrap()
+            .is_some(),
+        "an empty ids list must not delete anything"
+    );
+}
+
+#[tokio::test]
+async fn delete_bulk_ignores_unknown_ids() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+    let real = insert_wifi(&pool, ds, session, "aa:aa:aa:aa:aa:aa", 1).await;
+    let unknown = Uuid::new_v4();
+
+    let deleted = EmissionRepo::delete_bulk(&pool, &[real.id, unknown])
+        .await
+        .unwrap();
+    assert_eq!(deleted, 1, "only the real id should be counted as deleted");
+}
+
+#[tokio::test]
+async fn delete_all_empties_the_table() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+    insert_wifi(&pool, ds, session, "aa:aa:aa:aa:aa:aa", 1).await;
+    insert_wifi(&pool, ds, session, "bb:bb:bb:bb:bb:bb", 1).await;
+    insert_wifi(&pool, ds, session, "cc:cc:cc:cc:cc:cc", 1).await;
+
+    let deleted = EmissionRepo::delete_all(&pool).await.unwrap();
+    assert_eq!(deleted, 3);
+
+    let (rows, total) = EmissionRepo::query(&pool, EmissionFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(total, 0);
+    assert!(rows.is_empty());
+}
+
+#[tokio::test]
+async fn delete_all_on_empty_table_returns_zero() {
+    let pool = fresh_pool().await;
+    let deleted = EmissionRepo::delete_all(&pool).await.unwrap();
+    assert_eq!(deleted, 0);
+}

@@ -72,6 +72,17 @@
 //! rejections (malformed body, unknown emitter/entity id referenced by a
 //! request, an invalid rule) are `400`; a missing path-`:id` resource is
 //! `404`; any other `sqlx::Error` is `500`.
+//!
+//! ## Phase 1c: bulk-delete / clear-all
+//!
+//! `POST /api/emitters/bulk-delete` (`{ids: [uuid]}`) and `POST
+//! /api/emitters/clear` (no body) back the emitters list page's
+//! mass-select "Delete selected" and "Clear All" actions, alongside the
+//! existing single-row `DELETE /api/emitters/:id`. Both return `200
+//! {deleted: <u64>}` — see `emissions.rs`'s module docs for why `POST`
+//! (not `DELETE`-with-a-body) is used for the two bulk/clear routes. Same
+//! `emission.emitter_id` `ON DELETE SET NULL` cascade as the existing
+//! single-row delete applies to every emitter removed this way.
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -103,6 +114,8 @@ pub fn protected_routes() -> Router<AppState> {
         .route("/api/emitters", get(list_emitters).post(create_emitter))
         .route("/api/emitters/preview", get(preview_emitters))
         .route("/api/emitters/with-entity", post(create_with_entity))
+        .route("/api/emitters/bulk-delete", post(bulk_delete_emitters))
+        .route("/api/emitters/clear", post(clear_emitters))
         .route(
             "/api/emitters/:id",
             get(get_emitter)
@@ -413,6 +426,32 @@ async fn delete_emitter(
     } else {
         Err(ApiError::NotFound)
     }
+}
+
+/// `POST /api/emitters/bulk-delete` request body — see module docs.
+#[derive(Debug, Deserialize)]
+struct BulkDeleteRequest {
+    ids: Vec<Uuid>,
+}
+
+/// Shared response shape for both `bulk-delete` and `clear` — see module
+/// docs.
+#[derive(Debug, Serialize)]
+struct DeletedCountDto {
+    deleted: u64,
+}
+
+async fn bulk_delete_emitters(
+    State(state): State<AppState>,
+    Json(req): Json<BulkDeleteRequest>,
+) -> Result<Json<DeletedCountDto>, ApiError> {
+    let deleted = EmitterRepo::delete_bulk(&state.pool, &req.ids).await?;
+    Ok(Json(DeletedCountDto { deleted }))
+}
+
+async fn clear_emitters(State(state): State<AppState>) -> Result<Json<DeletedCountDto>, ApiError> {
+    let deleted = EmitterRepo::delete_all(&state.pool).await?;
+    Ok(Json(DeletedCountDto { deleted }))
 }
 
 #[derive(Debug, Deserialize)]

@@ -299,3 +299,118 @@ async fn query_paginates_with_correct_total_ignoring_limit_offset() {
     assert_eq!(page2.len(), 1);
     assert_eq!(page2[0].name, "E");
 }
+
+// ---------------------------------------------------------------------
+// Phase 1c: EntityRepo::{delete_bulk, delete_all} + the emitter.entity_id
+// SET NULL cascade.
+// ---------------------------------------------------------------------
+
+async fn seed_entity(pool: &sqlx::PgPool, name: &str) -> Uuid {
+    EntityRepo::insert(
+        pool,
+        NewEntity {
+            name: name.to_string(),
+            notes: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id
+}
+
+#[tokio::test]
+async fn delete_bulk_removes_only_the_listed_ids() {
+    let pool = fresh_pool().await;
+    let a = seed_entity(&pool, "A").await;
+    let b = seed_entity(&pool, "B").await;
+    let keep = seed_entity(&pool, "Keep").await;
+
+    let deleted = EntityRepo::delete_bulk(&pool, &[a, b]).await.unwrap();
+    assert_eq!(deleted, 2);
+
+    assert!(EntityRepo::get(&pool, a).await.unwrap().is_none());
+    assert!(EntityRepo::get(&pool, b).await.unwrap().is_none());
+    assert!(
+        EntityRepo::get(&pool, keep).await.unwrap().is_some(),
+        "the entity not in the ids list must survive"
+    );
+}
+
+#[tokio::test]
+async fn delete_bulk_with_empty_ids_deletes_nothing() {
+    let pool = fresh_pool().await;
+    let survivor = seed_entity(&pool, "Survivor").await;
+
+    let deleted = EntityRepo::delete_bulk(&pool, &[]).await.unwrap();
+    assert_eq!(deleted, 0);
+    assert!(EntityRepo::get(&pool, survivor).await.unwrap().is_some());
+}
+
+/// Deleting an entity must SET NULL its emitters' `entity_id`, not remove
+/// them — same guarantee `EntityRepo::delete`'s doc comment already
+/// documents for the single-row path.
+#[tokio::test]
+async fn delete_bulk_nulls_entity_id_on_the_entitys_emitters() {
+    let pool = fresh_pool().await;
+    let entity = seed_entity(&pool, "Group").await;
+    let emitter = EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            name: "AP".to_string(),
+            type_: None,
+            entity_id: Some(entity),
+            match_criteria: serde_json::json!({}),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let deleted = EntityRepo::delete_bulk(&pool, &[entity]).await.unwrap();
+    assert_eq!(deleted, 1);
+
+    let reloaded = EmitterRepo::get(&pool, emitter.id).await.unwrap().unwrap();
+    assert_eq!(
+        reloaded.entity_id, None,
+        "emitter must survive its entity's deletion, just detached"
+    );
+}
+
+#[tokio::test]
+async fn delete_all_empties_the_table() {
+    let pool = fresh_pool().await;
+    seed_entity(&pool, "A").await;
+    seed_entity(&pool, "B").await;
+    seed_entity(&pool, "C").await;
+
+    let deleted = EntityRepo::delete_all(&pool).await.unwrap();
+    assert_eq!(deleted, 3);
+
+    let all = EntityRepo::list(&pool).await.unwrap();
+    assert!(all.is_empty());
+}
+
+/// `delete_all` also SET NULLs every emitter's `entity_id`, same as
+/// deleting one entity at a time would.
+#[tokio::test]
+async fn delete_all_nulls_entity_id_on_survivors_emitters() {
+    let pool = fresh_pool().await;
+    let entity = seed_entity(&pool, "Group").await;
+    let emitter = EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            name: "AP".to_string(),
+            type_: None,
+            entity_id: Some(entity),
+            match_criteria: serde_json::json!({}),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    EntityRepo::delete_all(&pool).await.unwrap();
+
+    let reloaded = EmitterRepo::get(&pool, emitter.id).await.unwrap().unwrap();
+    assert_eq!(reloaded.entity_id, None);
+}

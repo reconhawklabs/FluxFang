@@ -464,6 +464,36 @@ impl EmitterRepo {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Delete every `emitter` row whose `id` is in `ids`, returning how many
+    /// rows were actually removed. Phase 1c's bulk-delete for the emitters
+    /// list page's mass-select action. Same `id = ANY($1)`/empty-`ids`-
+    /// short-circuit shape as `repo::emission::EmissionRepo::delete_bulk` —
+    /// see its doc comment for why this is injection-safe and why an empty
+    /// `ids` returns `Ok(0)` without a round trip. `emission.emitter_id`'s
+    /// `ON DELETE SET NULL` applies per deleted emitter, same as
+    /// [`Self::delete`]: every emission previously assigned to any of these
+    /// emitters survives, just unassigned again.
+    pub async fn delete_bulk(pool: &PgPool, ids: &[Uuid]) -> Result<u64, sqlx::Error> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let result = sqlx::query("DELETE FROM emitter WHERE id = ANY($1)")
+            .bind(ids)
+            .execute(pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Delete every `emitter` row, returning how many were removed. Phase
+    /// 1c's "Clear All Emitters" action — an unconditional `DELETE`, no
+    /// `WHERE` clause, no confirmation of its own (the caller/UI gates this
+    /// with a confirm dialog). Every emission previously assigned to any
+    /// emitter survives, just unassigned (`ON DELETE SET NULL`).
+    pub async fn delete_all(pool: &PgPool) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM emitter").execute(pool).await?;
+        Ok(result.rows_affected())
+    }
+
     /// Persist a new `match_criteria` rule for `emitter_id`.
     pub async fn update_rule(
         pool: &PgPool,

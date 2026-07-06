@@ -835,3 +835,111 @@ async fn query_paginates_with_correct_total_ignoring_limit_offset() {
     assert_eq!(page3.len(), 1);
     assert_eq!(page3[0].name, "E");
 }
+
+// ---------------------------------------------------------------------
+// Phase 1c: EmitterRepo::{delete_bulk, delete_all} + the emission.emitter_id
+// SET NULL cascade.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn delete_bulk_removes_only_the_listed_ids() {
+    let pool = fresh_pool().await;
+    let a = EmitterRepo::insert(&pool, new_emitter("A")).await.unwrap();
+    let b = EmitterRepo::insert(&pool, new_emitter("B")).await.unwrap();
+    let keep = EmitterRepo::insert(&pool, new_emitter("Keep"))
+        .await
+        .unwrap();
+
+    let deleted = EmitterRepo::delete_bulk(&pool, &[a.id, b.id])
+        .await
+        .unwrap();
+    assert_eq!(deleted, 2);
+
+    assert!(EmitterRepo::get(&pool, a.id).await.unwrap().is_none());
+    assert!(EmitterRepo::get(&pool, b.id).await.unwrap().is_none());
+    assert!(
+        EmitterRepo::get(&pool, keep.id).await.unwrap().is_some(),
+        "the emitter not in the ids list must survive"
+    );
+}
+
+#[tokio::test]
+async fn delete_bulk_with_empty_ids_deletes_nothing() {
+    let pool = fresh_pool().await;
+    let survivor = EmitterRepo::insert(&pool, new_emitter("Survivor"))
+        .await
+        .unwrap();
+
+    let deleted = EmitterRepo::delete_bulk(&pool, &[]).await.unwrap();
+    assert_eq!(deleted, 0);
+    assert!(EmitterRepo::get(&pool, survivor.id)
+        .await
+        .unwrap()
+        .is_some());
+}
+
+/// Deleting an emitter (whether via bulk-delete or clear-all) must SET NULL
+/// its emissions' `emitter_id`, not remove them — the emission survives,
+/// just unassigned again, same guarantee `EmitterRepo::delete`'s doc
+/// comment already documents for the single-row path.
+#[tokio::test]
+async fn delete_bulk_nulls_emitter_id_on_the_emitters_emissions() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+    let emitter = EmitterRepo::insert(&pool, new_emitter("AP")).await.unwrap();
+    let emission_id = insert_unassigned_wifi(&pool, ds, session, "aa:bb:cc:dd:ee:ff").await;
+    EmissionRepo::set_emitter(&pool, emission_id, emitter.id)
+        .await
+        .unwrap();
+
+    let deleted = EmitterRepo::delete_bulk(&pool, &[emitter.id])
+        .await
+        .unwrap();
+    assert_eq!(deleted, 1);
+
+    let emission = EmissionRepo::get(&pool, emission_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        emission.emitter_id, None,
+        "emission must survive its emitter's deletion, just unassigned"
+    );
+}
+
+#[tokio::test]
+async fn delete_all_empties_the_table() {
+    let pool = fresh_pool().await;
+    EmitterRepo::insert(&pool, new_emitter("A")).await.unwrap();
+    EmitterRepo::insert(&pool, new_emitter("B")).await.unwrap();
+    EmitterRepo::insert(&pool, new_emitter("C")).await.unwrap();
+
+    let deleted = EmitterRepo::delete_all(&pool).await.unwrap();
+    assert_eq!(deleted, 3);
+
+    let all = EmitterRepo::list(&pool).await.unwrap();
+    assert!(all.is_empty());
+}
+
+/// `delete_all` also SET NULLs every emission's `emitter_id`, same as
+/// deleting one emitter at a time would.
+#[tokio::test]
+async fn delete_all_nulls_emitter_id_on_survivors_emissions() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+    let emitter = EmitterRepo::insert(&pool, new_emitter("AP")).await.unwrap();
+    let emission_id = insert_unassigned_wifi(&pool, ds, session, "aa:bb:cc:dd:ee:ff").await;
+    EmissionRepo::set_emitter(&pool, emission_id, emitter.id)
+        .await
+        .unwrap();
+
+    EmitterRepo::delete_all(&pool).await.unwrap();
+
+    let emission = EmissionRepo::get(&pool, emission_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(emission.emitter_id, None);
+}
