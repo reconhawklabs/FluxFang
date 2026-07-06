@@ -53,6 +53,33 @@ async fn insert_unassigned_wifi(pool: &PgPool, ds: Uuid, session: Uuid, bssid: &
     e.id
 }
 
+/// Like [`insert_unassigned_wifi`], but the emission is inserted already
+/// assigned to `emitter_id` — simulates an emission that auto-create already
+/// claimed for some other (e.g. auto-created) emitter, which the new
+/// "reassign ALL matching" semantics must still pick up.
+async fn insert_wifi_assigned_to(
+    pool: &PgPool,
+    ds: Uuid,
+    session: Uuid,
+    bssid: &str,
+    emitter_id: Uuid,
+) -> Uuid {
+    let e = EmissionRepo::insert(
+        pool,
+        NewEmission {
+            emitter_id: Some(emitter_id),
+            ..NewEmission::wifi(
+                ds,
+                session,
+                serde_json::json!({"bssid": bssid, "channel": 6}),
+            )
+        },
+    )
+    .await
+    .unwrap();
+    e.id
+}
+
 fn bssid_rule(bssid: &str) -> Rule {
     Rule {
         match_mode: MatchMode::All,
@@ -143,21 +170,30 @@ async fn update_rule_persists_new_match_criteria() {
 }
 
 #[tokio::test]
-async fn attach_emissions_matching_assigns_only_matching_unassigned_wifi_emissions() {
+async fn attach_emissions_matching_assigns_all_matching_wifi_emissions_regardless_of_assignment() {
     let pool = fresh_pool().await;
     let ds = seed_wifi_source(&pool).await;
     let session = seed_session(&pool).await;
     let emitter = EmitterRepo::insert(&pool, new_emitter("AP")).await.unwrap();
+    let other = EmitterRepo::insert(&pool, new_emitter("Other AP"))
+        .await
+        .unwrap();
 
     let matching_a = insert_unassigned_wifi(&pool, ds, session, "aa:bb:cc:dd:ee:ff").await;
-    let matching_b = insert_unassigned_wifi(&pool, ds, session, "aa:bb:cc:dd:ee:ff").await;
+    // Already assigned to a DIFFERENT emitter (e.g. an auto-created one) —
+    // the new semantics must reassign it, not skip it.
+    let matching_b =
+        insert_wifi_assigned_to(&pool, ds, session, "aa:bb:cc:dd:ee:ff", other.id).await;
     let non_matching = insert_unassigned_wifi(&pool, ds, session, "00:00:00:00:00:00").await;
 
     let rule = bssid_rule("aa:bb:cc:dd:ee:ff");
     let affected = EmitterRepo::attach_emissions_matching(&pool, emitter.id, &rule)
         .await
         .unwrap();
-    assert_eq!(affected, 2);
+    assert_eq!(
+        affected, 2,
+        "both matching emissions must be (re)assigned, regardless of prior assignment"
+    );
 
     let a = EmissionRepo::get(&pool, matching_a).await.unwrap().unwrap();
     let b = EmissionRepo::get(&pool, matching_b).await.unwrap().unwrap();
@@ -166,7 +202,11 @@ async fn attach_emissions_matching_assigns_only_matching_unassigned_wifi_emissio
         .unwrap()
         .unwrap();
     assert_eq!(a.emitter_id, Some(emitter.id));
-    assert_eq!(b.emitter_id, Some(emitter.id));
+    assert_eq!(
+        b.emitter_id,
+        Some(emitter.id),
+        "an emission already assigned to a different emitter must be reassigned"
+    );
     assert_eq!(
         non.emitter_id, None,
         "non-matching emission must stay unassigned"
@@ -277,24 +317,37 @@ async fn attach_emissions_matching_rejects_invalid_rule_instead_of_silently_skip
 }
 
 #[tokio::test]
-async fn count_matching_counts_without_assigning() {
+async fn count_matching_counts_all_matching_regardless_of_assignment_without_assigning() {
     let pool = fresh_pool().await;
     let ds = seed_wifi_source(&pool).await;
     let session = seed_session(&pool).await;
+    let other = EmitterRepo::insert(&pool, new_emitter("Other AP"))
+        .await
+        .unwrap();
 
     let matching_a = insert_unassigned_wifi(&pool, ds, session, "aa:bb:cc:dd:ee:ff").await;
-    let matching_b = insert_unassigned_wifi(&pool, ds, session, "aa:bb:cc:dd:ee:ff").await;
+    // Already assigned to a different emitter — must still be counted, this
+    // is the exact preview-shows-0 bug the "all matching" semantics fix.
+    let matching_b =
+        insert_wifi_assigned_to(&pool, ds, session, "aa:bb:cc:dd:ee:ff", other.id).await;
     insert_unassigned_wifi(&pool, ds, session, "00:00:00:00:00:00").await;
 
     let rule = bssid_rule("aa:bb:cc:dd:ee:ff");
     let count = EmitterRepo::count_matching(&pool, &rule).await.unwrap();
-    assert_eq!(count, 2);
+    assert_eq!(
+        count, 2,
+        "count must include already-assigned matching emissions"
+    );
 
-    // Confirm nothing was actually assigned.
+    // Confirm nothing was actually assigned/reassigned by count_matching.
     let a = EmissionRepo::get(&pool, matching_a).await.unwrap().unwrap();
     let b = EmissionRepo::get(&pool, matching_b).await.unwrap().unwrap();
     assert_eq!(a.emitter_id, None);
-    assert_eq!(b.emitter_id, None);
+    assert_eq!(
+        b.emitter_id,
+        Some(other.id),
+        "count_matching must not touch existing assignment"
+    );
 }
 
 #[tokio::test]

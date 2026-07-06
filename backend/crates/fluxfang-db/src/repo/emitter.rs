@@ -9,20 +9,34 @@
 //! via [`fluxfang_core::conditions_to_sql_checked`] against the `"wifi"`
 //! catalog (this schema currently only allows `emission.kind = 'wifi'`, see
 //! `repo::emission`'s module docs for the same scoping choice), then apply
-//! that fragment as an `AND`-ed clause on top of `emitter_id IS NULL AND
-//! kind = 'wifi'`:
+//! that fragment as an `AND`-ed clause on top of just `kind = 'wifi'` —
+//! **regardless of the emission's current `emitter_id`**. This is
+//! deliberate, not an oversight: ingest auto-create (Phase A) assigns every
+//! matching emission to an auto-created emitter immediately, so an
+//! `emitter_id IS NULL` predicate here would make the "Matches X" preview
+//! always show 0 and would make a manual "group these into an emitter"
+//! action silently attach nothing. Both methods instead count/claim ALL
+//! matching emissions of that kind, whoever currently holds them:
 //!
 //! - [`EmitterRepo::attach_emissions_matching`] runs that WHERE inside an
-//!   `UPDATE emission SET emitter_id = $1 ...`, returns the number of rows
-//!   it updated, then — in the same transaction — refreshes the emitter's
-//!   `first_seen_at`/`last_seen_at` from `MIN`/`MAX(observed_at)` over *all*
-//!   emissions now assigned to it (not just the ones just attached, so a
-//!   second backfill call widens the window correctly instead of only
-//!   reflecting the latest batch).
+//!   `UPDATE emission SET emitter_id = $1 ...`, **reassigning** every
+//!   matching emission to `emitter_id` even if it was already assigned to a
+//!   different emitter (e.g. an auto-created one), returns the number of
+//!   rows it updated, then — in the same transaction — refreshes the
+//!   emitter's `first_seen_at`/`last_seen_at` from `MIN`/`MAX(observed_at)`
+//!   over *all* emissions now assigned to it (not just the ones just
+//!   attached, so a second backfill call widens the window correctly
+//!   instead of only reflecting the latest batch).
 //! - [`EmitterRepo::count_matching`] runs the identical WHERE as a bare
-//!   `SELECT COUNT(*)`, with no `UPDATE` at all — a preview of how many rows
-//!   `attach_emissions_matching` would affect, for Task 6.4's preview
+//!   `SELECT COUNT(*)`, with no `UPDATE` at all — an accurate preview of how
+//!   many rows `attach_emissions_matching` would affect (including
+//!   already-assigned ones it would reclaim), for Task 6.4's preview
 //!   endpoint.
+//!
+//! (Known limitation, out of scope here: an older auto-created emitter with
+//! an overlapping rule can re-claim FUTURE matching emissions right back
+//! from a manually-grouped emitter unless its `match_enabled` rule is
+//! disabled — see the design doc.)
 //!
 //! Binds are threaded the same way [`crate::repo::emission::EmissionRepo`]
 //! does: the structured `$1` (emitter id, for `attach_emissions_matching`
@@ -375,11 +389,13 @@ impl EmitterRepo {
             .await
     }
 
-    /// Backfill: assign every currently-unassigned `kind = 'wifi'` emission
-    /// matching `rule` to `emitter_id`, then refresh the emitter's
+    /// Backfill: (re)assign every `kind = 'wifi'` emission matching `rule` to
+    /// `emitter_id` — regardless of whether it's currently unassigned or
+    /// already belongs to a different emitter — then refresh the emitter's
     /// `first_seen_at`/`last_seen_at` from all emissions now assigned to it.
-    /// Returns the number of emissions newly assigned. See module docs for
-    /// the SQL/bind approach.
+    /// Returns the number of emissions (re)assigned. See module docs for the
+    /// SQL/bind approach and why this reassigns rather than skipping
+    /// already-assigned rows.
     pub async fn attach_emissions_matching(
         pool: &PgPool,
         emitter_id: Uuid,
@@ -391,10 +407,8 @@ impl EmitterRepo {
         let (frag, binds) =
             conditions_to_sql_checked(&rule.conditions, rule.match_mode, 2, &catalog)?;
 
-        let update_sql = format!(
-            "UPDATE emission SET emitter_id = $1 \
-             WHERE emitter_id IS NULL AND kind = 'wifi' AND {frag}"
-        );
+        let update_sql =
+            format!("UPDATE emission SET emitter_id = $1 WHERE kind = 'wifi' AND {frag}");
 
         let mut tx = pool.begin().await.map_err(EmitterRuleError::Sql)?;
 
@@ -432,17 +446,17 @@ impl EmitterRepo {
         Ok(affected)
     }
 
-    /// Preview how many currently-unassigned `kind = 'wifi'` emissions
-    /// `rule` would match, without assigning anything. Same WHERE as
-    /// [`Self::attach_emissions_matching`], minus the `UPDATE`.
+    /// Preview how many `kind = 'wifi'` emissions `rule` would match —
+    /// including ones already assigned to a different emitter, since
+    /// [`Self::attach_emissions_matching`] would reclaim those too — without
+    /// assigning anything. Same WHERE as `attach_emissions_matching`, minus
+    /// the `UPDATE`.
     pub async fn count_matching(pool: &PgPool, rule: &Rule) -> Result<i64, EmitterRuleError> {
         let catalog = catalog_for("wifi");
         let (frag, binds) =
             conditions_to_sql_checked(&rule.conditions, rule.match_mode, 1, &catalog)?;
 
-        let sql = format!(
-            "SELECT COUNT(*) FROM emission WHERE emitter_id IS NULL AND kind = 'wifi' AND {frag}"
-        );
+        let sql = format!("SELECT COUNT(*) FROM emission WHERE kind = 'wifi' AND {frag}");
         let mut q = sqlx::query_as::<_, (i64,)>(&sql);
         for v in &binds {
             let text = match v.clone() {
