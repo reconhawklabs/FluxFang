@@ -224,11 +224,15 @@ export default function MapView() {
   // from whatever categories are actually present in `GET /api/emitters` —
   // data-driven so a new category (e.g. Bluetooth) needs no code change
   // here, just a new classification-registry entry on the backend.
-  const emittersQuery = useQuery({ queryKey: queryKeys.emitters, queryFn: listEmitters });
+  // Interim `{limit: 500}` cap — `GET /api/emitters` now returns a
+  // paginated `{items, total}` envelope; category derivation just needs
+  // "every category present," so 500 keeps today's coverage without adding
+  // pagination here (a later redesign phase).
+  const emittersQuery = useQuery({ queryKey: queryKeys.emitters, queryFn: () => listEmitters({ limit: 500 }) });
 
   const categories = useMemo(() => {
     const seen = new Set<string>();
-    for (const emitter of emittersQuery.data ?? []) {
+    for (const emitter of emittersQuery.data?.items ?? []) {
       if (emitter.category) seen.add(emitter.category);
     }
     return Array.from(seen).sort();
@@ -254,9 +258,13 @@ export default function MapView() {
     setCategoryVisibility((prev) => ({ ...prev, [category]: !isCategoryVisible(category) }));
   }
 
-  const entitiesQuery = useQuery({ queryKey: queryKeys.entities, queryFn: listEntities });
+  // Interim `{limit: 500}` cap, same rationale as the emitters query above.
+  const entitiesQuery = useQuery({ queryKey: queryKeys.entities, queryFn: () => listEntities({ limit: 500 }) });
 
-  const entityIds = useMemo(() => (entitiesQuery.data ?? []).map((entity) => entity.id), [entitiesQuery.data]);
+  const entityIds = useMemo(
+    () => (entitiesQuery.data?.items ?? []).map((entity) => entity.id),
+    [entitiesQuery.data],
+  );
 
   // One detail fetch per entity (see module doc comment on why this is
   // reasonable rather than YAGNI-violating scope creep onto the backend).

@@ -51,8 +51,14 @@ function payloadText(payload: Record<string, unknown>, key: string): string {
 
 export default function Dashboard() {
   const dataSourcesQuery = useQuery({ queryKey: queryKeys.dataSources, queryFn: listDataSources });
-  const emittersQuery = useQuery({ queryKey: queryKeys.emitters, queryFn: listEmitters });
-  const entitiesQuery = useQuery({ queryKey: queryKeys.entities, queryFn: listEntities });
+  // Interim `{limit: 500}` cap on the *items* side — `GET /api/emitters`
+  // now returns a paginated `{items, total}` envelope. The KPI tile below
+  // uses the authoritative `.total` (cheaper than counting an array and
+  // correct even past the cap); `emitterNameById` still needs the actual
+  // rows to resolve feed emitter names, hence the cap here rather than
+  // dropping the fetch.
+  const emittersQuery = useQuery({ queryKey: queryKeys.emitters, queryFn: () => listEmitters({ limit: 500 }) });
+  const entitiesQuery = useQuery({ queryKey: queryKeys.entities, queryFn: () => listEntities({ limit: 500 }) });
 
   // Small, dedicated fetch for the authoritative unread count — separate
   // cache entry from `Notifications.tsx`'s own paginated/filtered query, but
@@ -81,7 +87,7 @@ export default function Dashboard() {
 
   const emitterNameById = useMemo(() => {
     const map = new Map<string, string>();
-    for (const emitter of emittersQuery.data ?? []) map.set(emitter.id, emitter.name);
+    for (const emitter of emittersQuery.data?.items ?? []) map.set(emitter.id, emitter.name);
     return map;
   }, [emittersQuery.data]);
 
@@ -103,12 +109,12 @@ export default function Dashboard() {
         />
         <StatTile
           label="Emitters"
-          value={emittersQuery.data?.length}
+          value={emittersQuery.data?.total}
           loading={emittersQuery.isLoading}
         />
         <StatTile
           label="Entities"
-          value={entitiesQuery.data?.length}
+          value={entitiesQuery.data?.total}
           loading={entitiesQuery.isLoading}
         />
         <StatTile

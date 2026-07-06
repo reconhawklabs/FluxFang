@@ -114,8 +114,32 @@ export function listEmitterTypes(kind: string): Promise<EmitterType[]> {
   return get<EmitterType[]>(`/api/emitter-types/${encodeURIComponent(kind)}`);
 }
 
-export function listEmitters(): Promise<Emitter[]> {
-  return get<Emitter[]>('/api/emitters');
+/** `GET /api/emitters` query params — mirrors the backend's
+ * `ListEmittersQuery`. All optional; a caller that only wants the full
+ * (interim, pre-pagination) set passes just `{ limit: 500 }`, same
+ * convention as `listNotifications`'s params object. */
+export interface ListEmittersParams {
+  search?: string;
+  entity_id?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /api/emitters`'s response envelope — mirrors the backend's
+ * `EmittersPageDto`. */
+export interface EmittersPage {
+  items: Emitter[];
+  total: number;
+}
+
+export function listEmitters(params: ListEmittersParams = {}): Promise<EmittersPage> {
+  const query = new URLSearchParams();
+  if (params.search !== undefined) query.set('search', params.search);
+  if (params.entity_id !== undefined) query.set('entity_id', params.entity_id);
+  if (params.limit !== undefined) query.set('limit', String(params.limit));
+  if (params.offset !== undefined) query.set('offset', String(params.offset));
+  const qs = query.toString();
+  return get<EmittersPage>(`/api/emitters${qs.length > 0 ? `?${qs}` : ''}`);
 }
 
 export function createEmitter(input: CreateEmitterInput): Promise<CreateEmitterResult> {

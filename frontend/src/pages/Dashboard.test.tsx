@@ -148,8 +148,8 @@ function emissionsHandler(feedPage: EmissionsPage, mapPage: EmissionsPage = feed
 function baseRoutes(overrides: Record<string, (url: URL, init?: RequestInit) => unknown> = {}) {
   return {
     'GET /api/data-sources': () => [DATA_SOURCE_RUNNING, DATA_SOURCE_STOPPED],
-    'GET /api/emitters': () => [EMITTER_1],
-    'GET /api/entities': () => [ENTITY_1],
+    'GET /api/emitters': () => ({ items: [EMITTER_1], total: 1 }),
+    'GET /api/entities': () => ({ items: [ENTITY_1], total: 1 }),
     'GET /api/entities/entity-1': () => ENTITY_1_DETAIL,
     'GET /api/zones': () => [ZONE_1],
     'GET /api/notifications': () => NOTIFICATIONS_PAGE,

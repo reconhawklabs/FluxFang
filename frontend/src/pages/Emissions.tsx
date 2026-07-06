@@ -309,11 +309,15 @@ export default function Emissions() {
   // emission frame), but this page's own "assign to emitter" mutation
   // invalidates it below, and `queryKeys.emitters` is still the correct key
   // to key this query off per the registry.
-  const emittersQuery = useQuery({ queryKey: queryKeys.emitters, queryFn: listEmitters });
+  // Interim `{limit: 500}` cap — `GET /api/emitters` now returns a
+  // paginated `{items, total}` envelope; this lookup map just needs "every
+  // emitter's name," so 500 keeps today's coverage without adding
+  // pagination here (a later redesign phase).
+  const emittersQuery = useQuery({ queryKey: queryKeys.emitters, queryFn: () => listEmitters({ limit: 500 }) });
 
   const emitterNameById = useMemo(() => {
     const map = new Map<string, string>();
-    for (const emitter of emittersQuery.data ?? []) map.set(emitter.id, emitter.name);
+    for (const emitter of emittersQuery.data?.items ?? []) map.set(emitter.id, emitter.name);
     return map;
   }, [emittersQuery.data]);
 

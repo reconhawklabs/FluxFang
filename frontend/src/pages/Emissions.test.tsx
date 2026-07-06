@@ -158,7 +158,7 @@ const DATA_SOURCE_2: DataSource = {
 function baseRoutes(overrides: Record<string, (url: URL, init?: RequestInit) => unknown> = {}) {
   return {
     'GET /api/emissions': () => ({ items: [EMISSION_1, EMISSION_2], total: 2 }),
-    'GET /api/emitters': () => [EMITTER_1],
+    'GET /api/emitters': () => ({ items: [EMITTER_1], total: 1 }),
     'GET /api/catalog/wifi': () => WIFI_CATALOG,
     'GET /api/data-sources': () => [DATA_SOURCE_1, DATA_SOURCE_2],
     ...overrides,

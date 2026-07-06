@@ -142,8 +142,8 @@ const ENTITY_1: Entity = {
 
 test('renders emitter rows with name/type/last-seen and the associated entity name', async () => {
   const fetchMock = mockRoutes({
-    'GET /api/emitters': () => [EMITTER_UNASSIGNED, EMITTER_ASSIGNED],
-    'GET /api/entities': () => [ENTITY_1],
+    'GET /api/emitters': () => ({ items: [EMITTER_UNASSIGNED, EMITTER_ASSIGNED], total: 2 }),
+    'GET /api/entities': () => ({ items: [ENTITY_1], total: 1 }),
   });
   vi.stubGlobal('fetch', fetchMock);
 
@@ -163,8 +163,8 @@ test('renders emitter rows with name/type/last-seen and the associated entity na
 test('associate-to-existing: selecting an entity PATCHes {entity_id: <selected>}', async () => {
   const patched: Emitter = { ...EMITTER_UNASSIGNED, entity_id: 'entity-1' };
   const fetchMock = mockRoutes({
-    'GET /api/emitters': () => [EMITTER_UNASSIGNED],
-    'GET /api/entities': () => [ENTITY_1],
+    'GET /api/emitters': () => ({ items: [EMITTER_UNASSIGNED], total: 1 }),
+    'GET /api/entities': () => ({ items: [ENTITY_1], total: 1 }),
     'PATCH /api/emitters/emitter-1': () => patched,
   });
   vi.stubGlobal('fetch', fetchMock);
@@ -192,8 +192,8 @@ test('associate-to-existing: selecting an entity PATCHes {entity_id: <selected>}
 test('detach: clicking Detach PATCHes {entity_id: null}', async () => {
   const detached: Emitter = { ...EMITTER_ASSIGNED, entity_id: null };
   const fetchMock = mockRoutes({
-    'GET /api/emitters': () => [EMITTER_ASSIGNED],
-    'GET /api/entities': () => [ENTITY_1],
+    'GET /api/emitters': () => ({ items: [EMITTER_ASSIGNED], total: 1 }),
+    'GET /api/entities': () => ({ items: [ENTITY_1], total: 1 }),
     'PATCH /api/emitters/emitter-2': () => detached,
   });
   vi.stubGlobal('fetch', fetchMock);
@@ -223,8 +223,8 @@ test('create entity & associate: entering a name creates the entity then PATCHes
   const associated: Emitter = { ...EMITTER_UNASSIGNED, entity_id: 'entity-new' };
 
   const fetchMock = mockRoutes({
-    'GET /api/emitters': () => [EMITTER_UNASSIGNED],
-    'GET /api/entities': () => [ENTITY_1],
+    'GET /api/emitters': () => ({ items: [EMITTER_UNASSIGNED], total: 1 }),
+    'GET /api/entities': () => ({ items: [ENTITY_1], total: 1 }),
     'POST /api/entities': () => NEW_ENTITY,
     'PATCH /api/emitters/emitter-1': () => associated,
   });
@@ -235,7 +235,7 @@ test('create entity & associate: entering a name creates the entity then PATCHes
 
   const row = screen.getByTestId('emitter-row-emitter-1');
   const getEmittersCallCountBefore = fetchMock.mock.calls.filter(
-    ([url, init]) => String(url) === '/api/emitters' && (init?.method ?? 'GET') === 'GET',
+    ([url, init]) => String(url) === '/api/emitters?limit=500' && (init?.method ?? 'GET') === 'GET',
   ).length;
 
   fireEvent.click(within(row).getByRole('button', { name: /new entity/i }));
@@ -269,7 +269,7 @@ test('create entity & associate: entering a name creates the entity then PATCHes
   // The emitter list refetches (invalidated on success).
   await waitFor(() => {
     const getEmittersCallCountAfter = fetchMock.mock.calls.filter(
-      ([url, init]) => String(url) === '/api/emitters' && (init?.method ?? 'GET') === 'GET',
+      ([url, init]) => String(url) === '/api/emitters?limit=500' && (init?.method ?? 'GET') === 'GET',
     ).length;
     expect(getEmittersCallCountAfter).toBeGreaterThan(getEmittersCallCountBefore);
   });
@@ -280,8 +280,8 @@ test('create entity & associate: entering a name creates the entity then PATCHes
 
 test('a wifi_client emitter renders its type badge, src_mac, and a "Randomized MAC" badge', async () => {
   const fetchMock = mockRoutes({
-    'GET /api/emitters': () => [EMITTER_CLIENT],
-    'GET /api/entities': () => [],
+    'GET /api/emitters': () => ({ items: [EMITTER_CLIENT], total: 1 }),
+    'GET /api/entities': () => ({ items: [], total: 0 }),
   });
   vi.stubGlobal('fetch', fetchMock);
 
@@ -296,8 +296,8 @@ test('a wifi_client emitter renders its type badge, src_mac, and a "Randomized M
 
 test('a wifi_access_point emitter renders its type badge, SSID, and BSSID (monospace)', async () => {
   const fetchMock = mockRoutes({
-    'GET /api/emitters': () => [EMITTER_AP],
-    'GET /api/entities': () => [],
+    'GET /api/emitters': () => ({ items: [EMITTER_AP], total: 1 }),
+    'GET /api/entities': () => ({ items: [], total: 0 }),
   });
   vi.stubGlobal('fetch', fetchMock);
 
@@ -313,8 +313,8 @@ test('a wifi_access_point emitter renders its type badge, SSID, and BSSID (monos
 test('an AP emitter with no SSID shows "Hidden"', async () => {
   const hidden: Emitter = { ...EMITTER_AP, attributes: { ssid: '', bssid: '11:22:33:44:55:66' } };
   const fetchMock = mockRoutes({
-    'GET /api/emitters': () => [hidden],
-    'GET /api/entities': () => [],
+    'GET /api/emitters': () => ({ items: [hidden], total: 1 }),
+    'GET /api/entities': () => ({ items: [], total: 0 }),
   });
   vi.stubGlobal('fetch', fetchMock);
 
@@ -327,8 +327,8 @@ test('an AP emitter with no SSID shows "Hidden"', async () => {
 test('toggling the rule switch PATCHes {match_enabled: false} and shows a disabled helper', async () => {
   const disabled: Emitter = { ...EMITTER_CLIENT, match_enabled: false };
   const fetchMock = mockRoutes({
-    'GET /api/emitters': () => [EMITTER_CLIENT],
-    'GET /api/entities': () => [],
+    'GET /api/emitters': () => ({ items: [EMITTER_CLIENT], total: 1 }),
+    'GET /api/entities': () => ({ items: [], total: 0 }),
     'PATCH /api/emitters/emitter-3': () => disabled,
   });
   vi.stubGlobal('fetch', fetchMock);
@@ -358,8 +358,8 @@ test('toggling the rule switch PATCHes {match_enabled: false} and shows a disabl
 
 test('a disabled rule shows a helper explaining new matches will not auto-attach', async () => {
   const fetchMock = mockRoutes({
-    'GET /api/emitters': () => [EMITTER_AP], // EMITTER_AP has match_enabled: false
-    'GET /api/entities': () => [],
+    'GET /api/emitters': () => ({ items: [EMITTER_AP], total: 1 }), // EMITTER_AP has match_enabled: false
+    'GET /api/entities': () => ({ items: [], total: 0 }),
   });
   vi.stubGlobal('fetch', fetchMock);
 
@@ -376,8 +376,8 @@ test('manual randomized override: toggling it PATCHes the full attributes object
     attributes: { ...EMITTER_CLIENT.attributes, randomized_mac: false },
   };
   const fetchMock = mockRoutes({
-    'GET /api/emitters': () => [EMITTER_CLIENT],
-    'GET /api/entities': () => [],
+    'GET /api/emitters': () => ({ items: [EMITTER_CLIENT], total: 1 }),
+    'GET /api/entities': () => ({ items: [], total: 0 }),
     'PATCH /api/emitters/emitter-3': () => flipped,
   });
   vi.stubGlobal('fetch', fetchMock);
@@ -406,8 +406,8 @@ test('manual randomized override: toggling it PATCHes the full attributes object
 
 test('expanded detail shows the match_criteria rule for an auto-classified emitter', async () => {
   const fetchMock = mockRoutes({
-    'GET /api/emitters': () => [EMITTER_CLIENT],
-    'GET /api/entities': () => [],
+    'GET /api/emitters': () => ({ items: [EMITTER_CLIENT], total: 1 }),
+    'GET /api/entities': () => ({ items: [], total: 0 }),
     'GET /api/emissions': () => ({ items: [], total: 0 }),
   });
   vi.stubGlobal('fetch', fetchMock);
@@ -438,8 +438,8 @@ const UNLOCATED_EMISSION: Emission = { ...LOCATED_EMISSION, id: 'em-2', lon: nul
 
 test('expanded detail renders a detection heatmap fed by located emissions for that emitter', async () => {
   const fetchMock = mockRoutes({
-    'GET /api/emitters': () => [EMITTER_CLIENT],
-    'GET /api/entities': () => [],
+    'GET /api/emitters': () => ({ items: [EMITTER_CLIENT], total: 1 }),
+    'GET /api/entities': () => ({ items: [], total: 0 }),
     'GET /api/emissions': () => ({ items: [LOCATED_EMISSION, UNLOCATED_EMISSION], total: 2 }),
   });
   vi.stubGlobal('fetch', fetchMock);
@@ -456,8 +456,8 @@ test('expanded detail renders a detection heatmap fed by located emissions for t
 
 test('expanded detail shows the heatmap empty state when the emitter has no located emissions', async () => {
   const fetchMock = mockRoutes({
-    'GET /api/emitters': () => [EMITTER_CLIENT],
-    'GET /api/entities': () => [],
+    'GET /api/emitters': () => ({ items: [EMITTER_CLIENT], total: 1 }),
+    'GET /api/entities': () => ({ items: [], total: 0 }),
     'GET /api/emissions': () => ({ items: [], total: 0 }),
   });
   vi.stubGlobal('fetch', fetchMock);

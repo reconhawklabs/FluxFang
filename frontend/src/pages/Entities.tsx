@@ -575,7 +575,11 @@ export default function Entities() {
   const [showAddForm, setShowAddForm] = useState(false);
   const [addAlertEntity, setAddAlertEntity] = useState<Entity | null>(null);
 
-  const entitiesQuery = useQuery({ queryKey: queryKeys.entities, queryFn: listEntities });
+  // Interim `{limit: 500}` cap — `GET /api/entities` now returns a
+  // paginated `{items, total}` envelope, but this page still renders every
+  // row with no pagination UI of its own (a later redesign phase); 500
+  // keeps today's "show everything" behavior intact.
+  const entitiesQuery = useQuery({ queryKey: queryKeys.entities, queryFn: () => listEntities({ limit: 500 }) });
 
   function invalidateEntities(): void {
     void queryClient.invalidateQueries({ queryKey: queryKeys.entities });
@@ -596,7 +600,7 @@ export default function Entities() {
         ? 'Failed to create entity.'
         : null;
 
-  const entities = entitiesQuery.data ?? [];
+  const entities = entitiesQuery.data?.items ?? [];
 
   return (
     <div className="space-y-4">

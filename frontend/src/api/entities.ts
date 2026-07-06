@@ -50,8 +50,30 @@ export interface PatchEntityInput {
   notes?: string | null;
 }
 
-export function listEntities(): Promise<Entity[]> {
-  return get<Entity[]>('/api/entities');
+/** `GET /api/entities` query params — mirrors the backend's
+ * `ListEntitiesQuery`. All optional; a caller that only wants the full
+ * (interim, pre-pagination) set passes just `{ limit: 500 }`, same
+ * convention as `listEmitters`'s params object. */
+export interface ListEntitiesParams {
+  search?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /api/entities`'s response envelope — mirrors the backend's
+ * `EntitiesPageDto`. */
+export interface EntitiesPage {
+  items: Entity[];
+  total: number;
+}
+
+export function listEntities(params: ListEntitiesParams = {}): Promise<EntitiesPage> {
+  const query = new URLSearchParams();
+  if (params.search !== undefined) query.set('search', params.search);
+  if (params.limit !== undefined) query.set('limit', String(params.limit));
+  if (params.offset !== undefined) query.set('offset', String(params.offset));
+  const qs = query.toString();
+  return get<EntitiesPage>(`/api/entities${qs.length > 0 ? `?${qs}` : ''}`);
 }
 
 export function getEntityDetail(id: string): Promise<EntityDetail> {

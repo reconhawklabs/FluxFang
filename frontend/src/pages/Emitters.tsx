@@ -352,12 +352,17 @@ export default function Emitters() {
   const [editingNameForId, setEditingNameForId] = useState<string | null>(null);
   const [editingNameDraft, setEditingNameDraft] = useState('');
 
-  const emittersQuery = useQuery({ queryKey: queryKeys.emitters, queryFn: listEmitters });
-  const entitiesQuery = useQuery({ queryKey: queryKeys.entities, queryFn: listEntities });
+  // Interim `{limit: 500}` cap on both lists — `GET /api/emitters` and
+  // `GET /api/entities` now return a paginated `{items, total}` envelope,
+  // but this page still renders every row with no pagination UI of its own
+  // (that's a later redesign phase); 500 keeps today's "show everything"
+  // behavior intact without adding pagination controls here.
+  const emittersQuery = useQuery({ queryKey: queryKeys.emitters, queryFn: () => listEmitters({ limit: 500 }) });
+  const entitiesQuery = useQuery({ queryKey: queryKeys.entities, queryFn: () => listEntities({ limit: 500 }) });
 
   const entityNameById = useMemo(() => {
     const map = new Map<string, string>();
-    for (const entity of entitiesQuery.data ?? []) map.set(entity.id, entity.name);
+    for (const entity of entitiesQuery.data?.items ?? []) map.set(entity.id, entity.name);
     return map;
   }, [entitiesQuery.data]);
 
@@ -459,7 +464,7 @@ export default function Emitters() {
         ? 'Failed to create entity.'
         : null;
 
-  const emitters = emittersQuery.data ?? [];
+  const emitters = emittersQuery.data?.items ?? [];
 
   return (
     <div className="space-y-4">
@@ -602,7 +607,7 @@ export default function Emitters() {
                           <option value="" disabled>
                             Associate to entity…
                           </option>
-                          {(entitiesQuery.data ?? []).map((entity: Entity) => (
+                          {(entitiesQuery.data?.items ?? []).map((entity: Entity) => (
                             <option key={entity.id} value={entity.id}>
                               {entity.name}
                             </option>

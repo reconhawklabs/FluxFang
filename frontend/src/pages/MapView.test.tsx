@@ -139,8 +139,8 @@ function baseRoutes(overrides: Record<string, (url: URL, init?: RequestInit) => 
   return {
     'GET /api/data-sources': () => [DATA_SOURCE_1],
     'GET /api/emissions': () => EMISSIONS_PAGE,
-    'GET /api/emitters': () => [] as Emitter[],
-    'GET /api/entities': () => [ENTITY_1],
+    'GET /api/emitters': () => ({ items: [] as Emitter[], total: 0 }),
+    'GET /api/entities': () => ({ items: [ENTITY_1], total: 1 }),
     'GET /api/entities/entity-1': () => ENTITY_1_DETAIL,
     'GET /api/zones': () => [ZONE_1],
     ...overrides,
@@ -187,7 +187,7 @@ test('toggling a layer checkbox does not crash the page', async () => {
 });
 
 test('a distinct emitter category ("wifi") drives an "All WiFi" toggle, backed by its own emitter_category-filtered query', async () => {
-  const fetchMock = mockRoutes(baseRoutes({ 'GET /api/emitters': () => [EMITTER_WIFI] }));
+  const fetchMock = mockRoutes(baseRoutes({ 'GET /api/emitters': () => ({ items: [EMITTER_WIFI], total: 1 }) }));
   vi.stubGlobal('fetch', fetchMock);
 
   render(<MapView />, { wrapper });
@@ -216,7 +216,7 @@ test('a distinct emitter category ("wifi") drives an "All WiFi" toggle, backed b
 
 test('an emitter with no category (plain user-made emitter) contributes no category toggle', async () => {
   const plainEmitter: Emitter = { ...EMITTER_WIFI, id: 'emitter-2', emitter_type: null, category: null };
-  const fetchMock = mockRoutes(baseRoutes({ 'GET /api/emitters': () => [plainEmitter] }));
+  const fetchMock = mockRoutes(baseRoutes({ 'GET /api/emitters': () => ({ items: [plainEmitter], total: 1 }) }));
   vi.stubGlobal('fetch', fetchMock);
 
   render(<MapView />, { wrapper });

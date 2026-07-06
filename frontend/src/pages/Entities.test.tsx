@@ -136,7 +136,7 @@ const METHOD_1: AlertMethod = {
 
 function baseRoutes(overrides: Record<string, (url: URL, init?: RequestInit) => unknown> = {}) {
   return {
-    'GET /api/entities': () => [ENTITY_1],
+    'GET /api/entities': () => ({ items: [ENTITY_1], total: 1 }),
     'GET /api/entities/entity-1': () => ENTITY_1_DETAIL,
     'GET /api/zones': () => [ZONE_1, ZONE_2],
     'GET /api/alert-methods': () => [METHOD_1],
@@ -343,7 +343,7 @@ test('add entity: submitting the form POSTs /api/entities and refetches the list
   const newEntity: Entity = { id: 'entity-2', name: 'Alice', notes: null, created_at: '2026-07-05T00:00:00Z' };
   const fetchMock = mockRoutes(
     baseRoutes({
-      'GET /api/entities': () => [ENTITY_1],
+      'GET /api/entities': () => ({ items: [ENTITY_1], total: 1 }),
       'POST /api/entities': () => newEntity,
     }),
   );
