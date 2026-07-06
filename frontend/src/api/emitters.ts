@@ -5,10 +5,11 @@
 // `deleteEmitter`. Phase B (emitter auto-classification design doc) adds the
 // classification fields (`emitter_type`/`attributes`/`match_enabled` +
 // derived `type_label`/`category`) and the matching `PatchEmitterInput`
-// fields — still YAGNI beyond that (no `/rule` or `/preview` calls here;
-// `RuleBuilder`/`Emissions.tsx` own those directly).
-import type { Rule } from '../types/rule';
-import { del, get, patch, post } from './client';
+// fields. The Emitters page's expanded-row rule editor (list-pages UX
+// cleanup) adds `setEmitterRule` (`POST /api/emitters/:id/rule`); the
+// `/preview` call still lives in `RuleBuilder` directly.
+import type { Rule } from "../types/rule";
+import { del, get, patch, post } from "./client";
 
 /** Type-specific identifying info + metadata an auto-classified emitter
  * carries (Phase A backend's `emitter.attributes jsonb`) — e.g.
@@ -121,6 +122,10 @@ export function listEmitterTypes(kind: string): Promise<EmitterType[]> {
 export interface ListEmittersParams {
   search?: string;
   entity_id?: string;
+  /** Exact-match filter on the emitter's machine `emitter_type` key (e.g.
+   * `"wifi_access_point"`), backing the Emitters page's Type-filter
+   * dropdown. ANDed with `search`/`entity_id` server-side. */
+  emitter_type?: string;
   limit?: number;
   offset?: number;
 }
@@ -132,22 +137,46 @@ export interface EmittersPage {
   total: number;
 }
 
-export function listEmitters(params: ListEmittersParams = {}): Promise<EmittersPage> {
+export function listEmitters(
+  params: ListEmittersParams = {},
+): Promise<EmittersPage> {
   const query = new URLSearchParams();
-  if (params.search !== undefined) query.set('search', params.search);
-  if (params.entity_id !== undefined) query.set('entity_id', params.entity_id);
-  if (params.limit !== undefined) query.set('limit', String(params.limit));
-  if (params.offset !== undefined) query.set('offset', String(params.offset));
+  if (params.search !== undefined) query.set("search", params.search);
+  if (params.entity_id !== undefined) query.set("entity_id", params.entity_id);
+  if (params.emitter_type !== undefined)
+    query.set("emitter_type", params.emitter_type);
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
   const qs = query.toString();
-  return get<EmittersPage>(`/api/emitters${qs.length > 0 ? `?${qs}` : ''}`);
+  return get<EmittersPage>(`/api/emitters${qs.length > 0 ? `?${qs}` : ""}`);
 }
 
-export function createEmitter(input: CreateEmitterInput): Promise<CreateEmitterResult> {
-  return post<CreateEmitterResult>('/api/emitters', input);
+export function createEmitter(
+  input: CreateEmitterInput,
+): Promise<CreateEmitterResult> {
+  return post<CreateEmitterResult>("/api/emitters", input);
 }
 
-export function patchEmitter(id: string, body: PatchEmitterInput): Promise<Emitter> {
+export function patchEmitter(
+  id: string,
+  body: PatchEmitterInput,
+): Promise<Emitter> {
   return patch<Emitter>(`/api/emitters/${id}`, body);
+}
+
+/** `POST /api/emitters/:id/rule { match_criteria }` — replace an existing
+ * emitter's match rule (the Emitters page's expanded-row rule editor). The
+ * backend validates the rule, persists it, then re-attaches every already-
+ * stored emission that now matches, returning the updated emitter plus that
+ * `attached_count` (same `EmitterAndCount` envelope as `POST /api/emitters`,
+ * hence the shared `CreateEmitterResult` return type). */
+export function setEmitterRule(
+  id: string,
+  rule: Rule,
+): Promise<CreateEmitterResult> {
+  return post<CreateEmitterResult>(`/api/emitters/${id}/rule`, {
+    match_criteria: rule,
+  });
 }
 
 export function deleteEmitter(id: string): Promise<void> {
@@ -166,11 +195,11 @@ export interface DeletedCount {
  * dedicated path rather than `DELETE` with a body, same convention as
  * `bulkDeleteEmissions`. */
 export function bulkDeleteEmitters(ids: string[]): Promise<DeletedCount> {
-  return post<DeletedCount>('/api/emitters/bulk-delete', { ids });
+  return post<DeletedCount>("/api/emitters/bulk-delete", { ids });
 }
 
 /** `POST /api/emitters/clear` (no body) — "Clear All Emitters", gated by
  * `SelectionToolbar`'s confirm dialog before this is ever called. */
 export function clearEmitters(): Promise<DeletedCount> {
-  return post<DeletedCount>('/api/emitters/clear');
+  return post<DeletedCount>("/api/emitters/clear");
 }
