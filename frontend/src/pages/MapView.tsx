@@ -76,6 +76,8 @@ import maplibregl from "maplibre-gl";
 import type {
   GeoJSONSource,
   Map as MapLibreMap,
+  MapLayerMouseEvent,
+  Popup,
   RasterTileSource,
   StyleSpecification,
 } from "maplibre-gl";
@@ -86,6 +88,7 @@ import { getEntityDetail, listEntities } from "../api/entities";
 import { listZones } from "../api/zones";
 import { listDataSources } from "../api/dataSources";
 import { listEmitters } from "../api/emitters";
+import type { Emitter } from "../api/emitters";
 import { getGpsStatus } from "../api/gps";
 import type { EntityMarker } from "../components/mapData";
 import {
@@ -177,6 +180,72 @@ function buildEmissionsParams(opts: {
   if (opts.timeTo.length > 0)
     params.set("time_to", new Date(opts.timeTo).toISOString());
   return params;
+}
+
+/** HTML-escape a value bound for a MapLibre popup's `setHTML` (emitter
+ * names/SSIDs/MACs are user-influenced, so treat them as untrusted). */
+function escapeHtml(value: string): string {
+  return value.replace(
+    /[&<>"']/g,
+    (char) =>
+      ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      })[char] as string,
+  );
+}
+
+function formatDateTime(iso: string): string {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
+}
+
+/** Inner HTML for an emitter marker's click popup. Uses the rich fields
+ * (type, identifying MAC/SSID, last-seen) from the full `Emitter` when it's
+ * been matched by id from `emittersQuery`; falls back to just the marker's own
+ * name/observed-at otherwise. Styled inline (dark theme) on top of the
+ * `.fluxfang-map-popup` container override in `index.css`. */
+function buildEmitterPopupHtml(
+  emitter: Emitter | undefined,
+  fallbackName: string,
+  observedAt: string | null,
+): string {
+  const attrs = emitter?.attributes ?? {};
+  const str = (key: string): string | null =>
+    typeof attrs[key] === "string" ? (attrs[key] as string) : null;
+  const mac = str("bssid") ?? str("src_mac");
+  const ssid = str("ssid");
+  const randomized = attrs.randomized_mac === true;
+  const lastSeen = emitter?.last_seen_at ?? observedAt;
+
+  const row = (label: string, valueHtml: string): string =>
+    `<div style="margin-top:4px;font-size:0.75rem;line-height:1.25"><span style="color:#64748b">${label}: </span><span style="color:#cbd5e1">${valueHtml}</span></div>`;
+
+  const parts: string[] = [
+    `<div style="font-weight:600;font-size:0.875rem;color:#f1f5f9">${escapeHtml(
+      emitter?.name ?? fallbackName,
+    )}</div>`,
+    `<div style="font-size:0.75rem;color:#94a3b8;margin-top:2px">${escapeHtml(
+      emitter?.type_label ?? emitter?.type ?? "Emitter",
+    )}</div>`,
+  ];
+  if (ssid) parts.push(row("SSID", escapeHtml(ssid)));
+  if (mac) {
+    parts.push(
+      row(
+        "MAC",
+        `<span style="font-family:ui-monospace,monospace">${escapeHtml(mac)}</span>${
+          randomized ? ' <span style="color:#fbbf24">(randomized)</span>' : ""
+        }`,
+      ),
+    );
+  }
+  if (lastSeen)
+    parts.push(row("Last seen", escapeHtml(formatDateTime(lastSeen))));
+  return `<div style="min-width:150px">${parts.join("")}</div>`;
 }
 
 /** Phase 6: the map's initial (and only ever) style — a single raster
@@ -497,6 +566,22 @@ export default function MapView({
     [emissionsItems, emitterNames],
   );
 
+  // Full emitter records by id, kept current for the marker click popup. The
+  // click handler is registered once on the map (in the init effect) and reads
+  // through this ref, so it always sees the latest `emittersQuery` data without
+  // needing to re-register on every data change.
+  const emittersByIdRef = useRef<Map<string, Emitter>>(new Map());
+  useEffect(() => {
+    const byId = new Map<string, Emitter>();
+    for (const emitter of emittersQuery.data?.items ?? [])
+      byId.set(emitter.id, emitter);
+    emittersByIdRef.current = byId;
+  }, [emittersQuery.data]);
+
+  // A single reused popup instance (created on map load); clicking an emitter
+  // marker moves + refills it.
+  const popupRef = useRef<Popup | null>(null);
+
   const zonesQuery = useQuery({
     queryKey: queryKeys.zones,
     queryFn: listZones,
@@ -538,6 +623,44 @@ export default function MapView({
     });
     mapRef.current = map;
     map.addControl(new maplibregl.NavigationControl(), "top-right");
+    const popup = new maplibregl.Popup({
+      closeButton: true,
+      closeOnClick: true,
+      className: "fluxfang-map-popup",
+      maxWidth: "260px",
+    });
+    popupRef.current = popup;
+
+    // Clicking an emitter marker opens a details popup (name/type/identity/
+    // last-seen), pulling the full record from `emittersByIdRef`.
+    const openEmitterPopup = (event: MapLayerMouseEvent) => {
+      const feature = event.features?.[0];
+      if (!feature || feature.geometry.type !== "Point") return;
+      const [lon, lat] = feature.geometry.coordinates as [number, number];
+      const props = feature.properties ?? {};
+      const id =
+        typeof props.id === "string" ? props.id : String(props.id ?? "");
+      const fallbackName = typeof props.name === "string" ? props.name : id;
+      const observedAt =
+        typeof props.observed_at === "string" ? props.observed_at : null;
+      popup
+        .setLngLat([lon, lat])
+        .setHTML(
+          buildEmitterPopupHtml(
+            emittersByIdRef.current.get(id),
+            fallbackName,
+            observedAt,
+          ),
+        )
+        .addTo(map);
+    };
+    const setPointer = () => {
+      map.getCanvas().style.cursor = "pointer";
+    };
+    const clearPointer = () => {
+      map.getCanvas().style.cursor = "";
+    };
+
     map.on("load", () => {
       addLayers(map);
       setStyleLoaded(true);
@@ -546,9 +669,17 @@ export default function MapView({
       // wrong size (often 0 → blank). A resize here syncs it to the
       // now-laid-out container.
       map.resize();
+      // Emitter marker interactivity (registered after the layers exist).
+      for (const layerId of EMITTER_LAYER_IDS) {
+        map.on("click", layerId, openEmitterPopup);
+        map.on("mouseenter", layerId, setPointer);
+        map.on("mouseleave", layerId, clearPointer);
+      }
     });
 
     return () => {
+      popup.remove();
+      popupRef.current = null;
       map.remove();
       mapRef.current = null;
       setStyleLoaded(false);

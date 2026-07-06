@@ -31,8 +31,13 @@ vi.mock("maplibre-gl", () => {
   class FakeMap {
     constructor(_options: unknown) {}
     addControl(): void {}
-    on(event: string, cb: () => void): void {
-      if (event === "load") cb();
+    // Accepts both the 2-arg (`on('load', cb)`) and the layer-scoped 3-arg
+    // (`on('click', 'layer', cb)`) forms MapView uses; only 'load' fires here.
+    on(event: string, layerOrCb: string | (() => void)): void {
+      if (event === "load" && typeof layerOrCb === "function") layerOrCb();
+    }
+    getCanvas() {
+      return { style: {} as Record<string, string> };
     }
     remove(): void {}
     resize(): void {}
@@ -51,8 +56,20 @@ vi.mock("maplibre-gl", () => {
 
   class FakeNavigationControl {}
 
+  class FakePopup {
+    setLngLat = vi.fn(() => this);
+    setHTML = vi.fn(() => this);
+    addTo = vi.fn(() => this);
+    remove = vi.fn(() => this);
+    constructor(_options: unknown) {}
+  }
+
   return {
-    default: { Map: FakeMap, NavigationControl: FakeNavigationControl },
+    default: {
+      Map: FakeMap,
+      NavigationControl: FakeNavigationControl,
+      Popup: FakePopup,
+    },
   };
 });
 

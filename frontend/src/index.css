@@ -13,3 +13,43 @@
     @apply bg-slate-950 text-slate-200;
   }
 }
+
+/* Dark-theme override for the MapLibre marker popup (emitter details on the
+   Map/Dashboard maps). MapLibre's default popup is white; this repaints the
+   content box and its little pointer tip to match the app's slate theme. */
+.fluxfang-map-popup .maplibregl-popup-content {
+  background: #0f172a; /* slate-900 */
+  border: 1px solid #334155; /* slate-700 */
+  border-radius: 0.5rem;
+  padding: 0.625rem 0.75rem;
+  box-shadow: 0 10px 24px rgb(0 0 0 / 0.45);
+}
+
+.fluxfang-map-popup .maplibregl-popup-close-button {
+  color: #94a3b8; /* slate-400 */
+  font-size: 1rem;
+  padding: 0 0.35rem;
+}
+.fluxfang-map-popup .maplibregl-popup-close-button:hover {
+  background: transparent;
+  color: #e2e8f0; /* slate-200 */
+}
+
+/* The tip is a CSS triangle; MapLibre colors only the border side facing the
+   content, chosen per anchor — so override each anchor variant to slate-900. */
+.fluxfang-map-popup.maplibregl-popup-anchor-top .maplibregl-popup-tip,
+.fluxfang-map-popup.maplibregl-popup-anchor-top-left .maplibregl-popup-tip,
+.fluxfang-map-popup.maplibregl-popup-anchor-top-right .maplibregl-popup-tip {
+  border-bottom-color: #0f172a;
+}
+.fluxfang-map-popup.maplibregl-popup-anchor-bottom .maplibregl-popup-tip,
+.fluxfang-map-popup.maplibregl-popup-anchor-bottom-left .maplibregl-popup-tip,
+.fluxfang-map-popup.maplibregl-popup-anchor-bottom-right .maplibregl-popup-tip {
+  border-top-color: #0f172a;
+}
+.fluxfang-map-popup.maplibregl-popup-anchor-left .maplibregl-popup-tip {
+  border-right-color: #0f172a;
+}
+.fluxfang-map-popup.maplibregl-popup-anchor-right .maplibregl-popup-tip {
+  border-left-color: #0f172a;
+}

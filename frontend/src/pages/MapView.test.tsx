@@ -49,6 +49,9 @@ vi.mock("maplibre-gl", () => {
     // exposing its internal `mapRef`.
     static instances: FakeMap[] = [];
     private handlers = new Map<string, () => void>();
+    // Layer-scoped handlers (`on('click', 'layer-id', cb)`), keyed
+    // `${event}:${layer}` — `fireLayerEvent` below drives them in tests.
+    private layerHandlers = new Map<string, (e: unknown) => void>();
     private sources = new Map<string, FakeSource>();
     jumpTo = vi.fn();
     flyTo = vi.fn();
@@ -56,9 +59,23 @@ vi.mock("maplibre-gl", () => {
       FakeMap.instances.push(this);
     }
     addControl(): void {}
-    on(event: string, cb: () => void): void {
-      this.handlers.set(event, cb);
-      if (event === "load") cb();
+    on(
+      event: string,
+      layerOrCb: string | (() => void),
+      maybeCb?: (e: unknown) => void,
+    ): void {
+      if (typeof layerOrCb === "function") {
+        this.handlers.set(event, layerOrCb);
+        if (event === "load") layerOrCb();
+      } else if (maybeCb) {
+        this.layerHandlers.set(`${event}:${layerOrCb}`, maybeCb);
+      }
+    }
+    fireLayerEvent(event: string, layer: string, e: unknown): void {
+      this.layerHandlers.get(`${event}:${layer}`)?.(e);
+    }
+    getCanvas() {
+      return { style: {} as Record<string, string> };
     }
     remove(): void {}
     resize(): void {}
@@ -79,8 +96,29 @@ vi.mock("maplibre-gl", () => {
 
   class FakeNavigationControl {}
 
+  // Records constructed popups + the HTML last set on each, so the
+  // emitter-marker click test can assert on the popup content.
+  class FakePopup {
+    static instances: FakePopup[] = [];
+    html = "";
+    setLngLat = vi.fn(() => this);
+    setHTML = vi.fn((html: string) => {
+      this.html = html;
+      return this;
+    });
+    addTo = vi.fn(() => this);
+    remove = vi.fn(() => this);
+    constructor(_options: unknown) {
+      FakePopup.instances.push(this);
+    }
+  }
+
   return {
-    default: { Map: FakeMap, NavigationControl: FakeNavigationControl },
+    default: {
+      Map: FakeMap,
+      NavigationControl: FakeNavigationControl,
+      Popup: FakePopup,
+    },
   };
 });
 
@@ -96,9 +134,19 @@ function latestFakeMap() {
         setData: ReturnType<typeof vi.fn>;
         setTiles: ReturnType<typeof vi.fn>;
       };
+      fireLayerEvent: (event: string, layer: string, e: unknown) => void;
     }>;
   };
   return MapCtor.instances[MapCtor.instances.length - 1];
+}
+
+/** The most recently constructed `FakePopup` (MapView makes one per map) —
+ * used by the emitter-marker click test to read the HTML it was filled with. */
+function lastFakePopup() {
+  const PopupCtor = (maplibregl as unknown as { Popup: unknown }).Popup as {
+    instances: Array<{ html: string; setHTML: ReturnType<typeof vi.fn> }>;
+  };
+  return PopupCtor.instances[PopupCtor.instances.length - 1];
 }
 
 afterEach(() => {
@@ -430,4 +478,51 @@ test('clicking "Recenter to me" flies the map to the current GPS fix', async () 
       center: [GPS_STATUS_FIX.lon, GPS_STATUS_FIX.lat],
     }),
   );
+});
+
+test("clicking an emitter marker opens a popup with its details", async () => {
+  const emitter: Emitter = {
+    id: "emitter-1",
+    name: "Kitchen AP",
+    type: null,
+    emitter_type: "wifi_access_point",
+    attributes: { bssid: "aa:bb:cc:dd:ee:ff", ssid: "HomeNet" },
+    match_enabled: true,
+    type_label: "WiFi Access Point",
+    category: "wifi",
+    entity_id: null,
+    match_criteria: { match: "all", conditions: [] },
+    first_seen_at: "2026-07-05T00:00:00Z",
+    last_seen_at: "2026-07-05T01:00:00Z",
+    created_at: "2026-07-05T00:00:00Z",
+  };
+  const fetchMock = mockRoutes(
+    baseRoutes({ "GET /api/emitters": () => ({ items: [emitter], total: 1 }) }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<MapView />, { wrapper });
+  await screen.findByTestId("maplibre-container");
+
+  const feature = {
+    geometry: { type: "Point", coordinates: [2.5, 1.5] },
+    properties: {
+      id: "emitter-1",
+      name: "Kitchen AP",
+      observed_at: "2026-07-05T01:00:00Z",
+    },
+  };
+
+  // Retry the click until the emitters query has populated the id→emitter
+  // lookup the popup reads from (the marker layer is clickable immediately,
+  // but the rich fields only appear once `GET /api/emitters` resolves).
+  await waitFor(() => {
+    latestFakeMap().fireLayerEvent("click", "emitter-circle-layer", {
+      features: [feature],
+    });
+    const popup = lastFakePopup();
+    expect(popup.html).toContain("Kitchen AP");
+    expect(popup.html).toContain("WiFi Access Point");
+    expect(popup.html).toContain("aa:bb:cc:dd:ee:ff");
+  });
 });
