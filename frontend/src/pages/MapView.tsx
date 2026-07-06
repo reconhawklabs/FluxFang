@@ -311,8 +311,13 @@ const inputClassName =
   "w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 focus:border-amber-500 focus:outline-none";
 const labelClassName =
   "block text-xs font-medium uppercase tracking-wide text-slate-500";
-const groupHeadingClassName =
-  "text-xs font-semibold uppercase tracking-wide text-slate-400";
+// A "Layers"/"Sources" control group: a bordered box (`groupBoxClassName`)
+// with the group name on the border (`groupLegendClassName`) and its
+// checkboxes laid out in a horizontal wrapping row (`groupCheckboxRowClassName`).
+const groupBoxClassName = "rounded border border-slate-800 px-3 pb-2 pt-1";
+const groupLegendClassName =
+  "px-1 text-xs font-semibold uppercase tracking-wide text-slate-400";
+const groupCheckboxRowClassName = "flex flex-wrap items-center gap-x-4 gap-y-1";
 const checkboxInputClassName =
   "h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50";
 const checkboxLabelClassName =
@@ -514,10 +519,10 @@ export default function MapView({
   // Map init — runs once. In tests, `maplibre-gl` is mocked
   // (`vi.mock('maplibre-gl', ...)` in `MapView.test.tsx`) so this never
   // touches a real WebGL canvas; jsdom itself is never specially detected
-  // here (see module doc comment). The style always starts at
-  // `DEFAULT_BASEMAP_ID` ("Standard") — later basemap switches swap the
-  // `BASEMAP_SOURCE_ID` source's tiles in place (see the effect below),
-  // never re-create the map or call `setStyle`.
+  // here (see module doc comment). The style starts at the `basemap` prop if
+  // pinned, else `DEFAULT_BASEMAP_ID` (Satellite) — later basemap switches
+  // swap the `BASEMAP_SOURCE_ID` source's tiles in place (see the effect
+  // below), never re-create the map or call `setStyle`.
   useEffect(() => {
     if (!containerRef.current) return undefined;
 
@@ -721,60 +726,64 @@ export default function MapView({
             )}
           </div>
 
-          <fieldset className="space-y-1.5">
-            <legend className={groupHeadingClassName}>Layers</legend>
-            <label className={checkboxLabelClassName}>
-              <input
-                type="checkbox"
-                checked={layerVisibility.zones}
-                onChange={() => toggleLayer("zones")}
-                className={checkboxInputClassName}
-              />
-              Zones
-            </label>
-            <label className={checkboxLabelClassName}>
-              <input
-                type="checkbox"
-                checked={layerVisibility.entities}
-                onChange={() => toggleLayer("entities")}
-                className={checkboxInputClassName}
-              />
-              Entities
-            </label>
-            <label className={checkboxLabelClassName}>
-              <input
-                type="checkbox"
-                checked={layerVisibility.emitters}
-                onChange={() => toggleLayer("emitters")}
-                className={checkboxInputClassName}
-              />
-              Emitters
-            </label>
-          </fieldset>
-
-          <fieldset className="space-y-1.5">
-            <legend className={groupHeadingClassName}>Sources</legend>
-            <label className={checkboxLabelClassName}>
-              <input
-                type="checkbox"
-                checked={allSources}
-                onChange={() => setAllSources((prev) => !prev)}
-                className={checkboxInputClassName}
-              />
-              All Sources
-            </label>
-            {(dataSourcesQuery.data ?? []).map((source) => (
-              <label key={source.id} className={checkboxLabelClassName}>
+          <fieldset className={groupBoxClassName}>
+            <legend className={groupLegendClassName}>Layers</legend>
+            <div className={groupCheckboxRowClassName}>
+              <label className={checkboxLabelClassName}>
                 <input
                   type="checkbox"
-                  checked={isSourceSelected(source.id)}
-                  disabled={allSources}
-                  onChange={() => toggleSource(source.id)}
+                  checked={layerVisibility.zones}
+                  onChange={() => toggleLayer("zones")}
                   className={checkboxInputClassName}
                 />
-                {source.kind} ({source.interface ?? source.id})
+                Zones
               </label>
-            ))}
+              <label className={checkboxLabelClassName}>
+                <input
+                  type="checkbox"
+                  checked={layerVisibility.entities}
+                  onChange={() => toggleLayer("entities")}
+                  className={checkboxInputClassName}
+                />
+                Entities
+              </label>
+              <label className={checkboxLabelClassName}>
+                <input
+                  type="checkbox"
+                  checked={layerVisibility.emitters}
+                  onChange={() => toggleLayer("emitters")}
+                  className={checkboxInputClassName}
+                />
+                Emitters
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset className={groupBoxClassName}>
+            <legend className={groupLegendClassName}>Sources</legend>
+            <div className={groupCheckboxRowClassName}>
+              <label className={checkboxLabelClassName}>
+                <input
+                  type="checkbox"
+                  checked={allSources}
+                  onChange={() => setAllSources((prev) => !prev)}
+                  className={checkboxInputClassName}
+                />
+                All Sources
+              </label>
+              {(dataSourcesQuery.data ?? []).map((source) => (
+                <label key={source.id} className={checkboxLabelClassName}>
+                  <input
+                    type="checkbox"
+                    checked={isSourceSelected(source.id)}
+                    disabled={allSources}
+                    onChange={() => toggleSource(source.id)}
+                    className={checkboxInputClassName}
+                  />
+                  {source.kind} ({source.interface ?? source.id})
+                </label>
+              ))}
+            </div>
           </fieldset>
 
           {emissionsIsError && (

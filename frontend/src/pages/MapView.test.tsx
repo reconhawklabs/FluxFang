@@ -356,28 +356,28 @@ test('"All Sources" disables the per-source checkboxes; unchecking it and select
   });
 });
 
-test("the basemap switcher offers Standard/Satellite/Dark, defaulting to Standard, and switching to Satellite swaps the map tiles", async () => {
+test("the basemap switcher offers Standard/Satellite/Dark, defaulting to Satellite, and switching to Dark swaps the map tiles", async () => {
   const fetchMock = mockRoutes(baseRoutes());
   vi.stubGlobal("fetch", fetchMock);
 
   render(<MapView />, { wrapper });
 
   const select = await screen.findByLabelText(/basemap/i);
-  expect((select as HTMLSelectElement).value).toBe("standard");
+  expect((select as HTMLSelectElement).value).toBe("satellite");
   expect(
     within(select)
       .getAllByRole("option")
       .map((option) => option.textContent),
   ).toEqual(["Standard", "Satellite", "Dark"]);
 
-  fireEvent.change(select, { target: { value: "satellite" } });
-  expect((select as HTMLSelectElement).value).toBe("satellite");
+  fireEvent.change(select, { target: { value: "dark" } });
+  expect((select as HTMLSelectElement).value).toBe("dark");
 
   await waitFor(() => {
     expect(
       latestFakeMap().getSource("basemap-source").setTiles,
     ).toHaveBeenCalledWith(
-      expect.arrayContaining([expect.stringContaining("arcgisonline.com")]),
+      expect.arrayContaining([expect.stringContaining("cartocdn.com")]),
     );
   });
 });

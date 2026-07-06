@@ -20,9 +20,9 @@
 // rationale as `osmRasterStyle.ts`) but every one of them — including
 // "Standard" — needs *runtime internet access* for the browser to fetch tile
 // images; the data layers render regardless of whether tiles load.
-import { OSM_TILE_URL } from './osmRasterStyle';
+import { OSM_TILE_URL } from "./osmRasterStyle";
 
-export type BasemapId = 'standard' | 'satellite' | 'dark';
+export type BasemapId = "standard" | "satellite" | "dark";
 
 export interface BasemapOption {
   id: BasemapId;
@@ -36,36 +36,38 @@ export interface BasemapOption {
  * templates below; ArcGIS Online's tile scheme really does take them in
  * that order. */
 const ESRI_WORLD_IMAGERY_URL =
-  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+  "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
 
-const CARTO_DARK_URL = 'https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png';
+const CARTO_DARK_URL = "https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png";
 
 export const BASEMAP_OPTIONS: BasemapOption[] = [
   {
-    id: 'standard',
-    label: 'Standard',
+    id: "standard",
+    label: "Standard",
     tiles: [OSM_TILE_URL],
     tileSize: 256,
-    attribution: '© OpenStreetMap contributors',
+    attribution: "© OpenStreetMap contributors",
   },
   {
-    id: 'satellite',
-    label: 'Satellite',
+    id: "satellite",
+    label: "Satellite",
     tiles: [ESRI_WORLD_IMAGERY_URL],
     tileSize: 256,
-    attribution: 'Esri, Maxar, Earthstar Geographics',
+    attribution: "Esri, Maxar, Earthstar Geographics",
   },
   {
-    id: 'dark',
-    label: 'Dark',
+    id: "dark",
+    label: "Dark",
     tiles: [CARTO_DARK_URL],
     tileSize: 256,
-    attribution: '© OpenStreetMap contributors © CARTO',
+    attribution: "© OpenStreetMap contributors © CARTO",
   },
 ];
 
-export const DEFAULT_BASEMAP_ID: BasemapId = 'standard';
+export const DEFAULT_BASEMAP_ID: BasemapId = "satellite";
 
 export function basemapOption(id: BasemapId): BasemapOption {
-  return BASEMAP_OPTIONS.find((option) => option.id === id) ?? BASEMAP_OPTIONS[0];
+  return (
+    BASEMAP_OPTIONS.find((option) => option.id === id) ?? BASEMAP_OPTIONS[0]
+  );
 }
