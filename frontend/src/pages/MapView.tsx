@@ -70,6 +70,7 @@
 // so `new maplibregl.Map(...)` never touches a real canvas; this component
 // itself just does normal effect-based init and trusts that mock in tests.
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import maplibregl from "maplibre-gl";
 import type {
@@ -333,6 +334,14 @@ interface MapViewProps {
    *  bound. */
   timeFrom?: string;
   timeTo?: string;
+  /** Overlay slots rendered *inside* the map surface (the Dashboard uses these
+   *  to sit its Time Range control and GPS status readout in the map's
+   *  corners instead of as separate cards above it). `overlayTopLeft` stacks
+   *  under the recenter button; `overlayBottomLeft` sits in the bottom-left.
+   *  Each should be a compact, self-contained element — MapView only handles
+   *  positioning. */
+  overlayTopLeft?: ReactNode;
+  overlayBottomLeft?: ReactNode;
 }
 
 export default function MapView({
@@ -340,6 +349,8 @@ export default function MapView({
   basemap,
   timeFrom: timeFromProp,
   timeTo: timeToProp,
+  overlayTopLeft,
+  overlayBottomLeft,
 }: MapViewProps = {}) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
@@ -515,6 +526,10 @@ export default function MapView({
       style: buildBasemapStyle(basemap ?? DEFAULT_BASEMAP_ID),
       center: DEFAULT_CENTER,
       zoom: DEFAULT_ZOOM,
+      // We render our own attribution caption (bottom-right overlay below)
+      // that reflects the *current* basemap — MapLibre's default control
+      // wouldn't update on a `setTiles` basemap swap (see `basemapStyles.ts`).
+      attributionControl: false,
     });
     mapRef.current = map;
     map.addControl(new maplibregl.NavigationControl(), "top-right");
@@ -669,9 +684,9 @@ export default function MapView({
                     </option>
                   ))}
                 </select>
-                <p className="text-[10px] text-slate-500">
-                  {basemapOption(basemapId).attribution}
-                </p>
+                {/* Attribution moved to a map-corner overlay (below) so this
+                    caption no longer adds height here and knocks the Basemap
+                    control out of alignment with the From/To pickers. */}
               </div>
             )}
 
@@ -780,15 +795,34 @@ export default function MapView({
         data-testid="maplibre-container"
         className="relative min-h-[420px] flex-1 overflow-hidden rounded border border-slate-800"
       >
-        <button
-          type="button"
-          onClick={handleRecenter}
-          disabled={!hasGpsFix}
-          title={hasGpsFix ? "Recenter to my location" : "No GPS fix"}
-          className="absolute left-3 top-3 z-10 rounded border border-slate-700 bg-slate-900/90 px-2 py-1.5 text-xs font-medium text-slate-200 shadow hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          Recenter to me
-        </button>
+        {/* Top-left stack: recenter button, then any caller-supplied control
+            (Dashboard's Time Range selector). */}
+        <div className="absolute left-3 top-3 z-10 flex flex-col items-start gap-2">
+          <button
+            type="button"
+            onClick={handleRecenter}
+            disabled={!hasGpsFix}
+            title={hasGpsFix ? "Recenter to my location" : "No GPS fix"}
+            className="rounded border border-slate-700 bg-slate-900/90 px-2 py-1.5 text-xs font-medium text-slate-200 shadow hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Recenter to me
+          </button>
+          {overlayTopLeft}
+        </div>
+
+        {/* Bottom-left slot (Dashboard's GPS status readout). */}
+        {overlayBottomLeft && (
+          <div className="absolute bottom-3 left-3 z-10">
+            {overlayBottomLeft}
+          </div>
+        )}
+
+        {/* Basemap attribution — its own map-corner overlay, reflecting the
+            current basemap (MapLibre's default control is disabled; see the
+            map-init effect). */}
+        <div className="pointer-events-none absolute bottom-1 right-1 z-10 rounded bg-slate-900/70 px-1.5 py-0.5 text-[10px] text-slate-400">
+          {basemapOption(basemapId).attribution}
+        </div>
       </div>
     </div>
   );

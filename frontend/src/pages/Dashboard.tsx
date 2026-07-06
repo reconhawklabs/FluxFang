@@ -103,7 +103,7 @@ function GpsStatusBlock() {
   return (
     <section
       data-testid="gps-status-block"
-      className="rounded-lg border border-slate-800 bg-slate-900/60 px-4 py-3"
+      className="max-w-[220px] rounded-lg border border-slate-700/80 bg-slate-900/85 px-3 py-2 shadow-lg backdrop-blur-sm"
     >
       <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
         GPS Status
@@ -267,35 +267,12 @@ export default function Dashboard() {
         />
       </div>
 
-      {/* Compact status/control row (frees the full-width space the GPS block
-          used to take, giving the map below more room). */}
-      <div className="flex flex-wrap items-stretch gap-4">
-        <div className="min-w-[180px] rounded-lg border border-slate-800 bg-slate-900/60 px-4 py-3">
-          <label
-            htmlFor="dashboard-range"
-            className="text-xs font-semibold uppercase tracking-wide text-slate-500"
-          >
-            Time Range
-          </label>
-          <select
-            id="dashboard-range"
-            value={rangeId}
-            onChange={(event) => setRangeId(event.target.value as TimeRangeId)}
-            className="mt-2 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 focus:border-amber-500 focus:outline-none"
-          >
-            {TIME_RANGES.map((range) => (
-              <option key={range.id} value={range.id}>
-                {range.label}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <GpsStatusBlock />
-      </div>
-
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <section className="space-y-2 rounded-lg border border-slate-800 bg-slate-900/40 p-4">
+      {/* Time Range + GPS status now live as overlays inside the map (see the
+          MapView props below), so there's no separate card row — the map gets
+          the full width the two cards used to take. Feed narrows to a third,
+          map takes two thirds. */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <section className="space-y-2 rounded-lg border border-slate-800 bg-slate-900/40 p-4 lg:col-span-1">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
             Live Emission Feed
           </h2>
@@ -369,12 +346,37 @@ export default function Dashboard() {
           )}
         </section>
 
-        <section className="h-[620px] overflow-hidden rounded-lg border border-slate-800 bg-slate-900/40 p-2">
+        <section className="h-[640px] overflow-hidden rounded-lg border border-slate-800 bg-slate-900/40 p-2 lg:col-span-2">
           <MapView
             showControls={false}
             basemap="satellite"
             timeFrom={timeFrom}
             timeTo=""
+            overlayTopLeft={
+              <div className="rounded-lg border border-slate-700/80 bg-slate-900/85 px-3 py-2 shadow-lg backdrop-blur-sm">
+                <label
+                  htmlFor="dashboard-range"
+                  className="text-[10px] font-semibold uppercase tracking-wide text-slate-500"
+                >
+                  Time Range
+                </label>
+                <select
+                  id="dashboard-range"
+                  value={rangeId}
+                  onChange={(event) =>
+                    setRangeId(event.target.value as TimeRangeId)
+                  }
+                  className="mt-1 block w-full rounded border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100 focus:border-amber-500 focus:outline-none"
+                >
+                  {TIME_RANGES.map((range) => (
+                    <option key={range.id} value={range.id}>
+                      {range.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            }
+            overlayBottomLeft={<GpsStatusBlock />}
           />
         </section>
       </div>
