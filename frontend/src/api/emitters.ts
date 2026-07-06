@@ -153,3 +153,24 @@ export function patchEmitter(id: string, body: PatchEmitterInput): Promise<Emitt
 export function deleteEmitter(id: string): Promise<void> {
   return del<void>(`/api/emitters/${id}`);
 }
+
+/** Shared response shape for both endpoints below (mirrors
+ * `fluxfang-api::emitters`'s `DeletedCountDto` — same shape
+ * `api/emissions.ts`'s own `DeletedCount` mirrors for its bulk endpoints). */
+export interface DeletedCount {
+  deleted: number;
+}
+
+/** `POST /api/emitters/bulk-delete {ids}` — the Emitters page's mass-select
+ * "Delete selected" action (Phase 3, `SelectionToolbar`). A `POST` to a
+ * dedicated path rather than `DELETE` with a body, same convention as
+ * `bulkDeleteEmissions`. */
+export function bulkDeleteEmitters(ids: string[]): Promise<DeletedCount> {
+  return post<DeletedCount>('/api/emitters/bulk-delete', { ids });
+}
+
+/** `POST /api/emitters/clear` (no body) — "Clear All Emitters", gated by
+ * `SelectionToolbar`'s confirm dialog before this is ever called. */
+export function clearEmitters(): Promise<DeletedCount> {
+  return post<DeletedCount>('/api/emitters/clear');
+}

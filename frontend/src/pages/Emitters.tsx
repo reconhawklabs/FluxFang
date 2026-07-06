@@ -1,54 +1,95 @@
-// Task 9.5: browse discovered emitters, inspect each one's match rule and
-// recent emissions, and manage its entity grouping.
+// Task 9.5, redesigned per Phase 3 of the list-pages UX cleanup (see
+// `docs/superpowers/specs/2026-07-05-list-pages-ux-cleanup-design.md`,
+// "Emitters page" section): browse discovered emitters, search/filter them,
+// and manage each one's entity grouping — with compact one-row rows (an
+// expand toggle reveals the match rule, full attributes, and the detection
+// heatmap) instead of the old always-expanded multi-line layout.
 //
-// "Create entity & associate" here is deliberately NOT
-// `POST /api/emitters/with-entity` — that endpoint (Task 6.4,
-// `fluxfang-api::emitters`'s `create_with_entity`) creates a *brand-new*
-// emitter row atomically with the entity, which is exactly what Task 9.4's
-// Emissions page wants ("assign this batch of emissions to a fresh
-// emitter") but wrong here: every row on this page is an *already-existing*
-// emitter (from `GET /api/emitters`) whose id, `match_criteria`, and
-// emission history must survive the association unchanged. So "create
-// entity & associate" instead does the two-call sequence the task brief's
-// context section spells out for this exact case: `POST /api/entities
-// {name}` followed by `PATCH /api/emitters/:id {entity_id}` — see
-// `createAndAssociateMutation` below.
+// Top controls: a full-width `SearchBar` (`q` -> `search`) plus an Entity
+// filter `<select>` (-> `entity_id`) alongside it. Both feed one
+// `GET /api/emitters` query (search/entity_id/limit/offset), keyed off
+// `queryKeys.emitters` so `useLiveEvents` invalidating that key refetches
+// this page's current filter/page — same convention as `Emissions.tsx`.
+// Changing search or the entity filter resets `offset` to 0 and clears the
+// row selection.
+//
+// "Associate to entity" folds the old separate "New Entity" button into a
+// single per-row `<select>`: each existing entity, a "+ New entity…" item
+// (prompts for a name via `window.prompt`, then `POST /api/entities`
+// followed by `PATCH /api/emitters/:id { entity_id }` — see
+// `createAndAssociateMutation` below for why this two-call sequence is used
+// instead of `POST /api/emitters/with-entity`), and a "Detach" item when the
+// row is already associated.
+//
+// Mass-select ("Delete selected"/"Clear All Emitters") uses the shared
+// `useRowSelection`/`SelectionToolbar` (Phase 2) against
+// `bulkDeleteEmitters`/`clearEmitters`; `Pagination` (Phase 2) drives
+// `limit`/`offset`.
 import { Fragment, useMemo, useState } from 'react';
-import type { ChangeEvent, FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ApiError } from '../api/client';
 import { queryKeys } from '../api/queryKeys';
 import { createEntity, listEntities } from '../api/entities';
 import type { Entity } from '../api/entities';
-import { deleteEmitter, listEmitters, patchEmitter } from '../api/emitters';
-import type { Emitter } from '../api/emitters';
+import {
+  bulkDeleteEmitters,
+  clearEmitters,
+  deleteEmitter,
+  listEmitters,
+  patchEmitter,
+} from '../api/emitters';
+import type { Emitter, ListEmittersParams } from '../api/emitters';
 import { listEmissions } from '../api/emissions';
 import type { Emission } from '../api/emissions';
 import type { Condition, Rule } from '../types/rule';
 import EmissionsHeatmap from '../components/EmissionsHeatmap';
 import type { HeatmapPoint } from '../components/mapData';
+import Pagination from '../components/Pagination';
+import SearchBar from '../components/SearchBar';
+import SelectionToolbar from '../components/SelectionToolbar';
+import { useRowSelection } from '../hooks/useRowSelection';
 
+const DEFAULT_LIMIT = 50;
 const DETAIL_EMISSIONS_LIMIT = 20;
 // Task C (emitter auto-classification design doc): a separate, larger-limit
-// fetch backs the detection heatmap — the "Recent emissions" table above
-// only needs its own last-20 window, but "everywhere this emitter has been
+// fetch backs the detection heatmap — the "Recent emissions" table only
+// needs its own last-20 window, but "everywhere this emitter has been
 // heard" wants a much wider sample, same 500 cap `MapView.tsx`'s overview
 // heatmap uses.
 const HEATMAP_EMISSIONS_LIMIT = 500;
-// Name, Type, Attributes, First Seen, Last Seen, Entity, Rule, Actions.
+// [checkbox] Name, Type, MAC/Identity, First seen, Last seen, Entity, Actions.
 const TABLE_COLUMN_COUNT = 8;
 
-const inputClassName =
-  'w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 focus:border-amber-500 focus:outline-none';
+/** Sentinel `<select>` values for the folded "Associate…" control — never a
+ * real entity id (those are UUIDs from the backend). */
+const NEW_ENTITY_VALUE = '__new_entity__';
+const DETACH_VALUE = '__detach__';
+
 const selectClassName =
   'rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-100 focus:border-amber-500 focus:outline-none';
 const smallButtonClassName =
   'rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 transition hover:border-amber-500 hover:text-amber-400 disabled:cursor-not-allowed disabled:opacity-50';
 
+/** Full, readable timestamp (used inside the expanded detail's "Recent
+ * emissions" table, which has room to spare) — unlike `formatCompact`
+ * below, no attempt is made to keep this to a fixed width. */
 function formatTimestamp(iso: string | null): string {
   if (!iso) return '—';
   const date = new Date(iso);
   return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
+}
+
+/** Compact one-line datetime for the row's First/Last seen columns —
+ * `MM/DD HH:mm`, 24-hour, no AM/PM suffix to wrap onto a second line (per
+ * the design doc's "Compact rows" section). */
+function formatCompact(iso: string | null): string {
+  if (!iso) return '—';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const dd = String(date.getDate()).padStart(2, '0');
+  const hh = String(date.getHours()).padStart(2, '0');
+  const min = String(date.getMinutes()).padStart(2, '0');
+  return `${mm}/${dd} ${hh}:${min}`;
 }
 
 /** `match_criteria` comes back from the backend as untyped
@@ -72,21 +113,9 @@ function formatCondition(condition: Condition): string {
   return `${condition.field} ${condition.op} ${formatConditionValue(condition.value)}`;
 }
 
-/** Compact one-line rule summary for the table column, e.g. "bssid eq
- * aa:bb:cc:dd:ee:ff" or "bssid eq aa:.. AND ssid eq CoffeeShop" for
- * multiple conditions. Rendered monospace by the caller since these are
- * mostly MAC-ish identifying values, not prose. */
-function summarizeRule(matchCriteria: unknown): string {
-  const rule = asRule(matchCriteria);
-  if (!rule || rule.conditions.length === 0) return '—';
-  const joiner = rule.match === 'any' ? ' OR ' : ' AND ';
-  return rule.conditions.map(formatCondition).join(joiner);
-}
-
-/** Full, readable rule description for the expanded detail panel — same
- * per-condition text as `summarizeRule` but with the match mode spelled out
- * and one condition per line (via the caller's `<ul>`) rather than packed
- * onto one line. */
+/** Full, readable rule description for the expanded detail panel — one
+ * condition per line (via the caller's `<ul>`), plus the match mode spelled
+ * out separately by `ruleMatchModeLabel`. */
 function ruleConditions(matchCriteria: unknown): string[] {
   const rule = asRule(matchCriteria);
   if (!rule) return [];
@@ -98,15 +127,9 @@ function ruleMatchModeLabel(matchCriteria: unknown): string {
   return rule?.match === 'any' ? 'ANY' : 'ALL';
 }
 
-function payloadText(payload: Record<string, unknown>, key: string): string {
-  const value = payload[key];
-  return typeof value === 'string' || typeof value === 'number' ? String(value) : '—';
-}
-
 /** Reads a string attribute out of an emitter's `attributes` bag (Phase A
- * backend's `emitter.attributes jsonb`) — defensive same as `payloadText`,
- * since `attributes`' shape depends on `emitter_type` and older/plain
- * emitters carry `{}`. */
+ * backend's `emitter.attributes jsonb`) — defensive, since `attributes`'
+ * shape depends on `emitter_type` and older/plain emitters carry `{}`. */
 function attributeText(attributes: Record<string, unknown>, key: string): string | null {
   const value = attributes[key];
   return typeof value === 'string' ? value : null;
@@ -116,98 +139,104 @@ function isRandomizedMac(attributes: Record<string, unknown>): boolean {
   return attributes.randomized_mac === true;
 }
 
+/** Renders any attribute value as text for the expanded panel's full
+ * key/value dump — most values here are strings/booleans (`ssid`,
+ * `bssid`, `src_mac`, `randomized_mac`), but this stays permissive for
+ * whatever future classifier fields show up. */
+function formatAttributeValue(value: unknown): string {
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  return JSON.stringify(value);
+}
+
 /** The "type badge" (design doc's Frontend section): `type_label` when the
  * emitter is auto-classified (e.g. "WiFi Access Point"), falling back to the
  * free-text `type` a manually-created emitter carries, and finally "—" for
- * neither. */
+ * neither. Single-line badge — no attributes rendered alongside it (those
+ * live in their own column now). */
 function TypeBadge({ emitter }: { emitter: Emitter }) {
   const label = emitter.type_label ?? emitter.type;
   if (!label) return <span className="text-slate-500">—</span>;
   return (
     <span
       data-testid={`emitter-type-badge-${emitter.id}`}
-      className="inline-block rounded bg-slate-800 px-2 py-0.5 text-xs font-medium text-slate-200"
+      className="inline-block whitespace-nowrap rounded bg-slate-800 px-2 py-0.5 text-xs font-medium text-slate-200"
     >
       {label}
     </span>
   );
 }
 
-/** Key identifying attributes shown per the domain rules (design doc): an
- * AP shows its SSID (or "Hidden" for an empty one) plus BSSID; a client
- * shows its source MAC plus a "Randomized MAC" badge when flagged. MAC/BSSID
- * are rendered monospace, same convention as the emissions table's bssid
- * column. Anything else (a plain/unclassified emitter) renders "—". */
-function AttributesSummary({ emitter }: { emitter: Emitter }) {
+/** MAC/Identity column (design doc's "Compact rows" section) — the
+ * emitter's identifying MAC/BSSID (`attributes.bssid` for an access point,
+ * `attributes.src_mac` for a client), monospace, plus a compact
+ * "randomized" badge inline (not stacked) when `attributes.randomized_mac`
+ * is set. A plain/unclassified emitter with neither key renders "—". */
+function MacIdentityCell({ emitter }: { emitter: Emitter }) {
   const attributes = emitter.attributes ?? {};
+  const mac = attributeText(attributes, 'bssid') ?? attributeText(attributes, 'src_mac');
 
-  if (emitter.emitter_type === 'wifi_access_point') {
-    const ssid = attributeText(attributes, 'ssid');
-    const bssid = attributeText(attributes, 'bssid');
-    return (
-      <div className="space-y-0.5">
-        <div className="text-slate-300">{ssid && ssid.length > 0 ? ssid : 'Hidden'}</div>
-        {bssid && <div className="font-mono text-xs text-slate-400">{bssid}</div>}
-      </div>
-    );
-  }
+  if (!mac) return <span className="text-slate-500">—</span>;
 
-  if (emitter.emitter_type === 'wifi_client') {
-    const srcMac = attributeText(attributes, 'src_mac');
-    return (
-      <div className="space-y-1">
-        {srcMac && <div className="font-mono text-xs text-slate-300">{srcMac}</div>}
-        {isRandomizedMac(attributes) && (
-          <span className="inline-block rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-400">
-            Randomized MAC
-          </span>
-        )}
-      </div>
-    );
-  }
-
-  return <span className="text-slate-500">—</span>;
+  return (
+    <div className="flex items-center gap-1.5 whitespace-nowrap">
+      <span className="font-mono text-xs text-slate-300">{mac}</span>
+      {isRandomizedMac(attributes) && (
+        <span
+          data-testid={`emitter-randomized-badge-${emitter.id}`}
+          className="inline-block rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-400"
+        >
+          randomized
+        </span>
+      )}
+    </div>
+  );
 }
 
 interface EmitterDetailProps {
   emitter: Emitter;
+  rowBusy: boolean;
+  onToggleMatchEnabled: () => void;
+  onToggleRandomized: () => void;
 }
 
-/** The expanded row's content: the emitter's full match rule plus its most
- * recent emissions (`GET /api/emissions?emitter_id=:id&limit=20`). Its own
- * component (rather than inline in the parent) so the recent-emissions
- * query only ever runs while the row is actually expanded — it unmounts
- * (and the query goes away) when the row collapses. */
-function EmitterDetail({ emitter }: EmitterDetailProps) {
-  const params = useMemo(() => {
-    const p = new URLSearchParams();
-    p.set('emitter_id', emitter.id);
-    p.set('limit', String(DETAIL_EMISSIONS_LIMIT));
-    return p;
-  }, [emitter.id]);
+/** The expanded row's content (design doc's "Expand" section): the
+ * emitter's full `attributes`, its match rule (with the enable/disable
+ * toggle — moved here from the collapsed row), the manual randomized-MAC
+ * override, and the detection heatmap/recent emissions
+ * (`GET /api/emissions?emitter_id=:id`). Its own component (rather than
+ * inline in the parent) so the recent-emissions/heatmap queries only ever
+ * run while the row is actually expanded — they unmount (and the queries go
+ * away) when the row collapses. */
+function EmitterDetail({ emitter, rowBusy, onToggleMatchEnabled, onToggleRandomized }: EmitterDetailProps) {
+  const params = useMemo(() => ({ emitter_id: emitter.id, limit: DETAIL_EMISSIONS_LIMIT }), [emitter.id]);
 
   // Keyed off `queryKeys.emissions` (per the registry) so a live `emission`
   // WS frame invalidating that key refetches this too, same convention as
   // `Emissions.tsx`'s own filtered query.
   const recentQuery = useQuery({
-    queryKey: [...queryKeys.emissions, params.toString()],
-    queryFn: () => listEmissions(params),
+    queryKey: [...queryKeys.emissions, 'emitter-detail', emitter.id],
+    queryFn: () => {
+      const p = new URLSearchParams();
+      p.set('emitter_id', params.emitter_id);
+      p.set('limit', String(params.limit));
+      return listEmissions(p);
+    },
   });
 
-  // Detection heatmap: "where this emitter has been heard" (design doc's
-  // Frontend > Map section) — a wider, separately-fetched sample than the
-  // "Recent emissions" table above, filtered client-side to only located
-  // rows (an emission with no GPS fix has null `lon`/`lat`).
-  const heatmapParams = useMemo(() => {
-    const p = new URLSearchParams();
-    p.set('emitter_id', emitter.id);
-    p.set('limit', String(HEATMAP_EMISSIONS_LIMIT));
-    return p;
-  }, [emitter.id]);
-
+  // Detection heatmap: "where this emitter has been heard" — a wider,
+  // separately-fetched sample than the "Recent emissions" table above,
+  // filtered client-side to only located rows (an emission with no GPS fix
+  // has null `lon`/`lat`).
   const heatmapQuery = useQuery({
     queryKey: [...queryKeys.emissions, 'heatmap', emitter.id],
-    queryFn: () => listEmissions(heatmapParams),
+    queryFn: () => {
+      const p = new URLSearchParams();
+      p.set('emitter_id', emitter.id);
+      p.set('limit', String(HEATMAP_EMISSIONS_LIMIT));
+      return listEmissions(p);
+    },
   });
 
   const heatmapPoints = useMemo<HeatmapPoint[]>(() => {
@@ -219,13 +248,57 @@ function EmitterDetail({ emitter }: EmitterDetailProps) {
 
   const conditions = ruleConditions(emitter.match_criteria);
   const items = recentQuery.data?.items ?? [];
+  const attributeEntries = Object.entries(emitter.attributes ?? {});
 
   return (
     <tr data-testid={`emitter-detail-${emitter.id}`} className="border-b border-slate-900 bg-slate-950/40">
       <td colSpan={TABLE_COLUMN_COUNT} className="px-4 py-3">
         <div className="space-y-4">
           <div>
+            <h3 className="text-xs font-medium uppercase tracking-wide text-slate-500">Attributes</h3>
+            {attributeEntries.length === 0 ? (
+              <p className="mt-1 text-sm text-slate-500">No attributes recorded.</p>
+            ) : (
+              <dl className="mt-1 grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
+                {attributeEntries.map(([key, value]) => (
+                  <Fragment key={key}>
+                    <dt className="text-slate-500">{key}</dt>
+                    <dd className="font-mono text-slate-200">{formatAttributeValue(value)}</dd>
+                  </Fragment>
+                ))}
+              </dl>
+            )}
+            {emitter.emitter_type === 'wifi_client' && (
+              <button
+                type="button"
+                disabled={rowBusy}
+                onClick={onToggleRandomized}
+                className="mt-2 text-xs text-slate-500 underline decoration-dotted hover:text-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {isRandomizedMac(emitter.attributes ?? {}) ? 'Mark as not randomized' : 'Mark as randomized'}
+              </button>
+            )}
+          </div>
+
+          <div>
             <h3 className="text-xs font-medium uppercase tracking-wide text-slate-500">Match rule</h3>
+            <label className="mt-1 flex items-center gap-1.5 text-xs text-slate-400">
+              <input
+                type="checkbox"
+                role="switch"
+                aria-label={`Rule enabled for ${emitter.name}`}
+                checked={emitter.match_enabled}
+                disabled={rowBusy}
+                onChange={onToggleMatchEnabled}
+                className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
+              />
+              {emitter.match_enabled ? 'Enabled' : 'Disabled'}
+            </label>
+            {!emitter.match_enabled && (
+              <p className="mt-1 text-xs text-amber-400">
+                Disabled — new matching emissions won&apos;t auto-attach.
+              </p>
+            )}
             {conditions.length === 0 ? (
               <p className="mt-1 text-sm text-slate-500">
                 No conditions — this emitter doesn&apos;t auto-attach new emissions.
@@ -274,9 +347,11 @@ function EmitterDetail({ emitter }: EmitterDetailProps) {
                     <tr key={emission.id} data-testid={`emitter-detail-emission-${emission.id}`}>
                       <td className="py-1 pr-4 text-slate-300">{formatTimestamp(emission.observed_at)}</td>
                       <td className="py-1 pr-4 font-mono text-slate-300">
-                        {payloadText(emission.payload, 'bssid')}
+                        {typeof emission.payload.bssid === 'string' ? emission.payload.bssid : '—'}
                       </td>
-                      <td className="py-1 pr-4 text-slate-300">{payloadText(emission.payload, 'ssid')}</td>
+                      <td className="py-1 pr-4 text-slate-300">
+                        {typeof emission.payload.ssid === 'string' ? emission.payload.ssid : '—'}
+                      </td>
                       <td className="py-1 pr-4 font-mono text-slate-300">{emission.signal_strength ?? '—'}</td>
                     </tr>
                   ))}
@@ -290,101 +365,90 @@ function EmitterDetail({ emitter }: EmitterDetailProps) {
   );
 }
 
-interface NewEntityFormProps {
-  emitter: Emitter;
-  submitting: boolean;
-  errorMessage: string | null;
-  onCancel: () => void;
-  onSubmit: (name: string) => void;
-}
-
-/** Inline "create entity & associate" form — a name field plus
- * submit/cancel, shown per-row when its "New entity" toggle is open. */
-function NewEntityForm({ emitter, submitting, errorMessage, onCancel, onSubmit }: NewEntityFormProps) {
-  const [name, setName] = useState('');
-  const fieldId = `new-entity-name-${emitter.id}`;
-
-  function handleSubmit(event: FormEvent<HTMLFormElement>): void {
-    event.preventDefault();
-    const trimmed = name.trim();
-    if (trimmed.length === 0) return;
-    onSubmit(trimmed);
-  }
-
-  return (
-    <form onSubmit={handleSubmit} className="mt-2 flex items-center gap-2">
-      <label htmlFor={fieldId} className="sr-only">
-        New entity name for {emitter.name}
-      </label>
-      <input
-        id={fieldId}
-        type="text"
-        required
-        autoFocus
-        value={name}
-        onChange={(event) => setName(event.target.value)}
-        placeholder="Entity name"
-        className={`${inputClassName} max-w-[10rem]`}
-      />
-      <button
-        type="submit"
-        disabled={submitting || name.trim().length === 0}
-        className="rounded bg-amber-500 px-2 py-1 text-xs font-semibold text-slate-950 transition hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        {submitting ? 'Creating…' : 'Create & associate'}
-      </button>
-      <button type="button" onClick={onCancel} className={smallButtonClassName}>
-        Cancel
-      </button>
-      {errorMessage && (
-        <p role="alert" className="text-xs text-red-400">
-          {errorMessage}
-        </p>
-      )}
-    </form>
-  );
-}
-
 export default function Emitters() {
   const queryClient = useQueryClient();
+  const [q, setQ] = useState('');
+  const [entityId, setEntityId] = useState('');
+  const [limit, setLimit] = useState(DEFAULT_LIMIT);
+  const [offset, setOffset] = useState(0);
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [creatingEntityForId, setCreatingEntityForId] = useState<string | null>(null);
-  const [editingNameForId, setEditingNameForId] = useState<string | null>(null);
-  const [editingNameDraft, setEditingNameDraft] = useState('');
 
-  // Interim `{limit: 500}` cap on both lists — `GET /api/emitters` and
-  // `GET /api/entities` now return a paginated `{items, total}` envelope,
-  // but this page still renders every row with no pagination UI of its own
-  // (that's a later redesign phase); 500 keeps today's "show everything"
-  // behavior intact without adding pagination controls here.
-  const emittersQuery = useQuery({ queryKey: queryKeys.emitters, queryFn: () => listEmitters({ limit: 500 }) });
+  const queryParams = useMemo<ListEmittersParams>(() => {
+    const params: ListEmittersParams = { limit, offset };
+    const trimmedQ = q.trim();
+    if (trimmedQ.length > 0) params.search = trimmedQ;
+    if (entityId.length > 0) params.entity_id = entityId;
+    return params;
+  }, [q, entityId, limit, offset]);
+
+  const emittersQuery = useQuery({
+    queryKey: [...queryKeys.emitters, JSON.stringify(queryParams)],
+    queryFn: () => listEmitters(queryParams),
+  });
+
+  // Interim `{limit: 500}` cap for the entity lookups (filter dropdown +
+  // associate dropdown + resolving each row's entity name) — `GET
+  // /api/entities` returns a paginated `{items, total}` envelope, but this
+  // page has no reason to paginate that list itself; 500 keeps "every
+  // entity available to pick from" without adding a second pagination UI.
   const entitiesQuery = useQuery({ queryKey: queryKeys.entities, queryFn: () => listEntities({ limit: 500 }) });
+  const entities = useMemo(() => entitiesQuery.data?.items ?? [], [entitiesQuery.data]);
 
   const entityNameById = useMemo(() => {
     const map = new Map<string, string>();
-    for (const entity of entitiesQuery.data?.items ?? []) map.set(entity.id, entity.name);
+    for (const entity of entities) map.set(entity.id, entity.name);
     return map;
-  }, [entitiesQuery.data]);
+  }, [entities]);
+
+  const emitters = emittersQuery.data?.items ?? [];
+  const total = emittersQuery.data?.total ?? 0;
+  const itemIds = emitters.map((emitter) => emitter.id);
+  const selection = useRowSelection(itemIds);
 
   function invalidateEmitters(): void {
     void queryClient.invalidateQueries({ queryKey: queryKeys.emitters });
   }
 
-  // Associate-to-existing (the row's entity <select>) and detach (the
-  // "Detach" button, `{ entity_id: null }`) both go through this one
-  // mutation — they're the same `PATCH /api/emitters/:id` call with a
-  // different `entity_id`. Also doubles as the rename mutation (`{ name }`).
+  function resetToFirstPage(): void {
+    setOffset(0);
+    selection.clear();
+  }
+
+  function handleSearchChange(next: string): void {
+    setQ(next);
+    resetToFirstPage();
+  }
+
+  function handleEntityFilterChange(next: string): void {
+    setEntityId(next);
+    resetToFirstPage();
+  }
+
+  function handlePaginationChange(nextLimit: number, nextOffset: number): void {
+    setLimit(nextLimit);
+    setOffset(nextOffset);
+    selection.clear();
+  }
+
+  // Associate-to-existing, detach (`{ entity_id: null }`), the rule
+  // enable/disable toggle, and the manual randomized-MAC override all go
+  // through this one mutation — each is the same `PATCH /api/emitters/:id`
+  // call with a different body.
   const patchMutation = useMutation({
     mutationFn: ({ id, body }: { id: string; body: Parameters<typeof patchEmitter>[1] }) => patchEmitter(id, body),
     onSuccess: invalidateEmitters,
   });
 
-  // "Create entity & associate": two sequential calls against an
-  // *existing* emitter — `POST /api/entities` then `PATCH
-  // /api/emitters/:id { entity_id }` — see the module doc comment for why
-  // this isn't `POST /api/emitters/with-entity`. Invalidates both
-  // `queryKeys.entities` (the new entity needs to show up in every row's
-  // dropdown) and `queryKeys.emitters` (this row's own entity column).
+  // "+ New entity…" (folded into the Associate select, design doc's
+  // Emitters section): two sequential calls against an *existing* emitter —
+  // `POST /api/entities` then `PATCH /api/emitters/:id { entity_id }` —
+  // rather than `POST /api/emitters/with-entity` (that endpoint creates a
+  // *brand-new* emitter row atomically with the entity, which is wrong here
+  // since every row on this page is an already-existing emitter whose id,
+  // `match_criteria`, and emission history must survive the association
+  // unchanged). Invalidates both `queryKeys.entities` (the new entity needs
+  // to show up in every row's dropdown) and `queryKeys.emitters` (this
+  // row's own entity column).
   const createAndAssociateMutation = useMutation({
     mutationFn: async ({ emitterId, entityName }: { emitterId: string; entityName: string }) => {
       const entity = await createEntity({ name: entityName });
@@ -394,7 +458,6 @@ export default function Emitters() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.entities });
       invalidateEmitters();
-      setCreatingEntityForId(null);
     },
   });
 
@@ -403,25 +466,47 @@ export default function Emitters() {
     onSuccess: invalidateEmitters,
   });
 
-  function handleAssociateChange(emitterId: string, event: ChangeEvent<HTMLSelectElement>): void {
-    const entityId = event.target.value;
-    if (entityId.length === 0) return;
-    patchMutation.mutate({ id: emitterId, body: { entity_id: entityId } });
+  const bulkDeleteMutation = useMutation({
+    mutationFn: bulkDeleteEmitters,
+    onSuccess: () => {
+      selection.clear();
+      invalidateEmitters();
+    },
+  });
+
+  const clearAllMutation = useMutation({
+    mutationFn: clearEmitters,
+    onSuccess: () => {
+      selection.clear();
+      invalidateEmitters();
+    },
+  });
+
+  function handleAssociateSelect(emitter: Emitter, value: string): void {
+    if (value === NEW_ENTITY_VALUE) {
+      const name = window.prompt('New entity name?');
+      const trimmed = name?.trim() ?? '';
+      if (trimmed.length === 0) return;
+      createAndAssociateMutation.mutate({ emitterId: emitter.id, entityName: trimmed });
+      return;
+    }
+    if (value === DETACH_VALUE) {
+      patchMutation.mutate({ id: emitter.id, body: { entity_id: null } });
+      return;
+    }
+    if (value.length === 0) return;
+    patchMutation.mutate({ id: emitter.id, body: { entity_id: value } });
   }
 
-  function handleDetach(emitterId: string): void {
-    patchMutation.mutate({ id: emitterId, body: { entity_id: null } });
-  }
-
-  // The rule enable/disable toggle (design doc's "Rules are visible +
-  // toggleable" section) — a plain `{ match_enabled }` PATCH, flipping
-  // whatever the emitter's current value is.
+  // The rule enable/disable toggle (moved into the expanded detail panel) —
+  // a plain `{ match_enabled }` PATCH, flipping whatever the emitter's
+  // current value is.
   function handleToggleMatchEnabled(emitter: Emitter): void {
     patchMutation.mutate({ id: emitter.id, body: { match_enabled: !emitter.match_enabled } });
   }
 
-  // Manual randomized-MAC override (design doc's Frontend section) — since
-  // `PATCH .../attributes` is a full replace, not a merge (see
+  // Manual randomized-MAC override (moved into the expanded detail panel) —
+  // since `PATCH .../attributes` is a full replace, not a merge (see
   // `PatchEmitterInput`'s doc comment in `api/emitters.ts`), this reads the
   // emitter's *already-loaded* `attributes` (no extra GET needed — it's the
   // same object this row is rendering from `queryKeys.emitters`), spreads
@@ -435,66 +520,79 @@ export default function Emitters() {
     });
   }
 
-  function handleCreateAndAssociate(emitterId: string, entityName: string): void {
-    createAndAssociateMutation.mutate({ emitterId, entityName });
-  }
-
-  function startEditingName(emitter: Emitter): void {
-    setEditingNameForId(emitter.id);
-    setEditingNameDraft(emitter.name);
-  }
-
-  function commitEditingName(emitterId: string): void {
-    const trimmed = editingNameDraft.trim();
-    if (trimmed.length > 0) {
-      patchMutation.mutate({ id: emitterId, body: { name: trimmed } });
-    }
-    setEditingNameForId(null);
-  }
-
   function handleDelete(emitterId: string): void {
     if (!window.confirm('Delete this emitter?')) return;
     deleteMutation.mutate(emitterId);
   }
 
-  const createAndAssociateErrorMessage =
-    createAndAssociateMutation.error instanceof ApiError
-      ? createAndAssociateMutation.error.message
-      : createAndAssociateMutation.isError
-        ? 'Failed to create entity.'
-        : null;
-
-  const emitters = emittersQuery.data?.items ?? [];
-
   return (
     <div className="space-y-4">
       <h1 className="text-xl font-semibold text-slate-100">Emitters</h1>
 
+      <div className="flex items-center gap-3">
+        <SearchBar value={q} onChange={handleSearchChange} placeholder="Search emitters…" />
+        <label htmlFor="emitters-entity-filter" className="sr-only">
+          Filter by entity
+        </label>
+        <select
+          id="emitters-entity-filter"
+          aria-label="Filter by entity"
+          value={entityId}
+          onChange={(event) => handleEntityFilterChange(event.target.value)}
+          className={selectClassName}
+        >
+          <option value="">All entities</option>
+          {entities.map((entity: Entity) => (
+            <option key={entity.id} value={entity.id}>
+              {entity.name}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className="flex items-center justify-between">
+        <SelectionToolbar
+          selectedCount={selection.selected.size}
+          onDeleteSelected={() => bulkDeleteMutation.mutate(Array.from(selection.selected))}
+          onClearAll={() => clearAllMutation.mutate()}
+          itemLabelPlural="Emitters"
+        />
+        <p data-testid="emitters-total" className="text-sm text-slate-400">
+          {total} emitter{total === 1 ? '' : 's'}
+        </p>
+      </div>
+
       {emittersQuery.isLoading && <p className="text-sm text-slate-500">Loading emitters…</p>}
       {emittersQuery.isError && <p className="text-sm text-red-400">Failed to load emitters.</p>}
       {emittersQuery.data && emitters.length === 0 && (
-        <p className="text-sm text-slate-500">No emitters discovered yet.</p>
+        <p className="text-sm text-slate-500">No emitters match this filter.</p>
       )}
 
       {emitters.length > 0 && (
         <table className="w-full border-collapse text-left text-sm">
           <thead>
             <tr className="border-b border-slate-800 text-xs uppercase tracking-wide text-slate-500">
+              <th className="py-2 pr-2 font-medium">
+                <input
+                  type="checkbox"
+                  aria-label="Select all emitters on this page"
+                  checked={selection.allSelected}
+                  onChange={() => selection.toggleAll(itemIds)}
+                  className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
+                />
+              </th>
               <th className="py-2 pr-4 font-medium">Name</th>
               <th className="py-2 pr-4 font-medium">Type</th>
-              <th className="py-2 pr-4 font-medium">Attributes</th>
+              <th className="py-2 pr-4 font-medium">MAC/Identity</th>
               <th className="py-2 pr-4 font-medium">First Seen</th>
               <th className="py-2 pr-4 font-medium">Last Seen</th>
               <th className="py-2 pr-4 font-medium">Entity</th>
-              <th className="py-2 pr-4 font-medium">Rule</th>
-              <th className="py-2 pr-4 font-medium">Actions</th>
+              <th className="py-2 pr-2 font-medium">Actions</th>
             </tr>
           </thead>
           <tbody>
             {emitters.map((emitter) => {
               const isExpanded = expandedId === emitter.id;
-              const isEditingName = editingNameForId === emitter.id;
-              const isCreatingEntity = creatingEntityForId === emitter.id;
               const entityName = emitter.entity_id ? (entityNameById.get(emitter.entity_id) ?? '—') : '—';
               const rowBusy =
                 (patchMutation.isPending && patchMutation.variables?.id === emitter.id) ||
@@ -502,139 +600,75 @@ export default function Emitters() {
                 (createAndAssociateMutation.isPending &&
                   createAndAssociateMutation.variables?.emitterId === emitter.id);
 
+              function toggleExpanded(): void {
+                setExpandedId(isExpanded ? null : emitter.id);
+              }
+
               return (
                 <Fragment key={emitter.id}>
-                  <tr data-testid={`emitter-row-${emitter.id}`} className="border-b border-slate-900 align-top">
+                  <tr data-testid={`emitter-row-${emitter.id}`} className="border-b border-slate-900">
+                    <td className="py-2 pr-2">
+                      <input
+                        type="checkbox"
+                        aria-label={`Select emitter ${emitter.id}`}
+                        checked={selection.selected.has(emitter.id)}
+                        onChange={() => selection.toggle(emitter.id)}
+                        className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
+                      />
+                    </td>
                     <td className="py-2 pr-4 text-slate-200">
                       <button
                         type="button"
-                        onClick={() => setExpandedId(isExpanded ? null : emitter.id)}
+                        onClick={toggleExpanded}
                         className="text-left text-slate-200 underline decoration-slate-600 decoration-dotted hover:text-amber-400"
                       >
                         {emitter.name}
                       </button>
-                      {isEditingName ? (
-                        <div className="mt-1 flex items-center gap-1">
-                          <label htmlFor={`emitter-name-${emitter.id}`} className="sr-only">
-                            Edit name for {emitter.name}
-                          </label>
-                          <input
-                            id={`emitter-name-${emitter.id}`}
-                            type="text"
-                            value={editingNameDraft}
-                            onChange={(event) => setEditingNameDraft(event.target.value)}
-                            className={`${inputClassName} max-w-[9rem] py-1 text-xs`}
-                          />
-                          <button
-                            type="button"
-                            onClick={() => commitEditingName(emitter.id)}
-                            className={smallButtonClassName}
-                          >
-                            Save
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setEditingNameForId(null)}
-                            className={smallButtonClassName}
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => startEditingName(emitter)}
-                          className="mt-1 block text-xs text-slate-500 underline decoration-dotted hover:text-amber-400"
-                        >
-                          Rename
-                        </button>
-                      )}
                     </td>
                     <td className="py-2 pr-4">
                       <TypeBadge emitter={emitter} />
                     </td>
                     <td className="py-2 pr-4">
-                      <AttributesSummary emitter={emitter} />
-                      {emitter.emitter_type === 'wifi_client' && (
-                        <button
-                          type="button"
-                          disabled={rowBusy}
-                          onClick={() => handleToggleRandomized(emitter)}
-                          className="mt-1 block text-[10px] text-slate-500 underline decoration-dotted hover:text-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                          {isRandomizedMac(emitter.attributes ?? {})
-                            ? 'Mark as not randomized'
-                            : 'Mark as randomized'}
-                        </button>
-                      )}
+                      <MacIdentityCell emitter={emitter} />
                     </td>
-                    <td className="py-2 pr-4 text-slate-300">{formatTimestamp(emitter.first_seen_at)}</td>
-                    <td className="py-2 pr-4 text-slate-300">{formatTimestamp(emitter.last_seen_at)}</td>
+                    <td className="py-2 pr-4 whitespace-nowrap text-slate-300">
+                      {formatCompact(emitter.first_seen_at)}
+                    </td>
+                    <td className="py-2 pr-4 whitespace-nowrap text-slate-300">
+                      {formatCompact(emitter.last_seen_at)}
+                    </td>
                     <td data-testid={`emitter-entity-${emitter.id}`} className="py-2 pr-4 text-slate-300">
                       {entityName}
                     </td>
-                    <td className="py-2 pr-4">
-                      <div className="font-mono text-xs text-slate-300">
-                        {summarizeRule(emitter.match_criteria)}
-                      </div>
-                      <label className="mt-1 flex items-center gap-1.5 text-xs text-slate-400">
-                        <input
-                          type="checkbox"
-                          role="switch"
-                          aria-label={`Rule enabled for ${emitter.name}`}
-                          checked={emitter.match_enabled}
-                          disabled={rowBusy}
-                          onChange={() => handleToggleMatchEnabled(emitter)}
-                          className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
-                        />
-                        {emitter.match_enabled ? 'Enabled' : 'Disabled'}
-                      </label>
-                      {!emitter.match_enabled && (
-                        <p className="mt-1 max-w-[10rem] text-[10px] text-amber-400">
-                          Disabled — new matching emissions won&apos;t auto-attach.
-                        </p>
-                      )}
-                    </td>
-                    <td className="py-2 pr-4">
-                      <div className="flex flex-wrap items-center gap-2">
+                    <td className="py-2 pr-2">
+                      <div className="flex items-center gap-1.5 whitespace-nowrap">
+                        <button
+                          type="button"
+                          onClick={toggleExpanded}
+                          aria-label={isExpanded ? `Collapse details for ${emitter.name}` : `Expand details for ${emitter.name}`}
+                          className={smallButtonClassName}
+                        >
+                          {isExpanded ? '▾' : '▸'}
+                        </button>
+
                         <select
                           aria-label={`Associate ${emitter.name} to an entity`}
                           value=""
                           disabled={rowBusy}
-                          onChange={(event) => handleAssociateChange(emitter.id, event)}
+                          onChange={(event) => handleAssociateSelect(emitter, event.target.value)}
                           className={selectClassName}
                         >
                           <option value="" disabled>
-                            Associate to entity…
+                            Associate…
                           </option>
-                          {(entitiesQuery.data?.items ?? []).map((entity: Entity) => (
+                          {emitter.entity_id && <option value={DETACH_VALUE}>Detach</option>}
+                          {entities.map((entity: Entity) => (
                             <option key={entity.id} value={entity.id}>
                               {entity.name}
                             </option>
                           ))}
+                          <option value={NEW_ENTITY_VALUE}>+ New entity…</option>
                         </select>
-
-                        {emitter.entity_id && (
-                          <button
-                            type="button"
-                            disabled={rowBusy}
-                            onClick={() => handleDetach(emitter.id)}
-                            className={smallButtonClassName}
-                          >
-                            Detach
-                          </button>
-                        )}
-
-                        {!isCreatingEntity && (
-                          <button
-                            type="button"
-                            disabled={rowBusy}
-                            onClick={() => setCreatingEntityForId(emitter.id)}
-                            className={smallButtonClassName}
-                          >
-                            New entity
-                          </button>
-                        )}
 
                         <button
                           type="button"
@@ -647,32 +681,24 @@ export default function Emitters() {
                             : 'Delete'}
                         </button>
                       </div>
-
-                      {isCreatingEntity && (
-                        <NewEntityForm
-                          emitter={emitter}
-                          submitting={
-                            createAndAssociateMutation.isPending &&
-                            createAndAssociateMutation.variables?.emitterId === emitter.id
-                          }
-                          errorMessage={
-                            createAndAssociateMutation.variables?.emitterId === emitter.id
-                              ? createAndAssociateErrorMessage
-                              : null
-                          }
-                          onCancel={() => setCreatingEntityForId(null)}
-                          onSubmit={(name) => handleCreateAndAssociate(emitter.id, name)}
-                        />
-                      )}
                     </td>
                   </tr>
-                  {isExpanded && <EmitterDetail emitter={emitter} />}
+                  {isExpanded && (
+                    <EmitterDetail
+                      emitter={emitter}
+                      rowBusy={rowBusy}
+                      onToggleMatchEnabled={() => handleToggleMatchEnabled(emitter)}
+                      onToggleRandomized={() => handleToggleRandomized(emitter)}
+                    />
+                  )}
                 </Fragment>
               );
             })}
           </tbody>
         </table>
       )}
+
+      <Pagination total={total} limit={limit} offset={offset} onChange={handlePaginationChange} />
     </div>
   );
 }
