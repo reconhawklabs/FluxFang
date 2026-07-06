@@ -20,6 +20,7 @@ vi.mock('maplibre-gl', () => {
       if (event === 'load') cb();
     }
     remove(): void {}
+    resize(): void {}
     addSource(): void {}
     addLayer(): void {}
     getSource() {

@@ -497,6 +497,11 @@ export default function MapView() {
     map.on('load', () => {
       addLayers(map);
       setStyleLoaded(true);
+      // Belt-and-suspenders: if the container hadn't been laid out to its
+      // final size when `new Map(...)` measured it, the canvas would be the
+      // wrong size (often 0 → blank). A resize here syncs it to the
+      // now-laid-out container.
+      map.resize();
     });
 
     return () => {
@@ -788,8 +793,18 @@ export default function MapView() {
         {emissionsIsError && <p className="text-sm text-red-400">Failed to load emissions.</p>}
       </div>
 
-      <div className="relative min-h-[420px] flex-1 overflow-hidden rounded border border-slate-800">
-        <div ref={containerRef} data-testid="maplibre-container" className="absolute inset-0" />
+      {/* The sizing classes (`min-h-[420px] flex-1`) live on the ref'd
+          container itself — MapLibre reads its size at construction and only
+          auto-resizes on *window* resize, so a container that measures 0 at
+          init (which a wrapper + `absolute inset-0` child can, since the child
+          is out of flow) leaves the map blank forever. `relative` makes it the
+          positioning context for the overlaid recenter button; MapLibre just
+          appends its canvas as additional children. */}
+      <div
+        ref={containerRef}
+        data-testid="maplibre-container"
+        className="relative min-h-[420px] flex-1 overflow-hidden rounded border border-slate-800"
+      >
         <button
           type="button"
           onClick={handleRecenter}

@@ -55,6 +55,7 @@ vi.mock('maplibre-gl', () => {
       if (event === 'load') cb();
     }
     remove(): void {}
+    resize(): void {}
     addSource(id: string): void {
       if (!this.sources.has(id)) this.sources.set(id, new FakeSource());
     }
