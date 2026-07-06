@@ -31,6 +31,11 @@
 //   Emissions "Assign to emitter" modal's Type dropdown) is, like
 //   `catalog(kind)`, static server-side config — NOT invalidated by
 //   `useLiveEvents`.
+// - `gpsStatus` (`GET /api/gps/status`, Phase 5) is, like `captureDevices`, a
+//   live *hardware* read rather than data driven by emissions/notifications
+//   — NOT invalidated by `useLiveEvents`. Callers (the Dashboard GPS block,
+//   `MapView`'s center-on-user) instead poll it directly via a short
+//   `refetchInterval` on their own `useQuery`.
 export const queryKeys = {
   dashboard: ['dashboard'] as const,
   dataSources: ['dataSources'] as const,
@@ -42,6 +47,7 @@ export const queryKeys = {
   alertMethods: ['alertMethods'] as const,
   alertRules: ['alertRules'] as const,
   notifications: ['notifications'] as const,
+  gpsStatus: ['gpsStatus'] as const,
   catalog: (kind: string) => ['catalog', kind] as const,
   emitterTypes: (kind: string) => ['emitterTypes', kind] as const,
 };

@@ -9,6 +9,7 @@ import type { ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, expect, test, vi } from 'vitest';
+import maplibregl from 'maplibre-gl';
 import MapView from './MapView';
 import { jsonResponse } from '../test-utils/fetchMocks';
 import type { Emission, EmissionsPage } from '../api/emissions';
@@ -16,11 +17,23 @@ import type { Entity, EntityDetail } from '../api/entities';
 import type { Zone } from '../api/zones';
 import type { DataSource } from '../api/dataSources';
 import type { Emitter } from '../api/emitters';
+import type { GpsStatus } from '../api/gps';
 
+// `jumpTo` backs the once-on-load auto-center (Phase 5); `flyTo` backs the
+// "recenter to me" button. Both are spies (not just no-ops) so tests below
+// can assert on the `{center: [lon, lat]}` they were called with.
 vi.mock('maplibre-gl', () => {
   class FakeMap {
+    // Tracks every constructed instance so tests can grab "the map MapView
+    // just created" (`latestFakeMap()` below) without MapView itself
+    // exposing its internal `mapRef`.
+    static instances: FakeMap[] = [];
     private handlers = new Map<string, () => void>();
-    constructor(_options: unknown) {}
+    jumpTo = vi.fn();
+    flyTo = vi.fn();
+    constructor(_options: unknown) {
+      FakeMap.instances.push(this);
+    }
     addControl(): void {}
     on(event: string, cb: () => void): void {
       this.handlers.set(event, cb);
@@ -42,6 +55,16 @@ vi.mock('maplibre-gl', () => {
 
   return { default: { Map: FakeMap, NavigationControl: FakeNavigationControl } };
 });
+
+/** The most recently constructed `FakeMap` (there's exactly one per
+ * `render(<MapView />)`) — used to assert on `jumpTo`/`flyTo` calls without
+ * MapView exposing its internal `mapRef`. */
+function latestFakeMap() {
+  const MapCtor = maplibregl.Map as unknown as {
+    instances: Array<{ jumpTo: ReturnType<typeof vi.fn>; flyTo: ReturnType<typeof vi.fn> }>;
+  };
+  return MapCtor.instances[MapCtor.instances.length - 1];
+}
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -135,6 +158,29 @@ const EMITTER_WIFI: Emitter = {
   created_at: '2026-07-05T00:00:00Z',
 };
 
+/** No running gps source / no fix — the default for tests that don't care
+ * about the recenter/auto-center behavior, so the "recenter to me" button
+ * renders disabled and no `jumpTo` fires. */
+const GPS_STATUS_NO_FIX: GpsStatus = {
+  source_running: false,
+  has_fix: false,
+  lat: null,
+  lon: null,
+  quality: null,
+  fix_age_seconds: null,
+  status: 'disabled',
+};
+
+const GPS_STATUS_FIX: GpsStatus = {
+  source_running: true,
+  has_fix: true,
+  lat: 1.5,
+  lon: 2.5,
+  quality: 4,
+  fix_age_seconds: 1.2,
+  status: 'active',
+};
+
 function baseRoutes(overrides: Record<string, (url: URL, init?: RequestInit) => unknown> = {}) {
   return {
     'GET /api/data-sources': () => [DATA_SOURCE_1],
@@ -143,6 +189,7 @@ function baseRoutes(overrides: Record<string, (url: URL, init?: RequestInit) => 
     'GET /api/entities': () => ({ items: [ENTITY_1], total: 1 }),
     'GET /api/entities/entity-1': () => ENTITY_1_DETAIL,
     'GET /api/zones': () => [ZONE_1],
+    'GET /api/gps/status': () => GPS_STATUS_NO_FIX,
     ...overrides,
   };
 }
@@ -223,4 +270,46 @@ test('an emitter with no category (plain user-made emitter) contributes no categ
 
   await screen.findByLabelText('All emissions');
   expect(screen.queryByLabelText(/^All (?!emissions)/)).not.toBeInTheDocument();
+});
+
+test('with no GPS fix, the "Recenter to me" button is disabled and the map never auto-centers', async () => {
+  const fetchMock = mockRoutes(baseRoutes());
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<MapView />, { wrapper });
+
+  const button = await screen.findByRole('button', { name: /recenter/i });
+  await waitFor(() => expect(button).toBeDisabled());
+  expect(latestFakeMap().jumpTo).not.toHaveBeenCalled();
+});
+
+test('with a GPS fix, the map auto-centers on load and the "Recenter to me" button is enabled', async () => {
+  const fetchMock = mockRoutes(baseRoutes({ 'GET /api/gps/status': () => GPS_STATUS_FIX }));
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<MapView />, { wrapper });
+
+  const button = await screen.findByRole('button', { name: /recenter/i });
+  await waitFor(() => expect(button).toBeEnabled());
+  await waitFor(() =>
+    expect(latestFakeMap().jumpTo).toHaveBeenCalledWith(
+      expect.objectContaining({ center: [GPS_STATUS_FIX.lon, GPS_STATUS_FIX.lat] }),
+    ),
+  );
+});
+
+test('clicking "Recenter to me" flies the map to the current GPS fix', async () => {
+  const fetchMock = mockRoutes(baseRoutes({ 'GET /api/gps/status': () => GPS_STATUS_FIX }));
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<MapView />, { wrapper });
+
+  const button = await screen.findByRole('button', { name: /recenter/i });
+  await waitFor(() => expect(button).toBeEnabled());
+
+  fireEvent.click(button);
+
+  expect(latestFakeMap().flyTo).toHaveBeenCalledWith(
+    expect.objectContaining({ center: [GPS_STATUS_FIX.lon, GPS_STATUS_FIX.lat] }),
+  );
 });

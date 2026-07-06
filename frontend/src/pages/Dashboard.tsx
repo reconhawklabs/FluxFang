@@ -16,6 +16,10 @@
 //   rendered as-is inside a fixed-height container rather than duplicated
 //   into a bespoke "compact" variant (YAGNI — it already does exactly what
 //   this brief asks for: a heatmap of recent located emissions).
+// - GPS Status block (Phase 5): `GET /api/gps/status`, polled on a short
+//   interval so the state/lat/lon read as "live" without needing a WS frame
+//   of their own (see `queryKeys.ts`'s note on why `gpsStatus` isn't
+//   WS-invalidated).
 //
 // jsdom/test guard: embedding `MapView` pulls in `maplibre-gl`, which needs
 // a real WebGL canvas jsdom doesn't have. `Dashboard.test.tsx` mocks
@@ -29,12 +33,71 @@ import { listDataSources } from '../api/dataSources';
 import { listEmitters } from '../api/emitters';
 import { listEntities } from '../api/entities';
 import { listNotifications } from '../api/notifications';
+import type { GpsSourceStatus, GpsStatus } from '../api/gps';
+import { getGpsStatus } from '../api/gps';
 import StatTile from '../components/StatTile';
 import MapView from './MapView';
 
 /** Page size for the feed query — a landing-page glance, not a full browse
  * (that's `Emissions.tsx`'s job), so a modest cap keeps the request light. */
 const FEED_LIMIT = 20;
+
+/** How often the GPS Status block re-polls `GET /api/gps/status` — short
+ * enough to read as "live" (a fix's age/quality can change every second)
+ * without hammering the endpoint. */
+const GPS_STATUS_REFETCH_MS = 4000;
+
+const GPS_STATUS_LABEL: Record<GpsSourceStatus, string> = {
+  disabled: 'GPS disabled / no source',
+  acquiring: 'Acquiring signal…',
+  active: 'Active',
+  degraded: 'Degraded signal',
+};
+
+/** Status dot + text color — green for a good fix, amber while
+ * acquiring/degraded (something's happening but not yet trustworthy), gray
+ * when there's no gps source running at all. */
+const GPS_STATUS_COLOR: Record<GpsSourceStatus, string> = {
+  disabled: 'bg-slate-500 text-slate-400',
+  acquiring: 'bg-amber-400 text-amber-400',
+  active: 'bg-emerald-400 text-emerald-400',
+  degraded: 'bg-orange-400 text-orange-400',
+};
+
+function formatCoord(value: number): string {
+  return value.toFixed(5);
+}
+
+function GpsStatusBlock() {
+  const gpsQuery = useQuery({
+    queryKey: queryKeys.gpsStatus,
+    queryFn: getGpsStatus,
+    refetchInterval: GPS_STATUS_REFETCH_MS,
+  });
+
+  const gps: GpsStatus | undefined = gpsQuery.data;
+  const [dotClass, textClass] = (gps ? GPS_STATUS_COLOR[gps.status] : 'bg-slate-700 text-slate-500').split(' ');
+  const hasCoords = Boolean(gps?.has_fix && gps.lat !== null && gps.lon !== null);
+
+  return (
+    <section
+      data-testid="gps-status-block"
+      className="rounded-lg border border-slate-800 bg-slate-900/60 px-4 py-3"
+    >
+      <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">GPS Status</h2>
+      <div className="mt-2 flex items-center gap-2">
+        <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${dotClass}`} aria-hidden="true" />
+        <span className={`text-sm font-medium ${textClass}`}>{gps ? GPS_STATUS_LABEL[gps.status] : '—'}</span>
+      </div>
+      <p className="mt-2 font-mono text-sm text-slate-300">
+        {hasCoords && gps ? `${formatCoord(gps.lat as number)}, ${formatCoord(gps.lon as number)}` : '—'}
+      </p>
+      {hasCoords && gps && gps.fix_age_seconds !== null && (
+        <p className="mt-1 text-xs text-slate-500">Fix age: {Math.round(gps.fix_age_seconds)}s</p>
+      )}
+    </section>
+  );
+}
 
 function formatObservedAt(iso: string): string {
   const date = new Date(iso);
@@ -123,6 +186,8 @@ export default function Dashboard() {
           loading={notificationsSummaryQuery.isLoading}
         />
       </div>
+
+      <GpsStatusBlock />
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <section className="space-y-2 rounded-lg border border-slate-800 bg-slate-900/40 p-4">

@@ -37,6 +37,20 @@
 //   - Zones: `GET /api/zones`, shaped by `zonesToCircleGeoJSON` into a
 //     circle-approximation polygon per zone.
 //
+// Phase 5 (GPS status + map addendum): on initial load, once both the map
+// style and a `GET /api/gps/status` fix are available, the map centers on
+// the user's current location instead of the hardcoded `[0, 0]` world view
+// — a one-time `jumpTo` (immediate, no animation — there's nothing to
+// animate *from* yet, the map hasn't shown the user anything). A
+// `hasCenteredOnLoadRef` guard means this fires exactly once per mount, so
+// it never fights a later re-fetch of `gpsStatusQuery` (e.g. the user
+// having since panned away). A "Recenter to me" button lets the user
+// re-center on demand at any time via `flyTo` (animated, since this time
+// there IS a previous view to transition from), using whatever fix is most
+// recently cached — disabled (with a tooltip) when there's no fix to
+// center on. Both live in this shared component so the Dashboard's
+// embedded map and the standalone /map page get them for free.
+//
 // jsdom/test guard: MapLibre GL needs a real WebGL canvas, which jsdom
 // doesn't provide. Rather than special-casing the component for tests, the
 // test file (`MapView.test.tsx`) `vi.mock('maplibre-gl')`s the whole module
@@ -53,9 +67,20 @@ import { getEntityDetail, listEntities } from '../api/entities';
 import { listZones } from '../api/zones';
 import { listDataSources } from '../api/dataSources';
 import { listEmitters } from '../api/emitters';
+import { getGpsStatus } from '../api/gps';
 import type { EntityMarker } from '../components/mapData';
 import { emissionsToHeatmapGeoJSON, entitiesToMarkerFeatures, zonesToCircleGeoJSON } from '../components/mapData';
 import { OSM_RASTER_STYLE } from '../components/osmRasterStyle';
+
+/** How often the GPS fix backing center-on-load/recenter is re-polled —
+ * same cadence as the Dashboard's GPS Status block (`Dashboard.tsx`), so
+ * "recenter to me" uses a reasonably fresh fix without an explicit refetch
+ * on click. */
+const GPS_STATUS_REFETCH_MS = 4000;
+
+/** Zoom level used when centering on the user's location — close enough to
+ * be useful (street-level-ish) without requiring the fix to be pixel-exact. */
+const USER_LOCATION_ZOOM = 14;
 
 const EMISSIONS_SOURCE_ID = 'emissions-heatmap-source';
 const ENTITIES_SOURCE_ID = 'entity-markers-source';
@@ -288,6 +313,18 @@ export default function MapView() {
 
   const zonesQuery = useQuery({ queryKey: queryKeys.zones, queryFn: listZones });
 
+  // Phase 5: GPS fix backing center-on-load + the "Recenter to me" button
+  // (see module doc comment).
+  const gpsStatusQuery = useQuery({
+    queryKey: queryKeys.gpsStatus,
+    queryFn: getGpsStatus,
+    refetchInterval: GPS_STATUS_REFETCH_MS,
+  });
+  const hasGpsFix = Boolean(
+    gpsStatusQuery.data?.has_fix && gpsStatusQuery.data.lat !== null && gpsStatusQuery.data.lon !== null,
+  );
+  const hasCenteredOnLoadRef = useRef(false);
+
   // Map init — runs once. In tests, `maplibre-gl` is mocked
   // (`vi.mock('maplibre-gl', ...)` in `MapView.test.tsx`) so this never
   // touches a real WebGL canvas; jsdom itself is never specially detected
@@ -314,6 +351,32 @@ export default function MapView() {
       setStyleLoaded(false);
     };
   }, []);
+
+  // Center-on-user-load (Phase 5, see module doc comment): fires exactly
+  // once per mount, as soon as both the style has loaded and a GPS fix is
+  // known. Guarded by `hasCenteredOnLoadRef` so a later `gpsStatusQuery`
+  // refetch (the query polls every `GPS_STATUS_REFETCH_MS`) never yanks the
+  // view out from under a user who's since panned elsewhere — only the
+  // explicit "Recenter to me" button does that after this initial jump.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleLoaded || hasCenteredOnLoadRef.current) return;
+    const gps = gpsStatusQuery.data;
+    if (!gps?.has_fix || gps.lat === null || gps.lon === null) return;
+    hasCenteredOnLoadRef.current = true;
+    map.jumpTo({ center: [gps.lon, gps.lat], zoom: USER_LOCATION_ZOOM });
+  }, [styleLoaded, gpsStatusQuery.data]);
+
+  // "Recenter to me" click handler — animated (`flyTo`), unlike the
+  // immediate `jumpTo` above, since there's a previous view to transition
+  // from this time. Uses whatever fix `gpsStatusQuery` currently has
+  // cached; disabled entirely (see the button below) when there's none.
+  function handleRecenter(): void {
+    const map = mapRef.current;
+    const gps = gpsStatusQuery.data;
+    if (!map || !gps?.has_fix || gps.lat === null || gps.lon === null) return;
+    map.flyTo({ center: [gps.lon, gps.lat], zoom: USER_LOCATION_ZOOM });
+  }
 
   // Push fresh source data whenever the underlying queries resolve/change,
   // once the style (and thus the sources) exist.
@@ -494,11 +557,18 @@ export default function MapView() {
         {emissionsQuery.isError && <p className="text-sm text-red-400">Failed to load emissions.</p>}
       </div>
 
-      <div
-        ref={containerRef}
-        data-testid="maplibre-container"
-        className="min-h-[420px] flex-1 overflow-hidden rounded border border-slate-800"
-      />
+      <div className="relative min-h-[420px] flex-1 overflow-hidden rounded border border-slate-800">
+        <div ref={containerRef} data-testid="maplibre-container" className="absolute inset-0" />
+        <button
+          type="button"
+          onClick={handleRecenter}
+          disabled={!hasGpsFix}
+          title={hasGpsFix ? 'Recenter to my location' : 'No GPS fix'}
+          className="absolute left-3 top-3 z-10 rounded border border-slate-700 bg-slate-900/90 px-2 py-1.5 text-xs font-medium text-slate-200 shadow hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Recenter to me
+        </button>
+      </div>
     </div>
   );
 }

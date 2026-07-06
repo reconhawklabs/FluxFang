@@ -12,9 +12,15 @@ import type { DataSource } from '../api/dataSources';
 import type { Emission, EmissionsPage } from '../api/emissions';
 import type { Emitter } from '../api/emitters';
 import type { Entity, EntityDetail } from '../api/entities';
+import type { GpsStatus } from '../api/gps';
 import type { NotificationsPage } from '../api/notifications';
 import type { Zone } from '../api/zones';
 
+// `jumpTo`/`flyTo` back the embedded `MapView`'s center-on-user-load /
+// "recenter to me" button (Phase 5) — spies so a test could assert on them,
+// though this file's own tests don't (see `MapView.test.tsx` for that);
+// they still need to exist on the mock so `MapView` doesn't crash calling
+// them from inside a `Dashboard` render.
 vi.mock('maplibre-gl', () => {
   class FakeMap {
     constructor(_options: unknown) {}
@@ -32,6 +38,8 @@ vi.mock('maplibre-gl', () => {
       return true;
     }
     setLayoutProperty(): void {}
+    jumpTo = vi.fn();
+    flyTo = vi.fn();
   }
 
   class FakeNavigationControl {}
@@ -138,6 +146,26 @@ const EMISSION_2: Emission = {
 
 const NOTIFICATIONS_PAGE: NotificationsPage = { items: [], total: 5, unread_count: 3 };
 
+const GPS_STATUS_DISABLED: GpsStatus = {
+  source_running: false,
+  has_fix: false,
+  lat: null,
+  lon: null,
+  quality: null,
+  fix_age_seconds: null,
+  status: 'disabled',
+};
+
+const GPS_STATUS_ACTIVE: GpsStatus = {
+  source_running: true,
+  has_fix: true,
+  lat: 37.12345,
+  lon: -122.6789,
+  quality: 4,
+  fix_age_seconds: 2.5,
+  status: 'active',
+};
+
 /** Distinguishes the Dashboard's own feed fetch (small `limit`) from
  * `MapView`'s heatmap fetch (`limit=500`, see that component's module doc
  * comment) since both hit `GET /api/emissions`. */
@@ -154,6 +182,7 @@ function baseRoutes(overrides: Record<string, (url: URL, init?: RequestInit) => 
     'GET /api/zones': () => [ZONE_1],
     'GET /api/notifications': () => NOTIFICATIONS_PAGE,
     'GET /api/emissions': emissionsHandler({ items: [EMISSION_1], total: 1 }),
+    'GET /api/gps/status': () => GPS_STATUS_DISABLED,
     ...overrides,
   };
 }
@@ -234,4 +263,27 @@ test('a WS "emission" frame refreshes the feed with newly arrived emissions', as
   socket!.onmessage?.({ data: JSON.stringify({ type: 'emission', data: { id: 'em-2' } }) });
 
   await waitFor(() => expect(screen.getByTestId('dashboard-feed-row-em-2')).toBeInTheDocument());
+});
+
+test('GPS Status block shows Active + lat/lon when GET /api/gps/status has a fix', async () => {
+  const fetchMock = mockRoutes(baseRoutes({ 'GET /api/gps/status': () => GPS_STATUS_ACTIVE }));
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Dashboard />, { wrapper });
+
+  const block = await screen.findByTestId('gps-status-block');
+  await waitFor(() => expect(within(block).getByText('Active')).toBeInTheDocument());
+  expect(within(block).getByText(/37\.12345/)).toBeInTheDocument();
+  expect(within(block).getByText(/-122\.6789/)).toBeInTheDocument();
+});
+
+test('GPS Status block shows a disabled state when GET /api/gps/status reports no source', async () => {
+  const fetchMock = mockRoutes(baseRoutes({ 'GET /api/gps/status': () => GPS_STATUS_DISABLED }));
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Dashboard />, { wrapper });
+
+  const block = await screen.findByTestId('gps-status-block');
+  await waitFor(() => expect(within(block).getByText(/disabled/i)).toBeInTheDocument());
+  expect(within(block).getByText('—')).toBeInTheDocument();
 });
