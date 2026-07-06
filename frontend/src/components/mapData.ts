@@ -117,6 +117,56 @@ export function entitiesToMarkerFeatures(
   };
 }
 
+/** Phase 6 (Map page redesign, "Layers" group's Emitters toggle): one marker
+ * per emitter, placed at that emitter's most-recent LOCATED emission.
+ * Structurally identical to `EntityMarker` (`id`/`name`/`lon`/`lat`/
+ * `observed_at`), so it reuses `entitiesToMarkerFeatures` for the GeoJSON
+ * shaping rather than needing its own — only the grouping-by-emitter-id
+ * (`emitterMarkersFromEmissions` below) is new. */
+export type EmitterMarker = EntityMarker;
+
+/**
+ * `emissions` -> one `EmitterMarker` per distinct `emitter_id` present,
+ * placed at that emitter's most-recent (by `observed_at`) LOCATED emission.
+ * Emissions with no location (`lon`/`lat` null) or no `emitter_id` (not yet
+ * assigned to an emitter) are dropped — same located-only convention as
+ * `emissionsToHeatmapGeoJSON`.
+ *
+ * `emitterNames` maps `emitter_id` -> display name (from `GET /api/emitters`,
+ * the caller's own `listEmitters` fetch); an emitter id missing from it
+ * (shouldn't normally happen — every `emitter_id` on an emission should
+ * belong to a known emitter, but defensively) falls back to showing the raw
+ * id rather than crashing or rendering a blank label.
+ */
+export function emitterMarkersFromEmissions(
+  emissions: Emission[],
+  emitterNames: Record<string, string>,
+): EmitterMarker[] {
+  const latestByEmitter = new Map<string, Emission & { lon: number; lat: number }>();
+
+  for (const emission of emissions) {
+    if (emission.lon === null || emission.lat === null) continue;
+    if (!emission.emitter_id) continue;
+    const located = emission as Emission & { lon: number; lat: number };
+    const existing = latestByEmitter.get(emission.emitter_id);
+    if (!existing || located.observed_at > existing.observed_at) {
+      latestByEmitter.set(emission.emitter_id, located);
+    }
+  }
+
+  const markers: EmitterMarker[] = [];
+  for (const [emitterId, emission] of latestByEmitter) {
+    markers.push({
+      id: emitterId,
+      name: emitterNames[emitterId] ?? emitterId,
+      lon: emission.lon,
+      lat: emission.lat,
+      observed_at: emission.observed_at,
+    });
+  }
+  return markers;
+}
+
 export interface ZonePolygonProperties {
   id: string;
   name: string;

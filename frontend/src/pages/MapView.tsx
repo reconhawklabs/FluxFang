@@ -2,15 +2,18 @@
 // entity markers, and a zones overlay, with layer toggles + a scoping
 // filter row.
 //
-// Style: a hand-built keyless *raster* style pointing at OpenStreetMap's
-// standard tile server (`https://tile.openstreetmap.org/{z}/{x}/{y}.png`),
-// not a vector style from a hosted (API-keyed) provider like MapTiler/
-// Mapbox — this app has no map-tile API key configured anywhere, and the
-// brief calls for "a free raster/vector style ... no API key". NOTE: this
-// still needs *runtime internet access* for the browser to fetch OSM tile
-// images; the data layers below (heatmap/entities/zones, built from this
-// app's own API) render regardless of whether tiles load, they just draw on
-// a blank background if OSM is unreachable.
+// Phase 6 (Map page redesign addendum) restructured the control panel into
+// three checkbox groups (see below) and added a basemap switcher; the
+// underlying layers/sources/queries this component manages are otherwise
+// the same machinery Task 9.7/Task C built.
+//
+// Style: a hand-built keyless *raster* style — not a vector style from a
+// hosted (API-keyed) provider like MapTiler/Mapbox — this app has no
+// map-tile API key configured anywhere. NOTE: every basemap option (including
+// "Standard") still needs *runtime internet access* for the browser to fetch
+// tile images; the data layers below (heatmap/entities/emitters/zones, built
+// from this app's own API) render regardless of whether tiles load, they
+// just draw on a blank background if the tile host is unreachable.
 //
 // Data sources for the layers:
 //   - "All emissions" heatmap: `GET /api/emissions` (scoped by this page's
@@ -34,22 +37,39 @@
 //     documented here as the YAGNI-appropriate approach rather than adding a
 //     bulk "last location per entity" backend endpoint this task doesn't
 //     otherwise need.
+//   - Emitter markers (Phase 6, "Layers" group's Emitters toggle): one
+//     marker per emitter, derived client-side from the SAME "all emissions"
+//     query's items via `emitterMarkersFromEmissions` (groups located
+//     emissions by `emitter_id`, keeps only the latest per emitter) — no
+//     separate backend request, since the all-emissions query already fetches
+//     the located emissions this needs.
 //   - Zones: `GET /api/zones`, shaped by `zonesToCircleGeoJSON` into a
 //     circle-approximation polygon per zone.
 //
-// Phase 5 (GPS status + map addendum): on initial load, once both the map
-// style and a `GET /api/gps/status` fix are available, the map centers on
-// the user's current location instead of the hardcoded `[0, 0]` world view
-// — a one-time `jumpTo` (immediate, no animation — there's nothing to
-// animate *from* yet, the map hasn't shown the user anything). A
-// `hasCenteredOnLoadRef` guard means this fires exactly once per mount, so
-// it never fights a later re-fetch of `gpsStatusQuery` (e.g. the user
-// having since panned away). A "Recenter to me" button lets the user
-// re-center on demand at any time via `flyTo` (animated, since this time
-// there IS a previous view to transition from), using whatever fix is most
-// recently cached — disabled (with a tooltip) when there's no fix to
-// center on. Both live in this shared component so the Dashboard's
-// embedded map and the standalone /map page get them for free.
+// Phase 6's controls, replacing the old single-toggle-row + data-source
+// dropdown:
+//   - "Emissions" checkbox group: "All Emissions" (master) + one per-category
+//     toggle ("All WiFi", …). Checking "All Emissions" shows the unfiltered
+//     heatmap and disables (greys out, shown checked) every per-category
+//     box — see `isCategoryVisible`/the JSX below. Unchecking it hands
+//     visibility back to each category's own toggle.
+//   - "Layers" checkbox group: Zones / Entities / Emitters, independent of
+//     each other and of the Emissions group.
+//   - "Sources" checkbox group: "All Sources" (master, default) + one
+//     checkbox per `GET /api/data-sources` entry, replacing the old
+//     single-select dropdown. Unlike the Emissions/Layers groups (which only
+//     toggle a layer's *visibility*), a Sources checkbox changes what's
+//     *fetched*: with "All Sources" unchecked, each checked source becomes
+//     its own `GET /api/emissions?data_source_id=<id>` query (see
+//     `sourceScopeIds` below) and the results are unioned client-side — the
+//     backend only takes one `data_source_id` per request, so a multi-source
+//     selection means "query per selected source, merge the items," same
+//     query-per-facet pattern the per-category layers already use. With zero
+//     sources checked (and "All Sources" unchecked), nothing is fetched —
+//     the user has explicitly filtered everything out.
+//   - Basemap switcher (Standard/Satellite/Dark): see `components/
+//     basemapStyles.ts`'s module doc comment for the swap-tiles-in-place
+//     approach (not `map.setStyle`, which would drop every layer above).
 //
 // jsdom/test guard: MapLibre GL needs a real WebGL canvas, which jsdom
 // doesn't provide. Rather than special-casing the component for tests, the
@@ -59,7 +79,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQueries, useQuery } from '@tanstack/react-query';
 import maplibregl from 'maplibre-gl';
-import type { GeoJSONSource, Map as MapLibreMap } from 'maplibre-gl';
+import type { GeoJSONSource, Map as MapLibreMap, RasterTileSource, StyleSpecification } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { queryKeys } from '../api/queryKeys';
 import { listEmissions } from '../api/emissions';
@@ -69,8 +89,14 @@ import { listDataSources } from '../api/dataSources';
 import { listEmitters } from '../api/emitters';
 import { getGpsStatus } from '../api/gps';
 import type { EntityMarker } from '../components/mapData';
-import { emissionsToHeatmapGeoJSON, entitiesToMarkerFeatures, zonesToCircleGeoJSON } from '../components/mapData';
-import { OSM_RASTER_STYLE } from '../components/osmRasterStyle';
+import {
+  emissionsToHeatmapGeoJSON,
+  emitterMarkersFromEmissions,
+  entitiesToMarkerFeatures,
+  zonesToCircleGeoJSON,
+} from '../components/mapData';
+import { BASEMAP_OPTIONS, DEFAULT_BASEMAP_ID, basemapOption } from '../components/basemapStyles';
+import type { BasemapId } from '../components/basemapStyles';
 
 /** How often the GPS fix backing center-on-load/recenter is re-polled —
  * same cadence as the Dashboard's GPS Status block (`Dashboard.tsx`), so
@@ -82,12 +108,17 @@ const GPS_STATUS_REFETCH_MS = 4000;
  * be useful (street-level-ish) without requiring the fix to be pixel-exact. */
 const USER_LOCATION_ZOOM = 14;
 
+const BASEMAP_SOURCE_ID = 'basemap-source';
+const BASEMAP_LAYER_ID = 'basemap-tiles';
+
 const EMISSIONS_SOURCE_ID = 'emissions-heatmap-source';
 const ENTITIES_SOURCE_ID = 'entity-markers-source';
+const EMITTERS_SOURCE_ID = 'emitter-markers-source';
 const ZONES_SOURCE_ID = 'zones-source';
 
 const HEATMAP_LAYER_IDS = ['emissions-heatmap-layer'];
 const ENTITY_LAYER_IDS = ['entity-circle-layer', 'entity-label-layer'];
+const EMITTER_LAYER_IDS = ['emitter-circle-layer', 'emitter-label-layer'];
 const ZONE_LAYER_IDS = ['zone-fill-layer', 'zone-line-layer', 'zone-label-layer'];
 
 const EMPTY_POINT_FC = { type: 'FeatureCollection' as const, features: [] };
@@ -126,16 +157,17 @@ function categoryLabel(category: string): string {
 const MAP_EMISSIONS_LIMIT = 500;
 
 interface LayerVisibility {
-  heatmap: boolean;
-  entities: boolean;
   zones: boolean;
+  entities: boolean;
+  emitters: boolean;
 }
 
-const DEFAULT_VISIBILITY: LayerVisibility = { heatmap: true, entities: true, zones: true };
+const DEFAULT_LAYER_VISIBILITY: LayerVisibility = { zones: true, entities: true, emitters: true };
 
 /** `GET /api/emissions` params shared by the "All emissions" layer and each
- * per-category layer — same data-source/time-range scoping, an optional
- * `emitter_category` on top for the category layers. */
+ * per-category layer — same time-range scoping, an optional `data_source_id`
+ * (Sources group, see module doc comment) and `emitter_category` (per-
+ * category layers) on top. */
 function buildEmissionsParams(opts: {
   limit: number;
   dataSourceId: string;
@@ -152,9 +184,32 @@ function buildEmissionsParams(opts: {
   return params;
 }
 
+/** Phase 6: the map's initial (and only ever) style — a single raster
+ * source/layer for whichever basemap is selected. Switching basemaps swaps
+ * this source's tiles in place (see `components/basemapStyles.ts`'s module
+ * doc comment) rather than replacing the style, so this is only ever called
+ * once, at map construction, with `DEFAULT_BASEMAP_ID`. */
+function buildBasemapStyle(basemapId: BasemapId): StyleSpecification {
+  const option = basemapOption(basemapId);
+  return {
+    version: 8,
+    sources: {
+      [BASEMAP_SOURCE_ID]: {
+        type: 'raster',
+        tiles: option.tiles,
+        tileSize: option.tileSize,
+        attribution: option.attribution,
+      },
+    },
+    layers: [{ id: BASEMAP_LAYER_ID, type: 'raster', source: BASEMAP_SOURCE_ID }],
+  };
+}
+
 /** Adds every source/layer this page draws, once the style has finished
  * loading. Split out of the init effect so it's obvious this only ever
- * touches a freshly-created map on its `'load'` event. */
+ * touches a freshly-created map on its `'load'` event. The basemap source
+ * itself is already part of the style passed to `new maplibregl.Map(...)`,
+ * so it isn't added again here. */
 function addLayers(map: MapLibreMap): void {
   map.addSource(EMISSIONS_SOURCE_ID, { type: 'geojson', data: EMPTY_POINT_FC });
   map.addLayer({
@@ -194,6 +249,33 @@ function addLayers(map: MapLibreMap): void {
     paint: { 'text-color': '#f8fafc', 'text-halo-color': '#0f172a', 'text-halo-width': 1 },
   });
 
+  // Phase 6's "Emitters" layer — same marker styling approach as entities,
+  // a distinct color (cyan) so the two aren't confused on the map.
+  map.addSource(EMITTERS_SOURCE_ID, { type: 'geojson', data: EMPTY_POINT_FC });
+  map.addLayer({
+    id: 'emitter-circle-layer',
+    type: 'circle',
+    source: EMITTERS_SOURCE_ID,
+    paint: {
+      'circle-radius': 5,
+      'circle-color': '#22d3ee',
+      'circle-stroke-width': 2,
+      'circle-stroke-color': '#0f172a',
+    },
+  });
+  map.addLayer({
+    id: 'emitter-label-layer',
+    type: 'symbol',
+    source: EMITTERS_SOURCE_ID,
+    layout: {
+      'text-field': ['get', 'name'],
+      'text-size': 11,
+      'text-offset': [0, 1.1],
+      'text-anchor': 'top',
+    },
+    paint: { 'text-color': '#a5f3fc', 'text-halo-color': '#0f172a', 'text-halo-width': 1 },
+  });
+
   map.addSource(ZONES_SOURCE_ID, { type: 'geojson', data: EMPTY_POLYGON_FC });
   map.addLayer({
     id: 'zone-fill-layer',
@@ -219,31 +301,73 @@ function addLayers(map: MapLibreMap): void {
 const inputClassName =
   'w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 focus:border-amber-500 focus:outline-none';
 const labelClassName = 'block text-xs font-medium uppercase tracking-wide text-slate-500';
+const groupHeadingClassName = 'text-xs font-semibold uppercase tracking-wide text-slate-400';
+const checkboxInputClassName =
+  'h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-50';
+const checkboxLabelClassName = 'flex items-center gap-2 text-sm text-slate-300 has-[:disabled]:text-slate-500';
 
 export default function MapView() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const [styleLoaded, setStyleLoaded] = useState(false);
-  const [visibility, setVisibility] = useState<LayerVisibility>(DEFAULT_VISIBILITY);
 
-  // Filter row: data-source + time range, both optional. Scopes the
-  // emissions query only (entities/zones aren't time/source-scoped
-  // concepts) — see module doc comment.
-  const [dataSourceId, setDataSourceId] = useState('');
+  // "Emissions" group (see module doc comment): "All Emissions" is the
+  // master toggle, default checked; `categoryVisibility` only matters once
+  // it's unchecked.
+  const [allEmissions, setAllEmissions] = useState(true);
+  const [categoryVisibility, setCategoryVisibility] = useState<Record<string, boolean>>({});
+
+  // "Layers" group: independent of the Emissions group and of each other.
+  const [layerVisibility, setLayerVisibility] = useState<LayerVisibility>(DEFAULT_LAYER_VISIBILITY);
+
+  // "Sources" group (replaces the old single-select data-source dropdown):
+  // "All Sources" is the master toggle, default checked (no filter);
+  // `sourceSelected` only matters once it's unchecked, and — unlike the
+  // Emissions/Layers groups — changes what's *fetched*, not just what's
+  // *shown* (see `sourceScopeIds` below).
+  const [allSources, setAllSources] = useState(true);
+  const [sourceSelected, setSourceSelected] = useState<Record<string, boolean>>({});
+
+  // From/To datetime pickers — native `<input type="datetime-local">`,
+  // converted to RFC3339 `time_from`/`time_to` params by
+  // `buildEmissionsParams`. Clearing either removes that bound.
   const [timeFrom, setTimeFrom] = useState('');
   const [timeTo, setTimeTo] = useState('');
 
+  // Basemap switcher (Standard/Satellite/Dark) — see `components/
+  // basemapStyles.ts`'s module doc comment for the swap-tiles-in-place
+  // approach.
+  const [basemapId, setBasemapId] = useState<BasemapId>(DEFAULT_BASEMAP_ID);
+
   const dataSourcesQuery = useQuery({ queryKey: queryKeys.dataSources, queryFn: listDataSources });
 
-  const emissionsParams = useMemo(
-    () => buildEmissionsParams({ limit: MAP_EMISSIONS_LIMIT, dataSourceId, timeFrom, timeTo }),
-    [dataSourceId, timeFrom, timeTo],
-  );
+  // Which `data_source_id` values to query for (Sources group): `['']`
+  // (an empty string means "no data_source_id param," i.e. unfiltered) when
+  // "All Sources" is checked; otherwise the checked sources' ids — `[]` if
+  // none are checked, meaning nothing is fetched at all.
+  const sourceScopeIds = useMemo<string[]>(() => {
+    if (allSources) return [''];
+    return (dataSourcesQuery.data ?? []).map((source) => source.id).filter((id) => sourceSelected[id] === true);
+  }, [allSources, dataSourcesQuery.data, sourceSelected]);
 
-  const emissionsQuery = useQuery({
-    queryKey: [...queryKeys.emissions, 'map', emissionsParams.toString()],
-    queryFn: () => listEmissions(emissionsParams),
+  // The "All emissions" layer's data: one query per selected source (see
+  // `sourceScopeIds` above), unioned client-side — the backend only accepts
+  // a single `data_source_id` per request.
+  const allEmissionsQueries = useQueries({
+    queries: sourceScopeIds.map((sourceId) => {
+      const params = buildEmissionsParams({ limit: MAP_EMISSIONS_LIMIT, dataSourceId: sourceId, timeFrom, timeTo });
+      return {
+        queryKey: [...queryKeys.emissions, 'map', params.toString()],
+        queryFn: () => listEmissions(params),
+      };
+    }),
   });
+
+  const emissionsItems = useMemo(
+    () => allEmissionsQueries.flatMap((query) => query.data?.items ?? []),
+    [allEmissionsQueries],
+  );
+  const emissionsIsError = allEmissionsQueries.some((query) => query.isError);
 
   // Task C: the emitter-category layer toggles ("All WiFi", …) are derived
   // from whatever categories are actually present in `GET /api/emitters` —
@@ -263,25 +387,37 @@ export default function MapView() {
     return Array.from(seen).sort();
   }, [emittersQuery.data]);
 
-  const categoryEmissionsQueries = useQueries({
-    queries: categories.map((category) => {
-      const params = buildEmissionsParams({ limit: MAP_EMISSIONS_LIMIT, dataSourceId, timeFrom, timeTo, category });
-      return {
-        queryKey: [...queryKeys.emissions, 'map-category', category, params.toString()],
-        queryFn: () => listEmissions(params),
-      };
-    }),
-  });
-
-  const [categoryVisibility, setCategoryVisibility] = useState<Record<string, boolean>>({});
-
+  /** A per-category checkbox is checked+disabled (visually "covered by All
+   * Emissions") while `allEmissions` is on; otherwise it reflects its own
+   * (default-checked) state. */
   function isCategoryVisible(category: string): boolean {
+    if (allEmissions) return true;
     return categoryVisibility[category] ?? true;
   }
 
   function toggleCategory(category: string): void {
-    setCategoryVisibility((prev) => ({ ...prev, [category]: !isCategoryVisible(category) }));
+    setCategoryVisibility((prev) => ({ ...prev, [category]: !(prev[category] ?? true) }));
   }
+
+  // Cross product of categories x selected sources — same per-source-query
+  // union as the "All emissions" layer above, applied per category.
+  const categoryEmissionsQueries = useQueries({
+    queries: categories.flatMap((category) =>
+      sourceScopeIds.map((sourceId) => {
+        const params = buildEmissionsParams({
+          limit: MAP_EMISSIONS_LIMIT,
+          dataSourceId: sourceId,
+          timeFrom,
+          timeTo,
+          category,
+        });
+        return {
+          queryKey: [...queryKeys.emissions, 'map-category', category, params.toString()],
+          queryFn: () => listEmissions(params),
+        };
+      }),
+    ),
+  });
 
   // Interim `{limit: 500}` cap, same rationale as the emitters query above.
   const entitiesQuery = useQuery({ queryKey: queryKeys.entities, queryFn: () => listEntities({ limit: 500 }) });
@@ -311,6 +447,21 @@ export default function MapView() {
     return markers;
   }, [entityDetailQueries]);
 
+  // Phase 6 "Emitters" layer: derived client-side from the same
+  // "all emissions" items already fetched above, grouped by `emitter_id`
+  // (`emitterMarkersFromEmissions`, `components/mapData.ts`) and labeled via
+  // this `emittersQuery` fetch — no separate backend request needed.
+  const emitterNames = useMemo(() => {
+    const names: Record<string, string> = {};
+    for (const emitter of emittersQuery.data?.items ?? []) names[emitter.id] = emitter.name;
+    return names;
+  }, [emittersQuery.data]);
+
+  const emitterMarkers = useMemo(
+    () => emitterMarkersFromEmissions(emissionsItems, emitterNames),
+    [emissionsItems, emitterNames],
+  );
+
   const zonesQuery = useQuery({ queryKey: queryKeys.zones, queryFn: listZones });
 
   // Phase 5: GPS fix backing center-on-load + the "Recenter to me" button
@@ -328,13 +479,16 @@ export default function MapView() {
   // Map init — runs once. In tests, `maplibre-gl` is mocked
   // (`vi.mock('maplibre-gl', ...)` in `MapView.test.tsx`) so this never
   // touches a real WebGL canvas; jsdom itself is never specially detected
-  // here (see module doc comment).
+  // here (see module doc comment). The style always starts at
+  // `DEFAULT_BASEMAP_ID` ("Standard") — later basemap switches swap the
+  // `BASEMAP_SOURCE_ID` source's tiles in place (see the effect below),
+  // never re-create the map or call `setStyle`.
   useEffect(() => {
     if (!containerRef.current) return undefined;
 
     const map = new maplibregl.Map({
       container: containerRef.current,
-      style: OSM_RASTER_STYLE,
+      style: buildBasemapStyle(DEFAULT_BASEMAP_ID),
       center: [0, 0],
       zoom: 2,
     });
@@ -351,6 +505,19 @@ export default function MapView() {
       setStyleLoaded(false);
     };
   }, []);
+
+  // Basemap switch: swap the basemap source's tiles in place, leaving every
+  // other source/layer (heatmaps/markers/zones) untouched — see
+  // `components/basemapStyles.ts`'s module doc comment for why this is
+  // `setTiles`, not `map.setStyle(...)`. Also fires once on initial mount
+  // (re-applying `DEFAULT_BASEMAP_ID`'s own tiles) — harmless, since that's
+  // already what the map was constructed with.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleLoaded) return;
+    const source = map.getSource<RasterTileSource>(BASEMAP_SOURCE_ID);
+    source?.setTiles(basemapOption(basemapId).tiles);
+  }, [styleLoaded, basemapId]);
 
   // Center-on-user-load (Phase 5, see module doc comment): fires exactly
   // once per mount, as soon as both the style has loaded and a GPS fix is
@@ -384,8 +551,8 @@ export default function MapView() {
     const map = mapRef.current;
     if (!map || !styleLoaded) return;
     const source = map.getSource<GeoJSONSource>(EMISSIONS_SOURCE_ID);
-    source?.setData(emissionsToHeatmapGeoJSON(emissionsQuery.data?.items ?? []));
-  }, [styleLoaded, emissionsQuery.data]);
+    source?.setData(emissionsToHeatmapGeoJSON(emissionsItems));
+  }, [styleLoaded, emissionsItems]);
 
   // Adds a source+heatmap layer for each category as it becomes known
   // (`categories` resolves asynchronously from `GET /api/emitters`, so this
@@ -413,16 +580,23 @@ export default function MapView() {
     }
   }, [styleLoaded, categories]);
 
-  // Push each category layer's own emissions data once its source exists.
+  // Push each category layer's own emissions data once its source exists —
+  // un-crossing the `categoryEmissionsQueries` cross product back into one
+  // merged item list per category (`sourceScopeIds.length` queries per
+  // category, laid out contiguously by the `flatMap` that built the query
+  // list above).
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !styleLoaded) return;
-    categories.forEach((category, index) => {
+    const perSource = sourceScopeIds.length;
+    categories.forEach((category, categoryIndex) => {
       const source = map.getSource<GeoJSONSource>(categoryHeatmapSourceId(category));
-      const items = categoryEmissionsQueries[index]?.data?.items ?? [];
+      const items = sourceScopeIds.flatMap(
+        (_sourceId, sourceIndex) => categoryEmissionsQueries[categoryIndex * perSource + sourceIndex]?.data?.items ?? [],
+      );
       source?.setData(emissionsToHeatmapGeoJSON(items));
     });
-  }, [styleLoaded, categories, categoryEmissionsQueries]);
+  }, [styleLoaded, categories, categoryEmissionsQueries, sourceScopeIds]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -430,6 +604,13 @@ export default function MapView() {
     const source = map.getSource<GeoJSONSource>(ENTITIES_SOURCE_ID);
     source?.setData(entitiesToMarkerFeatures(entityMarkers));
   }, [styleLoaded, entityMarkers]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleLoaded) return;
+    const source = map.getSource<GeoJSONSource>(EMITTERS_SOURCE_ID);
+    source?.setData(entitiesToMarkerFeatures(emitterMarkers));
+  }, [styleLoaded, emitterMarkers]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -447,16 +628,26 @@ export default function MapView() {
         if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', visible ? 'visible' : 'none');
       }
     };
-    apply(HEATMAP_LAYER_IDS, visibility.heatmap);
-    apply(ENTITY_LAYER_IDS, visibility.entities);
-    apply(ZONE_LAYER_IDS, visibility.zones);
+    apply(HEATMAP_LAYER_IDS, allEmissions);
+    apply(ENTITY_LAYER_IDS, layerVisibility.entities);
+    apply(EMITTER_LAYER_IDS, layerVisibility.emitters);
+    apply(ZONE_LAYER_IDS, layerVisibility.zones);
     for (const category of categories) {
-      apply([categoryHeatmapLayerId(category)], categoryVisibility[category] ?? true);
+      const visible = !allEmissions && (categoryVisibility[category] ?? true);
+      apply([categoryHeatmapLayerId(category)], visible);
     }
-  }, [styleLoaded, visibility, categories, categoryVisibility]);
+  }, [styleLoaded, allEmissions, layerVisibility, categories, categoryVisibility]);
 
-  function toggle(layer: keyof LayerVisibility): void {
-    setVisibility((prev) => ({ ...prev, [layer]: !prev[layer] }));
+  function toggleLayer(layer: keyof LayerVisibility): void {
+    setLayerVisibility((prev) => ({ ...prev, [layer]: !prev[layer] }));
+  }
+
+  function isSourceSelected(sourceId: string): boolean {
+    return sourceSelected[sourceId] ?? false;
+  }
+
+  function toggleSource(sourceId: string): void {
+    setSourceSelected((prev) => ({ ...prev, [sourceId]: !(prev[sourceId] ?? false) }));
   }
 
   return (
@@ -465,68 +656,89 @@ export default function MapView() {
         <h1 className="text-xl font-semibold text-slate-100">Map</h1>
       </div>
 
-      <div className="flex flex-wrap items-end gap-4 rounded border border-slate-800 bg-slate-900/50 p-3">
-        <div className="flex items-center gap-4">
-          <label className="flex items-center gap-2 text-sm text-slate-300">
+      <div className="flex flex-wrap items-start gap-6 rounded border border-slate-800 bg-slate-900/50 p-3">
+        <fieldset className="space-y-1.5">
+          <legend className={groupHeadingClassName}>Emissions</legend>
+          <label className={checkboxLabelClassName}>
             <input
               type="checkbox"
-              checked={visibility.heatmap}
-              onChange={() => toggle('heatmap')}
-              className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
+              checked={allEmissions}
+              onChange={() => setAllEmissions((prev) => !prev)}
+              className={checkboxInputClassName}
             />
-            All emissions
+            All Emissions
           </label>
           {categories.map((category) => (
-            <label key={category} className="flex items-center gap-2 text-sm text-slate-300">
+            <label key={category} className={checkboxLabelClassName}>
               <input
                 type="checkbox"
                 checked={isCategoryVisible(category)}
+                disabled={allEmissions}
                 onChange={() => toggleCategory(category)}
-                className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
+                className={checkboxInputClassName}
               />
               All {categoryLabel(category)}
             </label>
           ))}
-          <label className="flex items-center gap-2 text-sm text-slate-300">
+        </fieldset>
+
+        <fieldset className="space-y-1.5">
+          <legend className={groupHeadingClassName}>Layers</legend>
+          <label className={checkboxLabelClassName}>
             <input
               type="checkbox"
-              checked={visibility.entities}
-              onChange={() => toggle('entities')}
-              className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
-            />
-            Entities
-          </label>
-          <label className="flex items-center gap-2 text-sm text-slate-300">
-            <input
-              type="checkbox"
-              checked={visibility.zones}
-              onChange={() => toggle('zones')}
-              className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
+              checked={layerVisibility.zones}
+              onChange={() => toggleLayer('zones')}
+              className={checkboxInputClassName}
             />
             Zones
           </label>
-        </div>
+          <label className={checkboxLabelClassName}>
+            <input
+              type="checkbox"
+              checked={layerVisibility.entities}
+              onChange={() => toggleLayer('entities')}
+              className={checkboxInputClassName}
+            />
+            Entities
+          </label>
+          <label className={checkboxLabelClassName}>
+            <input
+              type="checkbox"
+              checked={layerVisibility.emitters}
+              onChange={() => toggleLayer('emitters')}
+              className={checkboxInputClassName}
+            />
+            Emitters
+          </label>
+        </fieldset>
+
+        <fieldset className="space-y-1.5">
+          <legend className={groupHeadingClassName}>Sources</legend>
+          <label className={checkboxLabelClassName}>
+            <input
+              type="checkbox"
+              checked={allSources}
+              onChange={() => setAllSources((prev) => !prev)}
+              className={checkboxInputClassName}
+            />
+            All Sources
+          </label>
+          {(dataSourcesQuery.data ?? []).map((source) => (
+            <label key={source.id} className={checkboxLabelClassName}>
+              <input
+                type="checkbox"
+                checked={isSourceSelected(source.id)}
+                disabled={allSources}
+                onChange={() => toggleSource(source.id)}
+                className={checkboxInputClassName}
+              />
+              {source.kind} ({source.interface ?? source.id})
+            </label>
+          ))}
+        </fieldset>
 
         <div className="flex flex-wrap items-end gap-3">
-          <div className="space-y-1">
-            <label htmlFor="map-data-source" className={labelClassName}>
-              Data source
-            </label>
-            <select
-              id="map-data-source"
-              value={dataSourceId}
-              onChange={(event) => setDataSourceId(event.target.value)}
-              className={inputClassName}
-            >
-              <option value="">All sources</option>
-              {(dataSourcesQuery.data ?? []).map((source) => (
-                <option key={source.id} value={source.id}>
-                  {source.kind} ({source.interface ?? source.id})
-                </option>
-              ))}
-            </select>
-          </div>
-
           <div className="space-y-1">
             <label htmlFor="map-time-from" className={labelClassName}>
               From
@@ -552,9 +764,28 @@ export default function MapView() {
               className={inputClassName}
             />
           </div>
+
+          <div className="space-y-1">
+            <label htmlFor="map-basemap" className={labelClassName}>
+              Basemap
+            </label>
+            <select
+              id="map-basemap"
+              value={basemapId}
+              onChange={(event) => setBasemapId(event.target.value as BasemapId)}
+              className={inputClassName}
+            >
+              {BASEMAP_OPTIONS.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            <p className="text-[10px] text-slate-500">{basemapOption(basemapId).attribution}</p>
+          </div>
         </div>
 
-        {emissionsQuery.isError && <p className="text-sm text-red-400">Failed to load emissions.</p>}
+        {emissionsIsError && <p className="text-sm text-red-400">Failed to load emissions.</p>}
       </div>
 
       <div className="relative min-h-[420px] flex-1 overflow-hidden rounded border border-slate-800">

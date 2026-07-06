@@ -7,6 +7,7 @@
 import { expect, test } from 'vitest';
 import {
   emissionsToHeatmapGeoJSON,
+  emitterMarkersFromEmissions,
   entitiesToMarkerFeatures,
   pointsToHeatmapGeoJSON,
   zoneToCircleFeature,
@@ -93,6 +94,44 @@ test('pointsToHeatmapGeoJSON turns bare {lon,lat} points into one Point feature 
 test('pointsToHeatmapGeoJSON on an empty list yields an empty FeatureCollection', () => {
   const geojson = pointsToHeatmapGeoJSON([]);
   expect(geojson).toEqual({ type: 'FeatureCollection', features: [] });
+});
+
+test('emitterMarkersFromEmissions groups located emissions by emitter_id and keeps only the latest per emitter', () => {
+  const emissions: Emission[] = [
+    makeEmission({ id: 'em-1', emitter_id: 'emitter-1', lon: 2.5, lat: 1.5, observed_at: '2026-07-01T00:00:00Z' }),
+    // A later observation for the same emitter, at a different location — this one should win.
+    makeEmission({ id: 'em-2', emitter_id: 'emitter-1', lon: 2.6, lat: 1.6, observed_at: '2026-07-03T00:00:00Z' }),
+    makeEmission({ id: 'em-3', emitter_id: 'emitter-2', lon: -1.1, lat: 5.5, observed_at: '2026-07-02T00:00:00Z' }),
+    // No location — dropped entirely, even though it's for a known emitter.
+    makeEmission({ id: 'em-4', emitter_id: 'emitter-1', lon: null, lat: null, observed_at: '2026-07-04T00:00:00Z' }),
+    // No emitter_id — dropped (nothing to group it under).
+    makeEmission({ id: 'em-5', emitter_id: null, lon: 3.3, lat: 3.3, observed_at: '2026-07-01T00:00:00Z' }),
+  ];
+
+  const markers = emitterMarkersFromEmissions(emissions, { 'emitter-1': 'AP One', 'emitter-2': 'Client Two' });
+
+  expect(markers).toHaveLength(2);
+  const byId = new Map(markers.map((m) => [m.id, m]));
+  expect(byId.get('emitter-1')).toEqual({
+    id: 'emitter-1',
+    name: 'AP One',
+    lon: 2.6,
+    lat: 1.6,
+    observed_at: '2026-07-03T00:00:00Z',
+  });
+  expect(byId.get('emitter-2')).toEqual({
+    id: 'emitter-2',
+    name: 'Client Two',
+    lon: -1.1,
+    lat: 5.5,
+    observed_at: '2026-07-02T00:00:00Z',
+  });
+});
+
+test('emitterMarkersFromEmissions falls back to the emitter id as the label when no name is known', () => {
+  const emissions: Emission[] = [makeEmission({ id: 'em-1', emitter_id: 'emitter-9', lon: 0, lat: 0 })];
+  const markers = emitterMarkersFromEmissions(emissions, {});
+  expect(markers).toEqual([{ id: 'emitter-9', name: 'emitter-9', lon: 0, lat: 0, observed_at: '2026-07-01T00:00:00Z' }]);
 });
 
 function distanceMeters(lon1: number, lat1: number, lon2: number, lat2: number): number {

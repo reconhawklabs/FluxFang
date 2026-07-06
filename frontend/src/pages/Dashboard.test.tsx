@@ -32,7 +32,7 @@ vi.mock('maplibre-gl', () => {
     addSource(): void {}
     addLayer(): void {}
     getSource() {
-      return { setData: vi.fn() };
+      return { setData: vi.fn(), setTiles: vi.fn() };
     }
     getLayer() {
       return true;

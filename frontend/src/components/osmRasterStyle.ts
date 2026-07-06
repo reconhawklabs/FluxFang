@@ -11,12 +11,18 @@
 // tiles load, they just draw on a blank background if OSM is unreachable.
 import type { StyleSpecification } from 'maplibre-gl';
 
+/** The standard OSM tile endpoint's URL template — pulled out to its own
+ * constant so `components/basemapStyles.ts` (Phase 6's basemap switcher,
+ * `pages/MapView.tsx`) can reuse the exact same "Standard" tiles without
+ * duplicating the literal string. */
+export const OSM_TILE_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+
 export const OSM_RASTER_STYLE: StyleSpecification = {
   version: 8,
   sources: {
     osm: {
       type: 'raster',
-      tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+      tiles: [OSM_TILE_URL],
       tileSize: 256,
       attribution: '© OpenStreetMap contributors',
     },

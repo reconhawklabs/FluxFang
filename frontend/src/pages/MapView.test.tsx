@@ -1,7 +1,10 @@
-// Task 9.7 acceptance test. Per the task brief, GL rendering itself isn't
-// under test here (that's what `components/mapData.test.ts` covers) — this
-// file only checks the page's non-GL surface: it renders the layer-toggle
-// controls (Heatmap/Entities/Zones) and the filter row without crashing.
+// Task 9.7 acceptance test, restructured for Phase 6 (Map page control
+// redesign — grouped checkbox controls, datetime pickers, basemap
+// switcher). Per the task brief, GL rendering itself isn't under test here
+// (that's what `components/mapData.test.ts` covers) — this file only checks
+// the page's non-GL surface: it renders the "Emissions"/"Layers"/"Sources"
+// control groups and the basemap switcher without crashing, and asserts the
+// all-vs-specific disabled-state wiring + query params those groups drive.
 // `maplibre-gl` is mocked wholesale so `new maplibregl.Map(...)` never
 // touches a real WebGL canvas (jsdom has none) — see `MapView.tsx`'s module
 // doc comment.
@@ -22,13 +25,25 @@ import type { GpsStatus } from '../api/gps';
 // `jumpTo` backs the once-on-load auto-center (Phase 5); `flyTo` backs the
 // "recenter to me" button. Both are spies (not just no-ops) so tests below
 // can assert on the `{center: [lon, lat]}` they were called with.
+//
+// `getSource` is source-id-aware (a `Map<string, {setData, setTiles}>`), not
+// a fresh mock per call — Phase 6's basemap-switcher test needs to grab the
+// SAME `setTiles` spy that `MapView`'s effect called, so a real per-id
+// registry (rather than a brand-new `vi.fn()` on every `getSource(...)`
+// call) is required.
 vi.mock('maplibre-gl', () => {
+  class FakeSource {
+    setData = vi.fn();
+    setTiles = vi.fn();
+  }
+
   class FakeMap {
     // Tracks every constructed instance so tests can grab "the map MapView
     // just created" (`latestFakeMap()` below) without MapView itself
     // exposing its internal `mapRef`.
     static instances: FakeMap[] = [];
     private handlers = new Map<string, () => void>();
+    private sources = new Map<string, FakeSource>();
     jumpTo = vi.fn();
     flyTo = vi.fn();
     constructor(_options: unknown) {
@@ -40,15 +55,19 @@ vi.mock('maplibre-gl', () => {
       if (event === 'load') cb();
     }
     remove(): void {}
-    addSource(): void {}
+    addSource(id: string): void {
+      if (!this.sources.has(id)) this.sources.set(id, new FakeSource());
+    }
     addLayer(): void {}
-    getSource() {
-      return { setData: vi.fn() };
+    getSource(id: string) {
+      if (!this.sources.has(id)) this.sources.set(id, new FakeSource());
+      return this.sources.get(id);
     }
     getLayer() {
       return true;
     }
     setLayoutProperty(): void {}
+    setPaintProperty(): void {}
   }
 
   class FakeNavigationControl {}
@@ -57,11 +76,15 @@ vi.mock('maplibre-gl', () => {
 });
 
 /** The most recently constructed `FakeMap` (there's exactly one per
- * `render(<MapView />)`) — used to assert on `jumpTo`/`flyTo` calls without
- * MapView exposing its internal `mapRef`. */
+ * `render(<MapView />)`) — used to assert on `jumpTo`/`flyTo`/source calls
+ * without MapView exposing its internal `mapRef`. */
 function latestFakeMap() {
   const MapCtor = maplibregl.Map as unknown as {
-    instances: Array<{ jumpTo: ReturnType<typeof vi.fn>; flyTo: ReturnType<typeof vi.fn> }>;
+    instances: Array<{
+      jumpTo: ReturnType<typeof vi.fn>;
+      flyTo: ReturnType<typeof vi.fn>;
+      getSource: (id: string) => { setData: ReturnType<typeof vi.fn>; setTiles: ReturnType<typeof vi.fn> };
+    }>;
   };
   return MapCtor.instances[MapCtor.instances.length - 1];
 }
@@ -194,43 +217,51 @@ function baseRoutes(overrides: Record<string, (url: URL, init?: RequestInit) => 
   };
 }
 
-test('renders the All emissions/Entities/Zones layer toggles without crashing', async () => {
+test('renders the Emissions/Layers/Sources control groups without crashing', async () => {
   const fetchMock = mockRoutes(baseRoutes());
   vi.stubGlobal('fetch', fetchMock);
 
   render(<MapView />, { wrapper });
 
-  expect(await screen.findByLabelText('All emissions')).toBeInTheDocument();
-  expect(screen.getByLabelText('Entities')).toBeInTheDocument();
+  expect(await screen.findByText('Emissions')).toBeInTheDocument();
+  expect(screen.getByText('Layers')).toBeInTheDocument();
+  expect(screen.getByText('Sources')).toBeInTheDocument();
+
+  expect(screen.getByLabelText('All Emissions')).toBeInTheDocument();
   expect(screen.getByLabelText('Zones')).toBeInTheDocument();
+  expect(screen.getByLabelText('Entities')).toBeInTheDocument();
+  expect(screen.getByLabelText('Emitters')).toBeInTheDocument();
+  expect(screen.getByLabelText('All Sources')).toBeInTheDocument();
   expect(screen.getByTestId('maplibre-container')).toBeInTheDocument();
 
   await waitFor(() => expect(fetchMock).toHaveBeenCalled());
 });
 
-test('renders the data-source filter populated from GET /api/data-sources', async () => {
+test('renders one Sources checkbox per GET /api/data-sources entry, replacing the old dropdown', async () => {
   const fetchMock = mockRoutes(baseRoutes());
   vi.stubGlobal('fetch', fetchMock);
 
   render(<MapView />, { wrapper });
 
-  const select = await screen.findByLabelText(/data source/i);
-  await waitFor(() => expect(within(select).queryAllByRole('option')).toHaveLength(2));
+  expect(await screen.findByLabelText('All Sources')).toBeInTheDocument();
+  expect(await screen.findByLabelText('wifi (wlan0)')).toBeInTheDocument();
+  expect(screen.queryByLabelText(/data source/i)).not.toBeInTheDocument();
 });
 
-test('toggling a layer checkbox does not crash the page', async () => {
+test('toggling the Emissions/Layers checkboxes does not crash the page', async () => {
   const fetchMock = mockRoutes(baseRoutes());
   vi.stubGlobal('fetch', fetchMock);
 
   render(<MapView />, { wrapper });
 
-  const heatmapToggle = await screen.findByLabelText('All emissions');
-  expect(heatmapToggle).toBeChecked();
-  fireEvent.click(heatmapToggle);
-  expect(heatmapToggle).not.toBeChecked();
+  const allEmissions = await screen.findByLabelText('All Emissions');
+  expect(allEmissions).toBeChecked();
+  fireEvent.click(allEmissions);
+  expect(allEmissions).not.toBeChecked();
 
   fireEvent.click(screen.getByLabelText('Entities'));
   fireEvent.click(screen.getByLabelText('Zones'));
+  fireEvent.click(screen.getByLabelText('Emitters'));
 });
 
 test('a distinct emitter category ("wifi") drives an "All WiFi" toggle, backed by its own emitter_category-filtered query', async () => {
@@ -240,13 +271,16 @@ test('a distinct emitter category ("wifi") drives an "All WiFi" toggle, backed b
   render(<MapView />, { wrapper });
 
   const wifiToggle = await screen.findByLabelText('All WiFi');
+  // "All Emissions" defaults checked, which covers/disables the per-category
+  // toggles (see the dedicated disabled-state test below) — it still shows
+  // checked to reflect "covered by All Emissions".
   expect(wifiToggle).toBeChecked();
+  expect(wifiToggle).toBeDisabled();
 
   // The category layer's own `GET /api/emissions?...emitter_category=wifi`
   // query fires (fetching data for the layer, regardless of its current
   // visibility toggle state — same convention as the existing "All
-  // emissions" heatmap, whose query isn't gated on `visibility.heatmap`
-  // either).
+  // emissions" heatmap, whose query isn't gated on the toggle either).
   await waitFor(() => {
     const categoryCall = fetchMock.mock.calls.find(([url]) => {
       const parsed = new URL(String(url), 'http://localhost');
@@ -254,11 +288,6 @@ test('a distinct emitter category ("wifi") drives an "All WiFi" toggle, backed b
     });
     expect(categoryCall).toBeDefined();
   });
-
-  // Toggling it off flips its checked state without crashing the page —
-  // the layer's visibility, not its data fetch, is what the toggle drives.
-  fireEvent.click(wifiToggle);
-  expect(wifiToggle).not.toBeChecked();
 });
 
 test('an emitter with no category (plain user-made emitter) contributes no category toggle', async () => {
@@ -268,8 +297,110 @@ test('an emitter with no category (plain user-made emitter) contributes no categ
 
   render(<MapView />, { wrapper });
 
-  await screen.findByLabelText('All emissions');
-  expect(screen.queryByLabelText(/^All (?!emissions)/)).not.toBeInTheDocument();
+  await screen.findByLabelText('All Emissions');
+  expect(screen.queryByLabelText(/^All (?!Emissions|Sources)/)).not.toBeInTheDocument();
+});
+
+test('checking "All Emissions" disables the per-category checkboxes; unchecking it re-enables them', async () => {
+  const fetchMock = mockRoutes(baseRoutes({ 'GET /api/emitters': () => ({ items: [EMITTER_WIFI], total: 1 }) }));
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<MapView />, { wrapper });
+
+  const allEmissions = await screen.findByLabelText('All Emissions');
+  const wifiToggle = await screen.findByLabelText('All WiFi');
+
+  expect(allEmissions).toBeChecked();
+  expect(wifiToggle).toBeDisabled();
+  expect(wifiToggle).toBeChecked();
+
+  fireEvent.click(allEmissions);
+
+  expect(allEmissions).not.toBeChecked();
+  expect(wifiToggle).not.toBeDisabled();
+});
+
+test('the Layers group toggles Zones/Entities/Emitters independently', async () => {
+  const fetchMock = mockRoutes(baseRoutes());
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<MapView />, { wrapper });
+
+  const zones = await screen.findByLabelText('Zones');
+  const entities = screen.getByLabelText('Entities');
+  const emitters = screen.getByLabelText('Emitters');
+
+  expect(zones).toBeChecked();
+  expect(entities).toBeChecked();
+  expect(emitters).toBeChecked();
+
+  fireEvent.click(zones);
+  expect(zones).not.toBeChecked();
+  expect(entities).toBeChecked();
+  expect(emitters).toBeChecked();
+
+  fireEvent.click(entities);
+  expect(zones).not.toBeChecked();
+  expect(entities).not.toBeChecked();
+  expect(emitters).toBeChecked();
+
+  fireEvent.click(emitters);
+  expect(zones).not.toBeChecked();
+  expect(entities).not.toBeChecked();
+  expect(emitters).not.toBeChecked();
+});
+
+test('"All Sources" disables the per-source checkboxes; unchecking it and selecting one source adds data_source_id to the emissions query', async () => {
+  const fetchMock = mockRoutes(baseRoutes());
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<MapView />, { wrapper });
+
+  const allSources = await screen.findByLabelText('All Sources');
+  const sourceCheckbox = await screen.findByLabelText('wifi (wlan0)');
+
+  expect(allSources).toBeChecked();
+  expect(sourceCheckbox).toBeDisabled();
+  expect(sourceCheckbox).not.toBeChecked();
+
+  fireEvent.click(allSources);
+  expect(allSources).not.toBeChecked();
+  expect(sourceCheckbox).not.toBeDisabled();
+
+  fireEvent.click(sourceCheckbox);
+  expect(sourceCheckbox).toBeChecked();
+
+  await waitFor(() => {
+    const call = fetchMock.mock.calls.find(([url]) => {
+      const parsed = new URL(String(url), 'http://localhost');
+      return parsed.pathname === '/api/emissions' && parsed.searchParams.get('data_source_id') === 'ds-1';
+    });
+    expect(call).toBeDefined();
+  });
+});
+
+test('the basemap switcher offers Standard/Satellite/Dark, defaulting to Standard, and switching to Satellite swaps the map tiles', async () => {
+  const fetchMock = mockRoutes(baseRoutes());
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<MapView />, { wrapper });
+
+  const select = await screen.findByLabelText(/basemap/i);
+  expect((select as HTMLSelectElement).value).toBe('standard');
+  expect(within(select).getAllByRole('option').map((option) => option.textContent)).toEqual([
+    'Standard',
+    'Satellite',
+    'Dark',
+  ]);
+
+  fireEvent.change(select, { target: { value: 'satellite' } });
+  expect((select as HTMLSelectElement).value).toBe('satellite');
+
+  await waitFor(() => {
+    expect(latestFakeMap().getSource('basemap-source').setTiles).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.stringContaining('arcgisonline.com')]),
+    );
+  });
 });
 
 test('with no GPS fix, the "Recenter to me" button is disabled and the map never auto-centers', async () => {
