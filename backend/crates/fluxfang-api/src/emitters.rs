@@ -9,6 +9,18 @@
 //! Every handler returns [`crate::dto::EmitterDto`] (see its doc comment)
 //! rather than `fluxfang_db::models::Emitter` directly.
 //!
+//! ## Phase 1b: `GET /api/emitters` search + entity filter + pagination
+//!
+//! `GET /api/emitters` accepts `search`, `entity_id`, `limit` (default 50,
+//! clamped to a max of 500, same convention as `emissions.rs`/
+//! `notifications.rs`), and `offset` query params, delegating to
+//! `EmitterRepo::query`/`EmitterListFilter` — see that repo module's doc
+//! comment for the exact search SQL. **This is a response-shape change**:
+//! the endpoint used to return a bare `[EmitterDto]` array; it now returns
+//! `{items, total}`, the same pagination envelope `GET /api/emissions`/`GET
+//! /api/notifications` already use. The frontend is updated in a later
+//! phase.
+//!
 //! ## Phase A5: `PATCH` accepts `match_enabled`/`attributes`
 //!
 //! Alongside the existing `name`/`type`/`entity_id` fields, `PATCH
@@ -74,11 +86,17 @@ use fluxfang_core::{
     catalog_for, conditions_to_sql_checked, is_known_emitter_type, Rule, RuleSqlError,
 };
 use fluxfang_db::models::{NewEmitter, NewEntity};
-use fluxfang_db::repo::emitter::{EmitterRuleError, EmitterWithEntity};
+use fluxfang_db::repo::emitter::{EmitterListFilter, EmitterRuleError, EmitterWithEntity};
 use fluxfang_db::{EmissionRepo, EmitterRepo};
 
 use crate::dto::{EmitterDto, EntityDto};
 use crate::state::AppState;
+
+/// Default page size when `limit` is omitted — same default `emissions.rs`/
+/// `notifications.rs` use for their own listing endpoints.
+const DEFAULT_LIMIT: i64 = 50;
+/// Hard ceiling `limit` is clamped to, regardless of what's requested.
+const MAX_LIMIT: i64 = 500;
 
 pub fn protected_routes() -> Router<AppState> {
     Router::new()
@@ -139,9 +157,45 @@ where
     Deserialize::deserialize(deserializer).map(Some)
 }
 
-async fn list_emitters(State(state): State<AppState>) -> Result<Json<Vec<EmitterDto>>, ApiError> {
-    let rows = EmitterRepo::list(&state.pool).await?;
-    Ok(Json(rows.iter().map(EmitterDto::from).collect()))
+/// `GET /api/emitters` query params (Phase 1b: search + entity filter +
+/// pagination). All optional; see [`EmitterListFilter`] for search
+/// semantics.
+#[derive(Debug, Deserialize)]
+struct ListEmittersQuery {
+    #[serde(default)]
+    search: Option<String>,
+    #[serde(default)]
+    entity_id: Option<Uuid>,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    offset: Option<i64>,
+}
+
+/// `GET /api/emitters`' response — response-shape change from a bare
+/// `[EmitterDto]` array to `{items, total}`, same shape
+/// `emissions.rs`/`notifications.rs` use for their own paginated listings.
+#[derive(Debug, Serialize)]
+struct EmittersPageDto {
+    items: Vec<EmitterDto>,
+    total: i64,
+}
+
+async fn list_emitters(
+    State(state): State<AppState>,
+    Query(q): Query<ListEmittersQuery>,
+) -> Result<Json<EmittersPageDto>, ApiError> {
+    let filter = EmitterListFilter {
+        search: q.search,
+        entity_id: q.entity_id,
+        limit: q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT),
+        offset: q.offset.unwrap_or(0).max(0),
+    };
+    let (rows, total) = EmitterRepo::query(&state.pool, filter).await?;
+    Ok(Json(EmittersPageDto {
+        items: rows.iter().map(EmitterDto::from).collect(),
+        total,
+    }))
 }
 
 #[derive(Debug, Deserialize)]

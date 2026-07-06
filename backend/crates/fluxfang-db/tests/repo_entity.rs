@@ -5,6 +5,7 @@ mod common;
 use chrono::{Duration, Utc};
 use common::{fresh_pool, seed_session, seed_wifi_source};
 use fluxfang_db::models::{NewEmission, NewEmitter, NewEntity};
+use fluxfang_db::repo::entity::EntityListFilter;
 use fluxfang_db::{EmissionRepo, EmitterRepo, EntityRepo};
 use uuid::Uuid;
 
@@ -149,4 +150,152 @@ async fn last_seen_returns_max_observed_at_across_entitys_emitters_emissions() {
         .unwrap();
     // Compare at second resolution to sidestep any driver-level sub-µs drift.
     assert_eq!(last_seen.timestamp(), now.timestamp());
+}
+
+// ---------------------------------------------------------------------
+// Phase 1b: EntityRepo::query — search (name/notes substring) + pagination.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn query_with_no_filter_returns_everything_and_correct_total() {
+    let pool = fresh_pool().await;
+    EntityRepo::insert(
+        &pool,
+        NewEntity {
+            name: "A".to_string(),
+            notes: None,
+        },
+    )
+    .await
+    .unwrap();
+    EntityRepo::insert(
+        &pool,
+        NewEntity {
+            name: "B".to_string(),
+            notes: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let (rows, total) = EntityRepo::query(&pool, EntityListFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(total, 2);
+    assert_eq!(rows.len(), 2);
+}
+
+#[tokio::test]
+async fn query_search_matches_by_name_case_insensitively() {
+    let pool = fresh_pool().await;
+    EntityRepo::insert(
+        &pool,
+        NewEntity {
+            name: "Bob's Phone".to_string(),
+            notes: None,
+        },
+    )
+    .await
+    .unwrap();
+    EntityRepo::insert(
+        &pool,
+        NewEntity {
+            name: "Alice's Laptop".to_string(),
+            notes: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let (rows, total) = EntityRepo::query(
+        &pool,
+        EntityListFilter {
+            search: Some("bob".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(total, 1, "rows: {rows:?}");
+    assert_eq!(rows[0].name, "Bob's Phone");
+}
+
+#[tokio::test]
+async fn query_search_matches_by_notes_substring() {
+    let pool = fresh_pool().await;
+    let matching = EntityRepo::insert(
+        &pool,
+        NewEntity {
+            name: "Device 1".to_string(),
+            notes: Some("seen loitering near the entrance".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+    EntityRepo::insert(
+        &pool,
+        NewEntity {
+            name: "Device 2".to_string(),
+            notes: Some("nothing notable".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let (rows, total) = EntityRepo::query(
+        &pool,
+        EntityListFilter {
+            search: Some("loitering".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(total, 1, "rows: {rows:?}");
+    assert_eq!(rows[0].id, matching.id);
+}
+
+#[tokio::test]
+async fn query_paginates_with_correct_total_ignoring_limit_offset() {
+    let pool = fresh_pool().await;
+    for name in ["A", "B", "C", "D", "E"] {
+        EntityRepo::insert(
+            &pool,
+            NewEntity {
+                name: name.to_string(),
+                notes: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let (page1, total1) = EntityRepo::query(
+        &pool,
+        EntityListFilter {
+            limit: 2,
+            offset: 0,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(total1, 5);
+    assert_eq!(page1.len(), 2);
+    assert_eq!(page1[0].name, "A");
+    assert_eq!(page1[1].name, "B");
+
+    let (page2, total2) = EntityRepo::query(
+        &pool,
+        EntityListFilter {
+            limit: 2,
+            offset: 4,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(total2, 5);
+    assert_eq!(page2.len(), 1);
+    assert_eq!(page2[0].name, "E");
 }

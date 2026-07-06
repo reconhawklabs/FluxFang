@@ -41,7 +41,10 @@ async fn setup_then_login_flow() {
 
     let resp = get_with_cookie(&app, "/api/entities", &cookie).await;
     assert_status(&resp, StatusCode::OK);
-    assert_eq!(body_json(resp).await, serde_json::json!([]));
+    assert_eq!(
+        body_json(resp).await,
+        serde_json::json!({"items": [], "total": 0})
+    );
 }
 
 /// `/api/setup` also logs the caller in directly (no separate login round

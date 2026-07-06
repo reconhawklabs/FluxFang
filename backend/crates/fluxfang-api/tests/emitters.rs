@@ -13,8 +13,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use fluxfang_api::capture::MockCapturerFactory;
-use fluxfang_db::models::{NewDataSource, NewEmission};
-use fluxfang_db::{DataSourceRepo, EmissionRepo, SessionRepo};
+use fluxfang_db::models::{NewDataSource, NewEmission, NewEntity};
+use fluxfang_db::{DataSourceRepo, EmissionRepo, EntityRepo, SessionRepo};
 
 mod common;
 use common::{
@@ -410,10 +410,11 @@ async fn with_entity_invalid_rule_rolls_back_and_is_bad_request() {
     let list_resp = get_with_cookie(&app, "/api/emitters", &cookie).await;
     let list_body = body_json(list_resp).await;
     assert_eq!(
-        list_body.as_array().unwrap().len(),
+        list_body["items"].as_array().unwrap().len(),
         0,
-        "no emitter should exist"
+        "no emitter should exist, body: {list_body}"
     );
+    assert_eq!(list_body["total"], 0, "body: {list_body}");
 }
 
 /// (e) `PATCH /api/emitters/:id` with `entity_id: null` detaches.
@@ -589,6 +590,25 @@ fn urlencoding_encode(s: &str) -> String {
     out
 }
 
+/// Test-only helper for seeding a bare entity directly against the DB
+/// (bypassing the API), for the Phase 1b `entity_id` list-filter test.
+struct EntityRepoInsertHelper;
+
+impl EntityRepoInsertHelper {
+    async fn insert(pool: &PgPool, name: &str) -> Uuid {
+        EntityRepo::insert(
+            pool,
+            NewEntity {
+                name: name.to_string(),
+                notes: None,
+            },
+        )
+        .await
+        .expect("seed entity")
+        .id
+    }
+}
+
 /// Test-only helper for seeding a bare, unassigned emitter directly against
 /// the DB (bypassing the API) where a test only needs *an* emitter to exist,
 /// not to exercise creation itself.
@@ -611,6 +631,27 @@ impl EmitterRepoInsertHelper {
         )
         .await
         .expect("seed emitter")
+        .id
+    }
+
+    /// Seed an emitter associated to `entity_id` directly, bypassing the
+    /// API — used by the Phase 1b list-search/entity-filter tests.
+    async fn insert_with_entity(pool: &PgPool, name: &str, entity_id: Option<Uuid>) -> Uuid {
+        use fluxfang_db::models::NewEmitter;
+        use fluxfang_db::EmitterRepo;
+
+        EmitterRepo::insert(
+            pool,
+            NewEmitter {
+                name: name.to_string(),
+                type_: None,
+                entity_id,
+                match_criteria: json!({}),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed emitter with entity")
         .id
     }
 
@@ -754,4 +795,68 @@ async fn patch_attributes_round_trips() {
     let resp = get_with_cookie(&app, &format!("/api/emitters/{id}"), &cookie).await;
     let fetched = body_json(resp).await;
     assert_eq!(fetched["attributes"], new_attrs, "body: {fetched}");
+}
+
+// ---------------------------------------------------------------------
+// Phase 1b: GET /api/emitters response-shape change (bare array -> {items,
+// total}) plus search/entity_id/limit/offset query params.
+// ---------------------------------------------------------------------
+
+/// `GET /api/emitters` (with no query params) returns `{items, total}`, not
+/// a bare array — the response-shape change this phase makes.
+#[tokio::test]
+async fn list_emitters_returns_items_and_total_shape() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    EmitterRepoInsertHelper::insert_unassigned(&pool, "AP One").await;
+    EmitterRepoInsertHelper::insert_unassigned(&pool, "AP Two").await;
+
+    let resp = get_with_cookie(&app, "/api/emitters", &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let body = body_json(resp).await;
+
+    assert!(body.get("items").is_some(), "body: {body}");
+    assert!(body.get("total").is_some(), "body: {body}");
+    assert_eq!(body["total"], 2, "body: {body}");
+    assert_eq!(body["items"].as_array().unwrap().len(), 2, "body: {body}");
+}
+
+/// `search` finds an emitter by name substring, `entity_id` scopes to just
+/// that entity's emitters, and `limit`/`offset` page through results —
+/// driven end to end through the HTTP query string.
+#[tokio::test]
+async fn list_emitters_supports_search_entity_id_and_pagination() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    let entity = EntityRepoInsertHelper::insert(&pool, "Bob's Devices").await;
+    EmitterRepoInsertHelper::insert_with_entity(&pool, "Bob's Cafe AP", Some(entity)).await;
+    EmitterRepoInsertHelper::insert_unassigned(&pool, "Unrelated Router").await;
+    EmitterRepoInsertHelper::insert_unassigned(&pool, "Another AP").await;
+
+    // search
+    let resp = get_with_cookie(&app, "/api/emitters?search=cafe", &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["total"], 1, "body: {body}");
+    assert_eq!(body["items"][0]["name"], "Bob's Cafe AP");
+
+    // entity_id
+    let resp = get_with_cookie(&app, &format!("/api/emitters?entity_id={entity}"), &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["total"], 1, "body: {body}");
+    assert_eq!(body["items"][0]["name"], "Bob's Cafe AP");
+
+    // pagination: 3 emitters total, page size 2
+    let resp = get_with_cookie(&app, "/api/emitters?limit=2&offset=0", &cookie).await;
+    let body = body_json(resp).await;
+    assert_eq!(body["total"], 3, "body: {body}");
+    assert_eq!(body["items"].as_array().unwrap().len(), 2, "body: {body}");
+
+    let resp = get_with_cookie(&app, "/api/emitters?limit=2&offset=2", &cookie).await;
+    let body = body_json(resp).await;
+    assert_eq!(body["total"], 3, "body: {body}");
+    assert_eq!(body["items"].as_array().unwrap().len(), 1, "body: {body}");
 }

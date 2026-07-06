@@ -9,6 +9,17 @@
 //! all return [`crate::dto::EntityDto`] — see its doc comment for why
 //! `last_seen` is deliberately omitted there.
 //!
+//! ## Phase 1b: `GET /api/entities` search + pagination
+//!
+//! `GET /api/entities` accepts `search`, `limit` (default 50, clamped to a
+//! max of 500, same convention as `emitters.rs`/`emissions.rs`/
+//! `notifications.rs`), and `offset` query params, delegating to
+//! `EntityRepo::query`/`EntityListFilter` — see that repo module's doc
+//! comment for the exact search SQL. **This is a response-shape change**:
+//! the endpoint used to return a bare `[EntityDto]` array; it now returns
+//! `{items, total}`, the same pagination envelope the other listing
+//! endpoints use. The frontend is updated in a later phase.
+//!
 //! `GET /api/entities/:id` returns [`EntityDetailDto`]: every `EntityDto`
 //! field (flattened) plus `last_seen`, `emitters`, and `recent_detections`
 //! — everything the map/tracking view needs for one entity in a single
@@ -45,7 +56,7 @@
 //! malformed request bodies are rejected by axum's `Json` extractor itself
 //! before a handler here ever runs.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -55,6 +66,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 use fluxfang_db::models::{Emission, NewEntity};
+use fluxfang_db::repo::entity::EntityListFilter;
 use fluxfang_db::{EmissionRepo, EmitterRepo, EntityRepo};
 
 use crate::dto::{EmitterDto, EntityDto};
@@ -63,6 +75,11 @@ use crate::state::AppState;
 /// Cap on `recent_detections` in the `GET /api/entities/:id` response — see
 /// module docs.
 const RECENT_DETECTIONS_LIMIT: i64 = 100;
+/// Default page size when `limit` is omitted — same default `emitters.rs`/
+/// `emissions.rs`/`notifications.rs` use for their own listing endpoints.
+const DEFAULT_LIMIT: i64 = 50;
+/// Hard ceiling `limit` is clamped to, regardless of what's requested.
+const MAX_LIMIT: i64 = 500;
 
 pub fn protected_routes() -> Router<AppState> {
     Router::new()
@@ -88,9 +105,42 @@ where
     Deserialize::deserialize(deserializer).map(Some)
 }
 
-async fn list_entities(State(state): State<AppState>) -> Result<Json<Vec<EntityDto>>, ApiError> {
-    let rows = EntityRepo::list(&state.pool).await?;
-    Ok(Json(rows.iter().map(EntityDto::from).collect()))
+/// `GET /api/entities` query params (Phase 1b: search + pagination). All
+/// optional; see [`EntityListFilter`] for search semantics.
+#[derive(Debug, Deserialize)]
+struct ListEntitiesQuery {
+    #[serde(default)]
+    search: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    offset: Option<i64>,
+}
+
+/// `GET /api/entities`' response — response-shape change from a bare
+/// `[EntityDto]` array to `{items, total}`, same shape
+/// `emitters.rs`/`emissions.rs`/`notifications.rs` use for their own
+/// paginated listings.
+#[derive(Debug, Serialize)]
+struct EntitiesPageDto {
+    items: Vec<EntityDto>,
+    total: i64,
+}
+
+async fn list_entities(
+    State(state): State<AppState>,
+    Query(q): Query<ListEntitiesQuery>,
+) -> Result<Json<EntitiesPageDto>, ApiError> {
+    let filter = EntityListFilter {
+        search: q.search,
+        limit: q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT),
+        offset: q.offset.unwrap_or(0).max(0),
+    };
+    let (rows, total) = EntityRepo::query(&state.pool, filter).await?;
+    Ok(Json(EntitiesPageDto {
+        items: rows.iter().map(EntityDto::from).collect(),
+        total,
+    }))
 }
 
 #[derive(Debug, Deserialize)]

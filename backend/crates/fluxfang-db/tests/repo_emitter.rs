@@ -6,7 +6,7 @@ use chrono::{Duration, TimeZone, Utc};
 use common::{fresh_pool, seed_session, seed_wifi_source};
 use fluxfang_core::{Condition, MatchMode, Op, Rule};
 use fluxfang_db::models::{NewEmission, NewEmitter, NewEntity};
-use fluxfang_db::repo::emitter::EmitterRuleError;
+use fluxfang_db::repo::emitter::{EmitterListFilter, EmitterRuleError};
 use fluxfang_db::{EmissionRepo, EmitterRepo, EntityRepo};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -557,4 +557,281 @@ async fn set_attributes_roundtrips_json() {
 
     let got = EmitterRepo::get(&pool, emitter.id).await.unwrap().unwrap();
     assert_eq!(got.attributes, attrs);
+}
+
+// ---------------------------------------------------------------------
+// Phase 1b: create_with_entity's backfill consistency fix (drop the
+// `emitter_id IS NULL` guard so it reassigns ALL matching emissions, same
+// as attach_emissions_matching/count_matching).
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn create_with_entity_reassigns_all_matching_emissions_regardless_of_prior_assignment() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+    let other = EmitterRepo::insert(&pool, new_emitter("Other AP"))
+        .await
+        .unwrap();
+
+    let target_bssid = "aa:bb:cc:dd:ee:ff";
+    let unassigned = insert_unassigned_wifi(&pool, ds, session, target_bssid).await;
+    // Already claimed by a different (e.g. auto-created) emitter — the new
+    // "reassign ALL matching" semantics must still pick this up when
+    // creating a new entity+emitter together, exactly like
+    // attach_emissions_matching does for the existing-emitter path.
+    let already_assigned =
+        insert_wifi_assigned_to(&pool, ds, session, target_bssid, other.id).await;
+    let non_matching = insert_unassigned_wifi(&pool, ds, session, "00:00:00:00:00:00").await;
+
+    let rule = bssid_rule(target_bssid);
+    let match_criteria = serde_json::to_value(&rule).unwrap();
+
+    let result = EmitterRepo::create_with_entity(
+        &pool,
+        NewEntity {
+            name: "Bob's phone".to_string(),
+            notes: None,
+        },
+        "Bob's phone AP".to_string(),
+        Some("Access Point".to_string()),
+        None,
+        match_criteria,
+        Some(&rule),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        result.attached_count, 2,
+        "both matching emissions must be (re)assigned, regardless of prior assignment"
+    );
+
+    let a = EmissionRepo::get(&pool, unassigned).await.unwrap().unwrap();
+    let b = EmissionRepo::get(&pool, already_assigned)
+        .await
+        .unwrap()
+        .unwrap();
+    let non = EmissionRepo::get(&pool, non_matching)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.emitter_id, Some(result.emitter.id));
+    assert_eq!(
+        b.emitter_id,
+        Some(result.emitter.id),
+        "an emission already assigned to a different emitter must be reassigned"
+    );
+    assert_eq!(
+        non.emitter_id, None,
+        "non-matching emission must stay unassigned"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Phase 1b: EmitterRepo::query — search (name/type/attributes/
+// match_criteria substring) + entity_id filter + pagination.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn query_with_no_filter_returns_everything_and_correct_total() {
+    let pool = fresh_pool().await;
+    EmitterRepo::insert(&pool, new_emitter("A")).await.unwrap();
+    EmitterRepo::insert(&pool, new_emitter("B")).await.unwrap();
+    EmitterRepo::insert(&pool, new_emitter("C")).await.unwrap();
+
+    let (rows, total) = EmitterRepo::query(&pool, EmitterListFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(total, 3);
+    assert_eq!(rows.len(), 3);
+}
+
+#[tokio::test]
+async fn query_search_matches_by_name_case_insensitively() {
+    let pool = fresh_pool().await;
+    EmitterRepo::insert(&pool, new_emitter("Cafe Free WiFi"))
+        .await
+        .unwrap();
+    EmitterRepo::insert(&pool, new_emitter("Home Router"))
+        .await
+        .unwrap();
+
+    let (rows, total) = EmitterRepo::query(
+        &pool,
+        EmitterListFilter {
+            search: Some("cafe".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(total, 1, "rows: {rows:?}");
+    assert_eq!(rows[0].name, "Cafe Free WiFi");
+}
+
+/// Typing a MAC/BSSID substring that only appears inside the JSON
+/// `attributes` column (not `name`/`type`) must still find the emitter —
+/// the whole point of searching `attributes::text` too.
+#[tokio::test]
+async fn query_search_matches_by_mac_inside_attributes_json() {
+    let pool = fresh_pool().await;
+    let with_mac = EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            name: "WiFi AP".to_string(),
+            type_: None,
+            entity_id: None,
+            match_criteria: serde_json::json!({}),
+            emitter_type: Some("wifi_access_point".to_string()),
+            attributes: serde_json::json!({"bssid": "aa:bb:cc:dd:ee:ff"}),
+            match_enabled: true,
+            identity_key: None,
+        },
+    )
+    .await
+    .unwrap();
+    EmitterRepo::insert(&pool, new_emitter("Unrelated AP"))
+        .await
+        .unwrap();
+
+    let (rows, total) = EmitterRepo::query(
+        &pool,
+        EmitterListFilter {
+            search: Some("aa:bb:cc:dd:ee:ff".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(total, 1, "rows: {rows:?}");
+    assert_eq!(rows[0].id, with_mac.id);
+}
+
+/// Same as above but the MAC only appears in `match_criteria`, not
+/// `attributes` — confirms both JSON columns are searched.
+#[tokio::test]
+async fn query_search_matches_by_mac_inside_match_criteria_json() {
+    let pool = fresh_pool().await;
+    let with_rule = EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            name: "WiFi AP".to_string(),
+            type_: Some("Access Point".to_string()),
+            entity_id: None,
+            match_criteria: serde_json::json!({
+                "match": "all",
+                "conditions": [{"field": "bssid", "op": "eq", "value": "11:22:33:44:55:66"}]
+            }),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    EmitterRepo::insert(&pool, new_emitter("Unrelated AP"))
+        .await
+        .unwrap();
+
+    let (rows, total) = EmitterRepo::query(
+        &pool,
+        EmitterListFilter {
+            search: Some("11:22:33:44:55:66".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(total, 1, "rows: {rows:?}");
+    assert_eq!(rows[0].id, with_rule.id);
+}
+
+#[tokio::test]
+async fn query_entity_id_filters_to_only_that_entitys_emitters() {
+    let pool = fresh_pool().await;
+    let entity = EntityRepo::insert(
+        &pool,
+        NewEntity {
+            name: "Bob".to_string(),
+            notes: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let under_entity = EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            entity_id: Some(entity.id),
+            ..new_emitter("Bob's AP")
+        },
+    )
+    .await
+    .unwrap();
+    EmitterRepo::insert(&pool, new_emitter("Unrelated AP"))
+        .await
+        .unwrap();
+
+    let (rows, total) = EmitterRepo::query(
+        &pool,
+        EmitterListFilter {
+            entity_id: Some(entity.id),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(total, 1, "rows: {rows:?}");
+    assert_eq!(rows[0].id, under_entity.id);
+}
+
+#[tokio::test]
+async fn query_paginates_with_correct_total_ignoring_limit_offset() {
+    let pool = fresh_pool().await;
+    for name in ["A", "B", "C", "D", "E"] {
+        EmitterRepo::insert(&pool, new_emitter(name)).await.unwrap();
+    }
+
+    let (page1, total1) = EmitterRepo::query(
+        &pool,
+        EmitterListFilter {
+            limit: 2,
+            offset: 0,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(total1, 5);
+    assert_eq!(page1.len(), 2);
+    assert_eq!(page1[0].name, "A");
+    assert_eq!(page1[1].name, "B");
+
+    let (page2, total2) = EmitterRepo::query(
+        &pool,
+        EmitterListFilter {
+            limit: 2,
+            offset: 2,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(total2, 5);
+    assert_eq!(page2.len(), 2);
+    assert_eq!(page2[0].name, "C");
+    assert_eq!(page2[1].name, "D");
+
+    let (page3, total3) = EmitterRepo::query(
+        &pool,
+        EmitterListFilter {
+            limit: 2,
+            offset: 4,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(total3, 5);
+    assert_eq!(page3.len(), 1);
+    assert_eq!(page3[0].name, "E");
 }

@@ -321,8 +321,9 @@ async fn create_entity_then_lists() {
     let resp = get_with_cookie(&app, "/api/entities", &cookie).await;
     assert_status(&resp, StatusCode::OK);
     let list = body_json(resp).await;
-    let arr = list.as_array().unwrap();
+    let arr = list["items"].as_array().unwrap();
     assert_eq!(arr.len(), 1, "body: {list}");
+    assert_eq!(list["total"], 1, "body: {list}");
     assert_eq!(arr[0]["name"], "New Entity");
     // List rows deliberately omit `last_seen` (see dto::EntityDto docs).
     assert!(arr[0].get("last_seen").is_none(), "body: {list}");
@@ -337,4 +338,63 @@ async fn get_unknown_entity_is_404() {
     let id = Uuid::new_v4();
     let resp = get_with_cookie(&app, &format!("/api/entities/{id}"), &cookie).await;
     assert_status(&resp, StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------
+// Phase 1b: GET /api/entities `search`/`limit`/`offset` query params.
+// (The bare-array -> {items,total} shape change itself is covered by
+// `create_entity_then_lists` above and `auth.rs`'s setup flow test.)
+// ---------------------------------------------------------------------
+
+/// `search` finds an entity by name/notes substring, and `limit`/`offset`
+/// page through results — driven end to end through the HTTP query string.
+#[tokio::test]
+async fn list_entities_supports_search_and_pagination() {
+    let (app, _pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    post_json_with_cookie(
+        &app,
+        "/api/entities",
+        &json!({"name": "Bob's Phone", "notes": "seen at the cafe"}).to_string(),
+        &cookie,
+    )
+    .await;
+    post_json_with_cookie(
+        &app,
+        "/api/entities",
+        &json!({"name": "Alice's Laptop"}).to_string(),
+        &cookie,
+    )
+    .await;
+    post_json_with_cookie(
+        &app,
+        "/api/entities",
+        &json!({"name": "Third Device"}).to_string(),
+        &cookie,
+    )
+    .await;
+
+    let resp = get_with_cookie(&app, "/api/entities?search=bob", &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let body = body_json(resp).await;
+    assert!(body.get("items").is_some(), "body: {body}");
+    assert!(body.get("total").is_some(), "body: {body}");
+    assert_eq!(body["total"], 1, "body: {body}");
+    assert_eq!(body["items"][0]["name"], "Bob's Phone");
+
+    let resp = get_with_cookie(&app, "/api/entities?search=cafe", &cookie).await;
+    let body = body_json(resp).await;
+    assert_eq!(body["total"], 1, "body: {body}");
+    assert_eq!(body["items"][0]["name"], "Bob's Phone");
+
+    let resp = get_with_cookie(&app, "/api/entities?limit=2&offset=0", &cookie).await;
+    let body = body_json(resp).await;
+    assert_eq!(body["total"], 3, "body: {body}");
+    assert_eq!(body["items"].as_array().unwrap().len(), 2, "body: {body}");
+
+    let resp = get_with_cookie(&app, "/api/entities?limit=2&offset=2", &cookie).await;
+    let body = body_json(resp).await;
+    assert_eq!(body["total"], 3, "body: {body}");
+    assert_eq!(body["items"].as_array().unwrap().len(), 1, "body: {body}");
 }

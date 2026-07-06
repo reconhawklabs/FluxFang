@@ -86,6 +86,26 @@
 //! rule; overriding e.g. a detected `randomized_mac`). No ingest/API/
 //! classification logic lives in this crate yet — see the design doc's
 //! "Build order" for what's deferred to later phases.
+//!
+//! ## Phase 1b: `query` (list search/filter/pagination) + a backfill
+//! consistency fix
+//!
+//! [`EmitterRepo::query`] (with [`EmitterListFilter`]) is the emitters list
+//! page's search + entity filter + pagination, following the same
+//! dynamic-WHERE/bind-threading shape as `repo::emission::EmissionRepo::query`
+//! — see its own doc comment for the exact SQL.
+//!
+//! Separately: [`EmitterRepo::create_with_entity`]'s backfill previously kept
+//! its own `WHERE emitter_id IS NULL AND ...` guard, left over from before
+//! `attach_emissions_matching`/`count_matching` were changed (see the
+//! "Matching/backfill" section above) to reassign ALL matching emissions
+//! rather than only unassigned ones. That made `create_with_entity`'s
+//! backfill behave differently from the other two paths — a rule that only
+//! matched already-assigned emissions would silently attach nothing when
+//! creating a new entity+emitter together, while `attach_emissions_matching`/
+//! `count_matching` would reclaim them. The guard is now dropped here too,
+//! so all three paths share identical "reassign every matching `kind =
+//! 'wifi'` emission" semantics.
 
 use std::fmt;
 
@@ -98,6 +118,36 @@ use crate::models::{Emitter, Entity, NewEmitter, NewEntity};
 use crate::repo::entity::ENTITY_COLUMNS;
 
 pub struct EmitterRepo;
+
+/// Filter/paginate criteria for [`EmitterRepo::query`] (Phase 1b's emitter
+/// list search + entity filter + pagination). Every field defaults to "no
+/// constraint" via [`Default`]; `limit`/`offset` default to a sane first
+/// page, same convention as `repo::emission::EmissionFilter`.
+///
+/// `search`, when `Some`, is a single case-insensitive substring matched
+/// across `name`, `type`, `attributes::text`, and `match_criteria::text` —
+/// so typing a MAC/BSSID/SSID that only appears inside the JSON
+/// `attributes`/`match_criteria` columns (not the plain `name`/`type`
+/// columns) still finds the emitter. See [`EmitterRepo::query`]'s own doc
+/// comment for the exact SQL and why it's injection-safe.
+#[derive(Debug, Clone)]
+pub struct EmitterListFilter {
+    pub search: Option<String>,
+    pub entity_id: Option<Uuid>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+impl Default for EmitterListFilter {
+    fn default() -> Self {
+        Self {
+            search: None,
+            entity_id: None,
+            limit: 50,
+            offset: 0,
+        }
+    }
+}
 
 /// Column list shared by every query that produces an [`Emitter`]. The `type`
 /// column decodes into [`Emitter::type_`] via `#[sqlx(rename = "type")]`, so
@@ -292,6 +342,74 @@ impl EmitterRepo {
             .bind(entity_id)
             .fetch_all(pool)
             .await
+    }
+
+    /// Filter/paginate emitters for the emitters list page (Phase 1b):
+    /// `filter.search` (case-insensitive substring over `name`, `type`,
+    /// `attributes::text`, and `match_criteria::text` — so a MAC/BSSID/SSID
+    /// typed into search finds an emitter even when it only appears inside
+    /// the JSON columns, not the plain `name`/`type` columns) and
+    /// `filter.entity_id` (exact match) are ANDed together when both are
+    /// given. `search` is parameterized as `'%' || $n || '%'` bound as a
+    /// plain string parameter — never interpolated into the SQL text — so
+    /// it's not susceptible to SQL injection (same approach
+    /// `repo::emission::EmissionRepo::query`'s `text`/ILIKE filter uses).
+    ///
+    /// Ordered `created_at ASC`, same as [`Self::list`]/[`Self::list_by_entity`].
+    /// Returns the requested page plus `total`, the count of matching rows
+    /// ignoring `limit`/`offset` (for pagination UIs), same shape as
+    /// `repo::emission::EmissionRepo::query`.
+    pub async fn query(
+        pool: &PgPool,
+        filter: EmitterListFilter,
+    ) -> Result<(Vec<Emitter>, i64), sqlx::Error> {
+        let mut clauses: Vec<String> = vec!["TRUE".to_string()];
+        let mut next_bind = 1usize;
+
+        if filter.search.is_some() {
+            clauses.push(format!(
+                "(name ILIKE ${next_bind} OR type ILIKE ${next_bind} \
+                 OR attributes::text ILIKE ${next_bind} \
+                 OR match_criteria::text ILIKE ${next_bind})"
+            ));
+            next_bind += 1;
+        }
+        if filter.entity_id.is_some() {
+            clauses.push(format!("entity_id = ${next_bind}"));
+            next_bind += 1;
+        }
+
+        let where_sql = clauses.join(" AND ");
+
+        macro_rules! bind_shared {
+            ($q:expr) => {{
+                let mut q = $q;
+                if let Some(ref search) = filter.search {
+                    q = q.bind(format!("%{search}%"));
+                }
+                if let Some(entity_id) = filter.entity_id {
+                    q = q.bind(entity_id);
+                }
+                q
+            }};
+        }
+
+        let count_sql = format!("SELECT COUNT(*) FROM emitter WHERE {where_sql}");
+        let count_q = bind_shared!(sqlx::query_as::<_, (i64,)>(&count_sql));
+        let (total,) = count_q.fetch_one(pool).await?;
+
+        let limit_idx = next_bind;
+        let offset_idx = next_bind + 1;
+        let data_sql = format!(
+            "SELECT {EMITTER_COLUMNS} FROM emitter WHERE {where_sql} \
+             ORDER BY created_at ASC LIMIT ${limit_idx} OFFSET ${offset_idx}"
+        );
+        let data_q = bind_shared!(sqlx::query_as::<_, Emitter>(&data_sql))
+            .bind(filter.limit)
+            .bind(filter.offset);
+        let rows = data_q.fetch_all(pool).await?;
+
+        Ok((rows, total))
     }
 
     /// Associate `emitter_id` with `entity_id` (`Some`), or detach it
@@ -533,10 +651,12 @@ impl EmitterRepo {
             let (frag, binds) =
                 conditions_to_sql_checked(&rule.conditions, rule.match_mode, 2, &catalog)?;
 
-            let update_sql = format!(
-                "UPDATE emission SET emitter_id = $1 \
-                 WHERE emitter_id IS NULL AND kind = 'wifi' AND {frag}"
-            );
+            // No `emitter_id IS NULL` guard here — consistent with
+            // `attach_emissions_matching`/`count_matching` (see module
+            // docs): reassign ALL matching `kind = 'wifi'` emissions to the
+            // freshly-created emitter, regardless of any prior assignment.
+            let update_sql =
+                format!("UPDATE emission SET emitter_id = $1 WHERE kind = 'wifi' AND {frag}");
             let mut q = sqlx::query(&update_sql).bind(emitter.id);
             for v in &binds {
                 let text = match v.clone() {
