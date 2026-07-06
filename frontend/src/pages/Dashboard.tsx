@@ -51,8 +51,9 @@ const GPS_STATUS_REFETCH_MS = 4000;
  * both the live feed and the embedded map, replacing the map's own From/To
  * pickers with an at-a-glance choice. */
 const TIME_RANGES = [
-  { id: "5m", label: "Past 5 min", ms: 5 * 60 * 1000 },
+  { id: "15m", label: "Past 15 min", ms: 15 * 60 * 1000 },
   { id: "1h", label: "Past hour", ms: 60 * 60 * 1000 },
+  { id: "4h", label: "Past 4 hours", ms: 4 * 60 * 60 * 1000 },
   { id: "24h", label: "Past 24 hours", ms: 24 * 60 * 60 * 1000 },
 ] as const;
 type TimeRangeId = (typeof TIME_RANGES)[number]["id"];

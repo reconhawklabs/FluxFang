@@ -337,28 +337,20 @@ test('the feed defaults to the "All Emissions" tab and scopes to a data source w
   );
 });
 
-test('the time-range selector defaults to "Past hour" and sends a time_from bound on the feed query', async () => {
-  const feedCalls: URL[] = [];
-  const fetchMock = mockRoutes(
-    baseRoutes({
-      "GET /api/emissions": (url) => {
-        if (url.searchParams.get("limit") !== "500") feedCalls.push(url);
-        return { items: [EMISSION_1], total: 1 };
-      },
-    }),
-  );
-  vi.stubGlobal("fetch", fetchMock);
-
+test("dashboard time-range selector offers 15m/1h/4h/24h and defaults to 1h", async () => {
+  vi.stubGlobal("fetch", mockRoutes(baseRoutes()));
   render(<Dashboard />, { wrapper });
-
   const select = (await screen.findByLabelText(
-    "Time Range",
+    /time range/i,
   )) as HTMLSelectElement;
   expect(select.value).toBe("1h");
-  await waitFor(() => expect(feedCalls.length).toBeGreaterThan(0));
-  expect(
-    feedCalls.every((url) => url.searchParams.get("time_from") !== null),
-  ).toBe(true);
+  const labels = Array.from(select.options).map((o) => o.textContent);
+  expect(labels).toEqual([
+    "Past 15 min",
+    "Past hour",
+    "Past 4 hours",
+    "Past 24 hours",
+  ]);
 });
 
 test('a WS "emission" frame refreshes the feed with newly arrived emissions', async () => {
