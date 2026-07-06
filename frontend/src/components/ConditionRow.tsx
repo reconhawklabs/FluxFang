@@ -21,16 +21,24 @@ export interface ConditionRowProps {
    * so multiple rows on one page don't collide (e.g. "Field (condition
    * 2)"). Display purposes only — has no effect on the emitted `Condition`. */
   index: number;
+  /** Distinguishes this row's element ids/`data-testid` from another
+   * condition-row list rendered on the same page at the same `index` —
+   * e.g. the Emissions page's `StackedFilterBuilder` (no prefix) rendering
+   * alongside its "Assign to emitter" modal's `RuleBuilder` (prefixed
+   * `"rule-"`), both of which can have a row at index 0 open at once.
+   * Defaults to `''` (existing single-instance-per-page callers are
+   * unaffected). */
+  idPrefix?: string;
 }
 
 const selectClassName =
   'rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 focus:border-amber-500 focus:outline-none';
 const inputClassName = selectClassName;
 
-export default function ConditionRow({ fields, condition, onChange, onRemove, index }: ConditionRowProps) {
+export default function ConditionRow({ fields, condition, onChange, onRemove, index, idPrefix = '' }: ConditionRowProps) {
   const field = fields.find((f) => f.key === condition.field);
   const rowLabel = `condition ${index + 1}`;
-  const idBase = `condition-row-${index}`;
+  const idBase = `${idPrefix}condition-row-${index}`;
 
   function handleFieldChange(event: ChangeEvent<HTMLSelectElement>): void {
     const nextField = fields.find((f) => f.key === event.target.value);

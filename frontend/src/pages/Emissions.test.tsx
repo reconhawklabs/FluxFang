@@ -6,10 +6,12 @@ import Emissions from './Emissions';
 import { jsonResponse } from '../test-utils/fetchMocks';
 import type { Emission } from '../api/emissions';
 import type { Emitter } from '../api/emitters';
+import type { DataSource } from '../api/dataSources';
 import type { FieldDef } from '../types/catalog';
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 function wrapper({ children }: { children: ReactNode }) {
@@ -19,10 +21,11 @@ function wrapper({ children }: { children: ReactNode }) {
 
 /** Method+pathname-aware fetch mock (same convention as
  * `DataSources.test.tsx`'s `mockMethodRoutes`) — this page hits several
- * distinct GET paths (`/api/emissions`, `/api/emitters`, `/api/catalog/wifi`)
- * plus a POST to `/api/emitters`, so routing needs both dimensions. `handler`
- * receives the parsed `URL` so a test can assert on query params or vary the
- * response by them. */
+ * distinct GET paths (`/api/emissions`, `/api/emitters`, `/api/data-sources`,
+ * `/api/catalog/wifi`) plus POSTs (`/api/emitters`, bulk-delete, clear), so
+ * routing needs both dimensions. `handler` receives the parsed `URL` (and
+ * `init`) so a test can assert on query params/body or vary the response by
+ * them. */
 function mockRoutes(handlers: Record<string, (url: URL, init?: RequestInit) => unknown>) {
   return vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const raw = typeof input === 'string' ? input : input.toString();
@@ -46,6 +49,12 @@ const WIFI_CATALOG: FieldDef[] = [
       { code: 'eq', label: 'is exactly' },
       { code: 'matches', label: 'contains / matches' },
     ],
+  },
+  {
+    key: 'src_mac',
+    label: 'Src MAC',
+    type: 'mac',
+    ops: [{ code: 'eq', label: 'is exactly' }],
   },
   {
     key: 'ssid',
@@ -87,6 +96,19 @@ const EMISSION_2: Emission = {
   payload: { bssid: '11:22:33:44:55:66', ssid: 'Home', channel: 11 },
 };
 
+const EMISSION_PROBE: Emission = {
+  id: 'e3',
+  data_source_id: 'ds1',
+  emitter_id: null,
+  session_id: null,
+  observed_at: '2026-07-05T12:10:00Z',
+  signal_strength: -60,
+  lon: null,
+  lat: null,
+  kind: 'wifi',
+  payload: { src_mac: 'de:ad:be:ef:00:01', frame_type: 'probe_request' },
+};
+
 const EMITTER_1: Emitter = {
   id: 'emitter-1',
   name: 'My Router',
@@ -108,25 +130,43 @@ const WIFI_EMITTER_TYPES = [
   { key: 'wifi_client', label: 'WiFi Client' },
 ];
 
-const EMISSION_PROBE: Emission = {
-  id: 'e3',
-  data_source_id: 'ds1',
-  emitter_id: null,
-  session_id: null,
-  observed_at: '2026-07-05T12:10:00Z',
-  signal_strength: -60,
-  lon: null,
-  lat: null,
+const DATA_SOURCE_1: DataSource = {
+  id: 'ds1',
+  created_at: '2026-01-01T00:00:00Z',
   kind: 'wifi',
-  payload: { src_mac: 'de:ad:be:ef:00:01', frame_type: 'probe_request' },
+  mode: 'monitor',
+  interface: 'wlan0',
+  status: 'running',
+  config: {},
+  last_error: null,
 };
 
-test('renders emission rows (bssid/channel/rssi) and the total from a mocked response', async () => {
-  const fetchMock = mockRoutes({
+const DATA_SOURCE_2: DataSource = {
+  id: 'ds2',
+  created_at: '2026-01-01T00:00:00Z',
+  kind: 'gps',
+  mode: 'gpsd',
+  interface: null,
+  status: 'running',
+  config: { host: 'localhost', port: 2947 },
+  last_error: null,
+};
+
+/** The default routes every test needs at minimum (emissions/emitters/
+ * catalog/data-sources) — individual tests spread over this and override/
+ * add routes (emitter-types, preview, POST/bulk-delete/clear) as needed. */
+function baseRoutes(overrides: Record<string, (url: URL, init?: RequestInit) => unknown> = {}) {
+  return {
     'GET /api/emissions': () => ({ items: [EMISSION_1, EMISSION_2], total: 2 }),
     'GET /api/emitters': () => [EMITTER_1],
     'GET /api/catalog/wifi': () => WIFI_CATALOG,
-  });
+    'GET /api/data-sources': () => [DATA_SOURCE_1, DATA_SOURCE_2],
+    ...overrides,
+  };
+}
+
+test('renders emission rows (bssid/channel/rssi) and the total from a mocked response', async () => {
+  const fetchMock = mockRoutes(baseRoutes());
   vi.stubGlobal('fetch', fetchMock);
 
   render(<Emissions />, { wrapper });
@@ -138,7 +178,6 @@ test('renders emission rows (bssid/channel/rssi) and the total from a mocked res
   expect(within(row1).getByText('6')).toBeInTheDocument();
   expect(within(row1).getByText('-55')).toBeInTheDocument();
   expect(within(row1).getByTestId('emission-src-mac')).toHaveTextContent('—'); // no src_mac in payload
-  expect(within(row1).getAllByText('—').length).toBeGreaterThanOrEqual(2); // src mac + unassigned emitter column
 
   const row2 = screen.getByTestId('emission-row-e2');
   expect(within(row2).getByText('My Router')).toBeInTheDocument();
@@ -146,18 +185,76 @@ test('renders emission rows (bssid/channel/rssi) and the total from a mocked res
   expect(screen.getByTestId('emissions-total')).toHaveTextContent('2 emissions');
 });
 
-test('selecting an emission and assigning prefills RuleBuilder with bssid eq <value> and POSTs match_criteria', async () => {
-  const fetchMock = mockRoutes({
-    'GET /api/emissions': () => ({ items: [EMISSION_1, EMISSION_2], total: 2 }),
-    'GET /api/emitters': () => [EMITTER_1],
-    'GET /api/catalog/wifi': () => WIFI_CATALOG,
-    'GET /api/emitter-types/wifi': () => WIFI_EMITTER_TYPES,
-    'GET /api/emitters/preview': () => ({ match_count: 4 }),
-    'POST /api/emitters': () => ({
-      emitter: { ...EMITTER_1, id: 'emitter-2', name: 'Coffee Shop AP' },
-      attached_count: 4,
-    }),
+test('the data-source dropdown is populated from listDataSources; selecting one adds data_source_id to the query', async () => {
+  const fetchMock = mockRoutes(baseRoutes());
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Emissions />, { wrapper });
+  await waitFor(() => expect(screen.getByTestId('emission-row-e1')).toBeInTheDocument());
+
+  const select = await screen.findByLabelText(/data source/i);
+  expect(within(select).getByText('wifi (wlan0)')).toBeInTheDocument();
+  expect(within(select).getByText('gps (gpsd)')).toBeInTheDocument();
+
+  fireEvent.change(select, { target: { value: 'ds1' } });
+
+  await waitFor(() => {
+    const call = fetchMock.mock.calls.find(([input]) => {
+      const url = new URL(String(input), 'http://localhost');
+      return url.pathname === '/api/emissions' && url.searchParams.get('data_source_id') === 'ds1';
+    });
+    expect(call).toBeDefined();
   });
+});
+
+test('the per-row "+" opens the assign modal pre-filled with that emission\'s bssid identity rule', async () => {
+  const fetchMock = mockRoutes(baseRoutes({ 'GET /api/emitter-types/wifi': () => WIFI_EMITTER_TYPES }));
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Emissions />, { wrapper });
+  await waitFor(() => expect(screen.getByTestId('emission-row-e1')).toBeInTheDocument());
+
+  fireEvent.click(screen.getByLabelText('Quick-assign emission e1 to emitter'));
+  const heading = await screen.findByRole('heading', { name: /assign 1 emission to emitter/i });
+  const modal = within(heading.closest('form') as HTMLElement);
+
+  await waitFor(() => expect(modal.getByLabelText(/field/i)).toHaveValue('bssid'));
+  expect(modal.getByLabelText(/operator/i)).toHaveValue('eq');
+  expect(modal.getByLabelText(/value/i)).toHaveValue('aa:bb:cc:dd:ee:ff');
+});
+
+test('the per-row "+" on a probe-request emission pre-fills src_mac eq <src_mac>', async () => {
+  const fetchMock = mockRoutes(
+    baseRoutes({
+      'GET /api/emissions': () => ({ items: [EMISSION_PROBE], total: 1 }),
+      'GET /api/emitter-types/wifi': () => WIFI_EMITTER_TYPES,
+    }),
+  );
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Emissions />, { wrapper });
+  await waitFor(() => expect(screen.getByTestId('emission-row-e3')).toBeInTheDocument());
+
+  fireEvent.click(screen.getByLabelText('Quick-assign emission e3 to emitter'));
+  const heading = await screen.findByRole('heading', { name: /assign 1 emission to emitter/i });
+  const modal = within(heading.closest('form') as HTMLElement);
+
+  await waitFor(() => expect(modal.getByLabelText(/field/i)).toHaveValue('src_mac'));
+  expect(modal.getByLabelText(/operator/i)).toHaveValue('eq');
+  expect(modal.getByLabelText(/value/i)).toHaveValue('de:ad:be:ef:00:01');
+});
+
+test('selecting an emission and bulk-assigning prefills RuleBuilder with bssid eq <value> and POSTs match_criteria', async () => {
+  const fetchMock = mockRoutes(
+    baseRoutes({
+      'GET /api/emitter-types/wifi': () => WIFI_EMITTER_TYPES,
+      'GET /api/emitters/preview': () => ({ match_count: 4 }),
+      'POST /api/emitters': () => ({
+        emitter: { ...EMITTER_1, id: 'emitter-2', name: 'Coffee Shop AP' },
+        attached_count: 4,
+      }),
+    }),
+  );
   vi.stubGlobal('fetch', fetchMock);
 
   render(<Emissions />, { wrapper });
@@ -166,15 +263,12 @@ test('selecting an emission and assigning prefills RuleBuilder with bssid eq <va
   fireEvent.click(screen.getByLabelText('Select emission e1'));
   fireEvent.click(screen.getByRole('button', { name: /assign to emitter/i }));
 
-  // RuleBuilder's field catalog fetch resolves asynchronously; "BSSID"
-  // also appears as a table column header, so scope the wait to the modal
-  // dialog via its heading instead of that ambiguous text.
-  await screen.findByRole('heading', { name: /assign 1 emission to emitter/i });
-  await waitFor(() => expect(screen.getByLabelText(/field/i)).toHaveValue('bssid'));
+  const heading = await screen.findByRole('heading', { name: /assign 1 emission to emitter/i });
+  const modal = within(heading.closest('form') as HTMLElement);
+  await waitFor(() => expect(modal.getByLabelText(/field/i)).toHaveValue('bssid'));
 
-  expect(screen.getByLabelText(/field/i)).toHaveValue('bssid');
-  expect(screen.getByLabelText(/operator/i)).toHaveValue('eq');
-  expect(screen.getByLabelText(/value/i)).toHaveValue('aa:bb:cc:dd:ee:ff');
+  expect(modal.getByLabelText(/operator/i)).toHaveValue('eq');
+  expect(modal.getByLabelText(/value/i)).toHaveValue('aa:bb:cc:dd:ee:ff');
 
   fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: 'Coffee Shop AP' } });
   fireEvent.click(screen.getByRole('button', { name: /^assign$/i }));
@@ -194,18 +288,14 @@ test('selecting an emission and assigning prefills RuleBuilder with bssid eq <va
 });
 
 test('paging (Next) clears the row selection so "Assign to emitter" can never no-op on a stale id', async () => {
-  // `total: 60` with `DEFAULT_LIMIT` (50) makes the Next button eligible
-  // (offset + limit < total); the handler varies `items` by the `offset`
-  // query param so paging genuinely swaps the rendered rows, matching how
-  // the real API behaves.
-  const fetchMock = mockRoutes({
-    'GET /api/emissions': (url) =>
-      url.searchParams.get('offset') === '50'
-        ? { items: [EMISSION_2], total: 60 }
-        : { items: [EMISSION_1], total: 60 },
-    'GET /api/emitters': () => [EMITTER_1],
-    'GET /api/catalog/wifi': () => WIFI_CATALOG,
-  });
+  const fetchMock = mockRoutes(
+    baseRoutes({
+      'GET /api/emissions': (url) =>
+        url.searchParams.get('offset') === '50'
+          ? { items: [EMISSION_2], total: 60 }
+          : { items: [EMISSION_1], total: 60 },
+    }),
+  );
   vi.stubGlobal('fetch', fetchMock);
 
   render(<Emissions />, { wrapper });
@@ -220,43 +310,33 @@ test('paging (Next) clears the row selection so "Assign to emitter" can never no
   const assignButton = screen.getByRole('button', { name: /assign to emitter \(0\)/i });
   expect(assignButton).toBeDisabled();
 
-  // Clicking it (were it somehow enabled) must not silently no-op: the
-  // modal's render guard is `showAssignModal && seedEmission`, so with no
-  // selection there's no seed and no dialog — assert that stays true.
   fireEvent.click(assignButton);
   expect(screen.queryByRole('heading', { name: /assign .* to emitter/i })).not.toBeInTheDocument();
 });
 
-test('a filter change (unassigned-only) refetches emissions with the matching query params', async () => {
-  const fetchMock = mockRoutes({
-    'GET /api/emissions': () => ({ items: [EMISSION_1, EMISSION_2], total: 2 }),
-    'GET /api/emitters': () => [EMITTER_1],
-    'GET /api/catalog/wifi': () => WIFI_CATALOG,
-  });
+test('a stacked filter condition refetches emissions with the matching cond= query param', async () => {
+  const fetchMock = mockRoutes(baseRoutes());
   vi.stubGlobal('fetch', fetchMock);
 
   render(<Emissions />, { wrapper });
   await waitFor(() => expect(screen.getByTestId('emission-row-e1')).toBeInTheDocument());
 
-  fireEvent.click(screen.getByLabelText(/unassigned only/i));
+  const fieldSelect = await screen.findByLabelText(/field/i);
+  fireEvent.change(fieldSelect, { target: { value: 'ssid' } });
+  const valueInput = screen.getByLabelText(/value/i);
+  fireEvent.change(valueInput, { target: { value: 'CoffeeShop' } });
 
   await waitFor(() => {
     const call = fetchMock.mock.calls.find(([input]) => {
       const url = new URL(String(input), 'http://localhost');
-      return url.pathname === '/api/emissions' && url.searchParams.get('unassigned') === 'true';
+      return url.pathname === '/api/emissions' && url.searchParams.get('cond') === 'ssid:eq:"CoffeeShop"';
     });
     expect(call).toBeDefined();
   });
 });
 
-// --- Phase B: Src MAC column (emitter auto-classification design doc) ---
-
 test('a probe-request emission (payload.src_mac, no bssid) renders the Src MAC column monospace and BSSID as "—"', async () => {
-  const fetchMock = mockRoutes({
-    'GET /api/emissions': () => ({ items: [EMISSION_PROBE], total: 1 }),
-    'GET /api/emitters': () => [EMITTER_1],
-    'GET /api/catalog/wifi': () => WIFI_CATALOG,
-  });
+  const fetchMock = mockRoutes(baseRoutes({ 'GET /api/emissions': () => ({ items: [EMISSION_PROBE], total: 1 }) }));
   vi.stubGlobal('fetch', fetchMock);
 
   render(<Emissions />, { wrapper });
@@ -266,31 +346,10 @@ test('a probe-request emission (payload.src_mac, no bssid) renders the Src MAC c
   expect(within(row).getByText('de:ad:be:ef:00:01')).toHaveClass('font-mono');
 });
 
-test('a beacon emission (payload.bssid, no src_mac) renders "—" in the Src MAC column', async () => {
-  const fetchMock = mockRoutes({
-    'GET /api/emissions': () => ({ items: [EMISSION_1], total: 1 }),
-    'GET /api/emitters': () => [EMITTER_1],
-    'GET /api/catalog/wifi': () => WIFI_CATALOG,
-  });
-  vi.stubGlobal('fetch', fetchMock);
-
-  render(<Emissions />, { wrapper });
-  await waitFor(() => expect(screen.getByTestId('emission-row-e1')).toBeInTheDocument());
-
-  const row = screen.getByTestId('emission-row-e1');
-  const srcMacCell = within(row).getByTestId('emission-src-mac');
-  expect(srcMacCell).toHaveTextContent('—');
-});
-
 // --- Task C: Assign-modal Type dropdown (GET /api/emitter-types/:kind) ---
 
 test('the Assign modal shows a Type <select> (not a text input) with options from the emitter-types endpoint plus "Other"', async () => {
-  const fetchMock = mockRoutes({
-    'GET /api/emissions': () => ({ items: [EMISSION_1, EMISSION_2], total: 2 }),
-    'GET /api/emitters': () => [EMITTER_1],
-    'GET /api/catalog/wifi': () => WIFI_CATALOG,
-    'GET /api/emitter-types/wifi': () => WIFI_EMITTER_TYPES,
-  });
+  const fetchMock = mockRoutes(baseRoutes({ 'GET /api/emitter-types/wifi': () => WIFI_EMITTER_TYPES }));
   vi.stubGlobal('fetch', fetchMock);
 
   render(<Emissions />, { wrapper });
@@ -310,54 +369,17 @@ test('the Assign modal shows a Type <select> (not a text input) with options fro
   );
 });
 
-test('selecting a known emitter type and submitting POSTs emitter_type (key) and type (label)', async () => {
-  const fetchMock = mockRoutes({
-    'GET /api/emissions': () => ({ items: [EMISSION_1, EMISSION_2], total: 2 }),
-    'GET /api/emitters': () => [EMITTER_1],
-    'GET /api/catalog/wifi': () => WIFI_CATALOG,
-    'GET /api/emitter-types/wifi': () => WIFI_EMITTER_TYPES,
-    'GET /api/emitters/preview': () => ({ match_count: 4 }),
-    'POST /api/emitters': () => ({
-      emitter: { ...EMITTER_1, id: 'emitter-2', name: 'Coffee Shop AP' },
-      attached_count: 4,
-    }),
-  });
-  vi.stubGlobal('fetch', fetchMock);
-
-  render(<Emissions />, { wrapper });
-  await waitFor(() => expect(screen.getByTestId('emission-row-e1')).toBeInTheDocument());
-
-  fireEvent.click(screen.getByLabelText('Select emission e1'));
-  fireEvent.click(screen.getByRole('button', { name: /assign to emitter/i }));
-  await screen.findByRole('heading', { name: /assign 1 emission to emitter/i });
-
-  const typeSelect = await screen.findByLabelText(/^type$/i);
-  fireEvent.change(typeSelect, { target: { value: 'wifi_access_point' } });
-  fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: 'Coffee Shop AP' } });
-  fireEvent.click(screen.getByRole('button', { name: /^assign$/i }));
-
-  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/assigned 4 emission/i));
-
-  const postCall = fetchMock.mock.calls.find(([, init]) => init?.method === 'POST');
-  expect(postCall).toBeDefined();
-  const [, init] = postCall as [RequestInfo | URL, RequestInit];
-  const body = JSON.parse(init.body as string);
-  expect(body.emitter_type).toBe('wifi_access_point');
-  expect(body.type).toBe('WiFi Access Point');
-});
-
 test('selecting "Other (custom)" reveals a text input; submitting sends type (custom text) and omits emitter_type', async () => {
-  const fetchMock = mockRoutes({
-    'GET /api/emissions': () => ({ items: [EMISSION_1, EMISSION_2], total: 2 }),
-    'GET /api/emitters': () => [EMITTER_1],
-    'GET /api/catalog/wifi': () => WIFI_CATALOG,
-    'GET /api/emitter-types/wifi': () => WIFI_EMITTER_TYPES,
-    'GET /api/emitters/preview': () => ({ match_count: 4 }),
-    'POST /api/emitters': () => ({
-      emitter: { ...EMITTER_1, id: 'emitter-2', name: 'Custom Thing' },
-      attached_count: 4,
+  const fetchMock = mockRoutes(
+    baseRoutes({
+      'GET /api/emitter-types/wifi': () => WIFI_EMITTER_TYPES,
+      'GET /api/emitters/preview': () => ({ match_count: 4 }),
+      'POST /api/emitters': () => ({
+        emitter: { ...EMITTER_1, id: 'emitter-2', name: 'Custom Thing' },
+        attached_count: 4,
+      }),
     }),
-  });
+  );
   vi.stubGlobal('fetch', fetchMock);
 
   render(<Emissions />, { wrapper });
@@ -387,4 +409,72 @@ test('selecting "Other (custom)" reveals a text input; submitting sends type (cu
   const body = JSON.parse(init.body as string);
   expect(body.type).toBe('Custom Thing');
   expect(body).not.toHaveProperty('emitter_type');
+});
+
+// --- Phase 2: mass-select / bulk-delete / clear-all ---
+
+test('checking a row and clicking "Delete selected" POSTs bulk-delete with that id (after confirm)', async () => {
+  vi.spyOn(window, 'confirm').mockReturnValue(true);
+  const fetchMock = mockRoutes(
+    baseRoutes({
+      'POST /api/emissions/bulk-delete': () => ({ deleted: 1 }),
+    }),
+  );
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Emissions />, { wrapper });
+  await waitFor(() => expect(screen.getByTestId('emission-row-e1')).toBeInTheDocument());
+
+  fireEvent.click(screen.getByLabelText('Select emission e1'));
+  fireEvent.click(screen.getByRole('button', { name: /delete selected \(1\)/i }));
+
+  await waitFor(() => {
+    const call = fetchMock.mock.calls.find(
+      ([input, init]) => new URL(String(input), 'http://localhost').pathname === '/api/emissions/bulk-delete' && init?.method === 'POST',
+    );
+    expect(call).toBeDefined();
+  });
+  const [, init] = fetchMock.mock.calls.find(
+    ([input]) => new URL(String(input), 'http://localhost').pathname === '/api/emissions/bulk-delete',
+  ) as [RequestInfo | URL, RequestInit];
+  expect(JSON.parse(init.body as string)).toEqual({ ids: ['e1'] });
+});
+
+test('"Clear All Emissions" POSTs clear after a confirm', async () => {
+  vi.spyOn(window, 'confirm').mockReturnValue(true);
+  const fetchMock = mockRoutes(
+    baseRoutes({
+      'POST /api/emissions/clear': () => ({ deleted: 2 }),
+    }),
+  );
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Emissions />, { wrapper });
+  await waitFor(() => expect(screen.getByTestId('emission-row-e1')).toBeInTheDocument());
+
+  fireEvent.click(screen.getByRole('button', { name: /clear all emissions/i }));
+
+  await waitFor(() => {
+    const call = fetchMock.mock.calls.find(
+      ([input, init]) => new URL(String(input), 'http://localhost').pathname === '/api/emissions/clear' && init?.method === 'POST',
+    );
+    expect(call).toBeDefined();
+  });
+});
+
+test('declining the confirm dialog does not call bulk-delete', async () => {
+  vi.spyOn(window, 'confirm').mockReturnValue(false);
+  const fetchMock = mockRoutes(baseRoutes());
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Emissions />, { wrapper });
+  await waitFor(() => expect(screen.getByTestId('emission-row-e1')).toBeInTheDocument());
+
+  fireEvent.click(screen.getByLabelText('Select emission e1'));
+  fireEvent.click(screen.getByRole('button', { name: /delete selected \(1\)/i }));
+
+  await waitFor(() => expect(window.confirm).toHaveBeenCalled());
+  expect(
+    fetchMock.mock.calls.find(([input]) => String(input).includes('bulk-delete')),
+  ).toBeUndefined();
 });

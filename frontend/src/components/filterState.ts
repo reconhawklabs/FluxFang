@@ -49,11 +49,25 @@ function conditionValueToken(condition: Condition): string {
 }
 
 /**
+ * The `cond=field:op:value` tokens (each already `field:op:value`-joined,
+ * ready to `params.append('cond', token)`) for every *complete* condition in
+ * `conditions` — incomplete rows (no field/op chosen yet, or an empty
+ * value) are silently omitted, same rule `isCompleteCondition` uses for the
+ * preview gate in `RuleBuilder`. Shared by `filterToQueryParams` below and
+ * by `StackedFilterBuilder`'s `conditionsToQueryParams` (Phase 2) so both
+ * encode a condition list identically.
+ */
+export function conditionsToCondParams(conditions: Condition[]): string[] {
+  return conditions
+    .filter(isCompleteCondition)
+    .map((condition) => `${condition.field}:${condition.op}:${conditionValueToken(condition)}`);
+}
+
+/**
  * Translate a `FilterState` into `URLSearchParams` for `GET /api/emissions`
  * (Task 9.4): `q=<text>` when non-empty, `unassigned=true` when set, and one
- * repeated `cond=field:op:value` per *complete* condition (incomplete rows —
- * no field/op chosen yet, or an empty value — are silently omitted, same
- * rule `isCompleteCondition` uses for the preview gate in `RuleBuilder`).
+ * repeated `cond=field:op:value` per *complete* condition (via
+ * `conditionsToCondParams`).
  */
 export function filterToQueryParams(state: FilterState): URLSearchParams {
   const params = new URLSearchParams();
@@ -63,10 +77,25 @@ export function filterToQueryParams(state: FilterState): URLSearchParams {
 
   if (state.unassigned) params.set('unassigned', 'true');
 
-  for (const condition of state.conditions) {
-    if (!isCompleteCondition(condition)) continue;
-    params.append('cond', `${condition.field}:${condition.op}:${conditionValueToken(condition)}`);
+  for (const token of conditionsToCondParams(state.conditions)) {
+    params.append('cond', token);
   }
 
+  return params;
+}
+
+/**
+ * `StackedFilterBuilder` (Phase 2) works with a bare `Condition[]` (no
+ * `q`/`unassigned` — those live on the Emissions page's own `SearchBar`/
+ * data-source dropdown instead), so it gets its own params helper rather
+ * than reusing `filterToQueryParams`'s `FilterState`-shaped input: one
+ * repeated `cond=field:op:value` per complete condition, same encoding
+ * (`conditionsToCondParams`) as the rest of this module.
+ */
+export function conditionsToQueryParams(conditions: Condition[]): URLSearchParams {
+  const params = new URLSearchParams();
+  for (const token of conditionsToCondParams(conditions)) {
+    params.append('cond', token);
+  }
   return params;
 }

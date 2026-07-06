@@ -7,7 +7,7 @@
 // `components/filterState.ts`'s `filterToQueryParams` (field-condition/text/
 // unassigned filters) merged with this module's own pagination params —
 // see `listEmissions`'s doc comment.
-import { get } from './client';
+import { get, post } from './client';
 
 /** Mirrors `fluxfang-api::dto::EmissionDto`. `payload`'s shape depends on
  * `kind` (for `"wifi"`: `bssid`/`ssid`/`channel`, per
@@ -49,4 +49,26 @@ export interface EmissionsPage {
 export function listEmissions(params: URLSearchParams): Promise<EmissionsPage> {
   const qs = params.toString();
   return get<EmissionsPage>(`/api/emissions${qs.length > 0 ? `?${qs}` : ''}`);
+}
+
+/** Shared response shape for both endpoints below (`fluxfang-api::emissions`'s
+ * `DeletedCountDto`). */
+export interface DeletedCount {
+  deleted: number;
+}
+
+/**
+ * `POST /api/emissions/bulk-delete {ids}` — the Emissions page's mass-select
+ * "Delete selected" action (Phase 2, `SelectionToolbar`). A `POST` to a
+ * dedicated path rather than `DELETE` with a body — see that route's doc
+ * comment for why (some proxies strip `DELETE` bodies).
+ */
+export function bulkDeleteEmissions(ids: string[]): Promise<DeletedCount> {
+  return post<DeletedCount>('/api/emissions/bulk-delete', { ids });
+}
+
+/** `POST /api/emissions/clear` (no body) — "Clear All Emissions", gated by
+ * `SelectionToolbar`'s confirm dialog before this is ever called. */
+export function clearEmissions(): Promise<DeletedCount> {
+  return post<DeletedCount>('/api/emissions/clear');
 }

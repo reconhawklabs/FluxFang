@@ -1,58 +1,63 @@
-// Task 9.4: browse/filter captured emissions and assign a batch of them to
-// an emitter.
+// Task 9.4, redesigned per Phase 2 of the list-pages UX cleanup (see
+// `docs/superpowers/specs/2026-07-05-list-pages-ux-cleanup-design.md`,
+// "Emissions page" section): browse/filter captured emissions and assign
+// them (in bulk, or one row at a time via the trailing "+") to an emitter.
 //
-// Filtering reuses Task 9.2's `FilterBar` (kind="wifi" — the only capture
-// kind this schema currently supports, see backend
-// `fluxfang_core::catalog::catalog_for`) — its `FilterState` is translated
-// to `GET /api/emissions` query params via `filterToQueryParams`, with this
-// page's own `limit`/`offset` pagination params appended on top (per Task
-// 9.2's hand-off note: FilterBar deliberately stops at
-// field-condition/text/unassigned filters).
+// Top controls: a Data Source `<select>` (left) -> `data_source_id`, a
+// full-width `SearchBar` (right) -> `q`, and below both a
+// `StackedFilterBuilder` (kind="wifi" — the only capture kind this schema
+// currently supports, see backend `fluxfang_core::catalog::catalog_for`) ->
+// repeated `cond=` params via `filterState.ts`'s `conditionsToQueryParams`.
+// All three combine (plus this page's own `limit`/`offset`) into one
+// `GET /api/emissions` query; changing any of them resets `offset` to 0 and
+// clears the row selection (a selected id from a since-changed page may no
+// longer be present — see `handle*Change` below).
 //
 // The query is keyed off `queryKeys.emissions` (with the serialized params
 // appended) so `useLiveEvents` (Task 9.1) invalidating that key on every WS
 // `emission` frame refetches this page's current filter/page automatically
 // — `invalidateQueries` matches by prefix.
 //
-// "Assign to emitter": row checkboxes select a batch, and "Assign to
-// emitter" opens a modal with a `RuleBuilder` (Task 9.2, showPreview) whose
-// initial rule is prefilled as `bssid eq <first selected emission's
-// payload.bssid>` — the same default rule the backend itself would build
-// from `from_emission_id` (see `fluxfang-api::emitters`'s
-// `resolve_match_criteria`), just built client-side so it's visible/editable
-// in the modal before submitting. Submitting calls `POST /api/emitters` with
-// `{name, type, match_criteria: <rule>}` and surfaces the returned
-// `attached_count`.
+// "Assign to emitter" (bulk, via row checkboxes + the toolbar button, or a
+// single row via its trailing "+") opens the same modal, a `RuleBuilder`
+// (Task 9.2, showPreview) whose initial rule is prefilled as `bssid eq
+// <bssid>` (beacons) or `src_mac eq <src_mac>` (probe requests) — the same
+// default rule the backend itself would build from `from_emission_id` (see
+// `fluxfang-api::emitters`'s `resolve_match_criteria`), just built
+// client-side so it's visible/editable in the modal before submitting.
+// Submitting calls `POST /api/emitters` with `{name, type, match_criteria}`
+// and surfaces the returned `attached_count`.
 //
-// Task C: the modal's Type field is a `<select>` populated from
-// `GET /api/emitter-types/:kind` (keyed off the seed emission's own `kind`,
-// e.g. "wifi") — each option's key is sent as `emitter_type` alongside its
-// label as `type`, so the emitter is machine-classified the same way
-// ingest's auto-classification (Phase B) would tag it. The final "Other
-// (custom)…" option is an escape hatch: it reveals a free-text input and
-// sends only `type` (the typed text) with `emitter_type` omitted, same as
-// this form's original free-text behavior.
+// Mass-select ("Delete selected"/"Clear All Emissions") uses the shared
+// `useRowSelection`/`SelectionToolbar` (Phase 2) against
+// `bulkDeleteEmissions`/`clearEmissions`.
 import { useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError } from '../api/client';
 import { queryKeys } from '../api/queryKeys';
 import type { Emission } from '../api/emissions';
-import { listEmissions } from '../api/emissions';
+import { bulkDeleteEmissions, clearEmissions, listEmissions } from '../api/emissions';
 import { createEmitter, listEmitters, listEmitterTypes } from '../api/emitters';
 import type { EmitterType } from '../api/emitters';
-import FilterBar from '../components/FilterBar';
-import { EMPTY_FILTER_STATE, filterToQueryParams } from '../components/filterState';
-import type { FilterState } from '../components/filterState';
+import { listDataSources } from '../api/dataSources';
+import type { DataSource } from '../api/dataSources';
+import Pagination from '../components/Pagination';
 import RuleBuilder from '../components/RuleBuilder';
-import type { Rule } from '../types/rule';
+import SearchBar from '../components/SearchBar';
+import SelectionToolbar from '../components/SelectionToolbar';
+import StackedFilterBuilder from '../components/StackedFilterBuilder';
+import { conditionsToQueryParams } from '../components/filterState';
+import { useRowSelection } from '../hooks/useRowSelection';
+import type { Condition, Rule } from '../types/rule';
 
-const PAGE_SIZE_OPTIONS = [25, 50, 100, 200] as const;
-const DEFAULT_LIMIT: (typeof PAGE_SIZE_OPTIONS)[number] = 50;
+const DEFAULT_LIMIT = 50;
 
 const inputClassName =
   'w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 focus:border-amber-500 focus:outline-none';
 const labelClassName = 'block text-xs font-medium uppercase tracking-wide text-slate-500';
+const selectClassName =
+  'rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 focus:border-amber-500 focus:outline-none';
 
 function formatObservedAt(iso: string): string {
   const date = new Date(iso);
@@ -66,21 +71,30 @@ function payloadText(payload: Record<string, unknown>, key: string): string {
   return typeof value === 'string' || typeof value === 'number' ? String(value) : '—';
 }
 
-function locationText(emission: Emission): string {
-  if (emission.lat === null || emission.lon === null) return '—';
-  return `${emission.lat.toFixed(5)}, ${emission.lon.toFixed(5)}`;
+/** A `DataSource`'s label in the filter dropdown: kind plus whatever
+ * identifies it (its interface, when set — wifi monitor sources — or
+ * otherwise its mode, e.g. a gpsd/serial gps source with no `interface`). */
+function dataSourceLabel(dataSource: DataSource): string {
+  return dataSource.interface
+    ? `${dataSource.kind} (${dataSource.interface})`
+    : `${dataSource.kind} (${dataSource.mode})`;
 }
 
 /** The default rule a fresh "assign to emitter" modal opens with: `bssid eq
- * <emission's payload.bssid>` — mirrors the backend's own
- * `from_emission_id` default-rule derivation (see module doc comment), just
- * computed client-side. Falls back to an empty rule (user picks fields
- * manually via `RuleBuilder`) if the emission has no string `bssid` in its
- * payload. */
+ * <bssid>` for a beacon (has `payload.bssid`) or `src_mac eq <src_mac>` for
+ * a probe request (has `payload.src_mac`, no `bssid`) — mirrors the
+ * backend's own `from_emission_id` default-rule derivation (see module doc
+ * comment), just computed client-side. Falls back to an empty rule (user
+ * picks fields manually via `RuleBuilder`) if neither key is a non-empty
+ * string. */
 function defaultRuleFor(emission: Emission): Rule {
   const bssid = emission.payload.bssid;
   if (typeof bssid === 'string' && bssid.length > 0) {
     return { match: 'all', conditions: [{ field: 'bssid', op: 'eq', value: bssid }] };
+  }
+  const srcMac = emission.payload.src_mac;
+  if (typeof srcMac === 'string' && srcMac.length > 0) {
+    return { match: 'all', conditions: [{ field: 'src_mac', op: 'eq', value: srcMac }] };
   }
   return { match: 'all', conditions: [] };
 }
@@ -94,8 +108,9 @@ function defaultRuleFor(emission: Emission): Rule {
 const OTHER_TYPE_VALUE = '__other__';
 
 interface AssignModalProps {
-  /** The emission the default rule is derived from — list order's first
-   * selected row, not necessarily click order. */
+  /** The emission the default rule is derived from — for a bulk assign,
+   * list order's first selected row (not necessarily click order); for a
+   * per-row quick-assign, that row itself. */
   seedEmission: Emission;
   selectedCount: number;
   onCancel: () => void;
@@ -255,26 +270,39 @@ function AssignModal({ seedEmission, selectedCount, onCancel, onAssigned }: Assi
   );
 }
 
+/** What the assign modal is currently open for — a bulk assign of every
+ * checked row (`seedEmission` is list order's first selected row), or a
+ * single row's own trailing "+" (`seedEmission` is that row, regardless of
+ * whether it's checked). Kept as one piece of state (rather than two
+ * booleans) so the two flows can never both render a modal at once. */
+type AssignTarget = { mode: 'bulk' } | { mode: 'single'; emission: Emission };
+
 export default function Emissions() {
   const queryClient = useQueryClient();
-  const [filter, setFilter] = useState<FilterState>(EMPTY_FILTER_STATE);
+  const [dataSourceId, setDataSourceId] = useState('');
+  const [q, setQ] = useState('');
+  const [conditions, setConditions] = useState<Condition[]>([]);
   const [limit, setLimit] = useState<number>(DEFAULT_LIMIT);
   const [offset, setOffset] = useState(0);
-  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
-  const [showAssignModal, setShowAssignModal] = useState(false);
+  const [assignTarget, setAssignTarget] = useState<AssignTarget | null>(null);
   const [assignedMessage, setAssignedMessage] = useState<string | null>(null);
 
   const queryParams = useMemo(() => {
-    const params = filterToQueryParams(filter);
+    const params = conditionsToQueryParams(conditions);
+    const trimmedQ = q.trim();
+    if (trimmedQ.length > 0) params.set('q', trimmedQ);
+    if (dataSourceId.length > 0) params.set('data_source_id', dataSourceId);
     params.set('limit', String(limit));
     params.set('offset', String(offset));
     return params;
-  }, [filter, limit, offset]);
+  }, [conditions, q, dataSourceId, limit, offset]);
 
   const emissionsQuery = useQuery({
     queryKey: [...queryKeys.emissions, queryParams.toString()],
     queryFn: () => listEmissions(queryParams),
   });
+
+  const dataSourcesQuery = useQuery({ queryKey: queryKeys.dataSources, queryFn: listDataSources });
 
   // Resolves an emission's `emitter_id` to a display name. Not itself
   // invalidated by `useLiveEvents` (emitters aren't touched by a plain
@@ -289,57 +317,69 @@ export default function Emissions() {
     return map;
   }, [emittersQuery.data]);
 
-  function handleFilterChange(next: FilterState): void {
-    setFilter(next);
-    setOffset(0);
-    setSelected(new Set());
-  }
-
-  // Pagination (page size or prev/next) changes which emissions are in
-  // `items`, so a `selected` id from the previous page may no longer be
-  // present — clear it here (mirroring `handleFilterChange`'s reset) so
-  // "Assign to emitter (N)" can never reference a `seedEmission` that isn't
-  // on the current page (see module doc comment / AssignModal's render
-  // guard `showAssignModal && seedEmission`).
-  function handleOffsetChange(next: number): void {
-    setOffset(next);
-    setSelected(new Set());
-  }
-
-  function handlePageSizeChange(next: number): void {
-    setLimit(next);
-    setOffset(0);
-    setSelected(new Set());
-  }
-
-  function toggleSelected(id: string): void {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  }
-
   const items = emissionsQuery.data?.items ?? [];
   const total = emissionsQuery.data?.total ?? 0;
+  const itemIds = items.map((emission) => emission.id);
+  const selection = useRowSelection(itemIds);
+
+  function resetToFirstPage(): void {
+    setOffset(0);
+    selection.clear();
+  }
+
+  function handleDataSourceChange(next: string): void {
+    setDataSourceId(next);
+    resetToFirstPage();
+  }
+
+  function handleSearchChange(next: string): void {
+    setQ(next);
+    resetToFirstPage();
+  }
+
+  function handleConditionsChange(next: Condition[]): void {
+    setConditions(next);
+    resetToFirstPage();
+  }
+
+  function handlePaginationChange(nextLimit: number, nextOffset: number): void {
+    setLimit(nextLimit);
+    setOffset(nextOffset);
+    selection.clear();
+  }
+
   // List order's first selected row — deterministic regardless of click
-  // order — is what the modal's default rule is derived from.
-  const seedEmission = items.find((emission) => selected.has(emission.id));
+  // order — is what a bulk assign's default rule is derived from.
+  const bulkSeedEmission = items.find((emission) => selection.selected.has(emission.id));
+
+  const modalSeedEmission =
+    assignTarget?.mode === 'single' ? assignTarget.emission : assignTarget?.mode === 'bulk' ? bulkSeedEmission : undefined;
+  const modalSelectedCount = assignTarget?.mode === 'single' ? 1 : selection.selected.size;
 
   function handleAssigned(attachedCount: number): void {
-    setShowAssignModal(false);
-    setSelected(new Set());
+    const wasBulk = assignTarget?.mode === 'bulk';
+    setAssignTarget(null);
+    if (wasBulk) selection.clear();
     setAssignedMessage(`Assigned ${attachedCount} emission${attachedCount === 1 ? '' : 's'}.`);
     void queryClient.invalidateQueries({ queryKey: queryKeys.emissions });
     void queryClient.invalidateQueries({ queryKey: queryKeys.emitters });
   }
 
-  const pageStart = total === 0 ? 0 : offset + 1;
-  const pageEnd = Math.min(offset + limit, total);
+  const bulkDeleteMutation = useMutation({
+    mutationFn: bulkDeleteEmissions,
+    onSuccess: () => {
+      selection.clear();
+      void queryClient.invalidateQueries({ queryKey: queryKeys.emissions });
+    },
+  });
+
+  const clearAllMutation = useMutation({
+    mutationFn: clearEmissions,
+    onSuccess: () => {
+      selection.clear();
+      void queryClient.invalidateQueries({ queryKey: queryKeys.emissions });
+    },
+  });
 
   return (
     <div className="space-y-4">
@@ -352,17 +392,46 @@ export default function Emissions() {
         )}
       </div>
 
-      <FilterBar kind="wifi" value={filter} onChange={handleFilterChange} />
+      <div className="flex items-center gap-3">
+        <label htmlFor="emissions-data-source" className="sr-only">
+          Data source
+        </label>
+        <select
+          id="emissions-data-source"
+          value={dataSourceId}
+          onChange={(event) => handleDataSourceChange(event.target.value)}
+          className={selectClassName}
+        >
+          <option value="">All data sources</option>
+          {(dataSourcesQuery.data ?? []).map((dataSource) => (
+            <option key={dataSource.id} value={dataSource.id}>
+              {dataSourceLabel(dataSource)}
+            </option>
+          ))}
+        </select>
+
+        <SearchBar value={q} onChange={handleSearchChange} placeholder="Search emissions…" />
+      </div>
+
+      <StackedFilterBuilder kind="wifi" value={conditions} onChange={handleConditionsChange} />
 
       <div className="flex items-center justify-between">
-        <button
-          type="button"
-          disabled={selected.size === 0}
-          onClick={() => setShowAssignModal(true)}
-          className="rounded bg-amber-500 px-3 py-1.5 text-sm font-semibold text-slate-950 transition hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          Assign to emitter ({selected.size})
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            disabled={selection.selected.size === 0}
+            onClick={() => setAssignTarget({ mode: 'bulk' })}
+            className="rounded bg-amber-500 px-3 py-1.5 text-sm font-semibold text-slate-950 transition hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Assign to emitter ({selection.selected.size})
+          </button>
+          <SelectionToolbar
+            selectedCount={selection.selected.size}
+            onDeleteSelected={() => bulkDeleteMutation.mutate(Array.from(selection.selected))}
+            onClearAll={() => clearAllMutation.mutate()}
+            itemLabelPlural="Emissions"
+          />
+        </div>
         <p data-testid="emissions-total" className="text-sm text-slate-400">
           {total} emission{total === 1 ? '' : 's'}
         </p>
@@ -375,16 +444,23 @@ export default function Emissions() {
         <table className="w-full border-collapse text-left text-sm">
           <thead>
             <tr className="border-b border-slate-800 text-xs uppercase tracking-wide text-slate-500">
-              <th className="py-2 pr-2 font-medium" />
+              <th className="py-2 pr-2 font-medium">
+                <input
+                  type="checkbox"
+                  aria-label="Select all emissions on this page"
+                  checked={selection.allSelected}
+                  onChange={() => selection.toggleAll(itemIds)}
+                  className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
+                />
+              </th>
               <th className="py-2 pr-4 font-medium">Observed At</th>
-              <th className="py-2 pr-4 font-medium">Kind</th>
               <th className="py-2 pr-4 font-medium">BSSID</th>
               <th className="py-2 pr-4 font-medium">Src MAC</th>
               <th className="py-2 pr-4 font-medium">SSID</th>
               <th className="py-2 pr-4 font-medium">Channel</th>
               <th className="py-2 pr-4 font-medium">RSSI</th>
               <th className="py-2 pr-4 font-medium">Emitter</th>
-              <th className="py-2 pr-4 font-medium">Location</th>
+              <th className="py-2 pr-2 font-medium" />
             </tr>
           </thead>
           <tbody>
@@ -398,13 +474,12 @@ export default function Emissions() {
                   <input
                     type="checkbox"
                     aria-label={`Select emission ${emission.id}`}
-                    checked={selected.has(emission.id)}
-                    onChange={() => toggleSelected(emission.id)}
+                    checked={selection.selected.has(emission.id)}
+                    onChange={() => selection.toggle(emission.id)}
                     className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
                   />
                 </td>
                 <td className="py-2 pr-4 text-slate-300">{formatObservedAt(emission.observed_at)}</td>
-                <td className="py-2 pr-4 capitalize text-slate-300">{emission.kind}</td>
                 <td className="py-2 pr-4 font-mono text-slate-300">{payloadText(emission.payload, 'bssid')}</td>
                 <td data-testid="emission-src-mac" className="py-2 pr-4 font-mono text-slate-300">
                   {payloadText(emission.payload, 'src_mac')}
@@ -417,7 +492,16 @@ export default function Emissions() {
                 <td className="py-2 pr-4 text-slate-300">
                   {emission.emitter_id ? (emitterNameById.get(emission.emitter_id) ?? '—') : '—'}
                 </td>
-                <td className="py-2 pr-4 text-slate-300">{locationText(emission)}</td>
+                <td className="py-2 pr-2">
+                  <button
+                    type="button"
+                    aria-label={`Quick-assign emission ${emission.id} to emitter`}
+                    onClick={() => setAssignTarget({ mode: 'single', emission })}
+                    className="rounded border border-slate-700 px-2 py-0.5 text-sm text-slate-300 transition hover:border-amber-500 hover:text-amber-400"
+                  >
+                    +
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -428,55 +512,13 @@ export default function Emissions() {
         <p className="text-sm text-slate-500">No emissions match this filter.</p>
       )}
 
-      <div className="flex items-center justify-between text-sm text-slate-400">
-        <div className="flex items-center gap-2">
-          <label htmlFor="emissions-page-size" className={labelClassName}>
-            Page size
-          </label>
-          <select
-            id="emissions-page-size"
-            value={limit}
-            onChange={(event) => {
-              handlePageSizeChange(Number(event.target.value));
-            }}
-            className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100 focus:border-amber-500 focus:outline-none"
-          >
-            {PAGE_SIZE_OPTIONS.map((size) => (
-              <option key={size} value={size}>
-                {size}
-              </option>
-            ))}
-          </select>
-        </div>
+      <Pagination total={total} limit={limit} offset={offset} onChange={handlePaginationChange} />
 
-        <div className="flex items-center gap-3">
-          <span>
-            {pageStart}–{pageEnd} of {total}
-          </span>
-          <button
-            type="button"
-            disabled={offset === 0}
-            onClick={() => handleOffsetChange(Math.max(0, offset - limit))}
-            className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 transition hover:border-amber-500 hover:text-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            Prev
-          </button>
-          <button
-            type="button"
-            disabled={offset + limit >= total}
-            onClick={() => handleOffsetChange(offset + limit)}
-            className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 transition hover:border-amber-500 hover:text-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            Next
-          </button>
-        </div>
-      </div>
-
-      {showAssignModal && seedEmission && (
+      {assignTarget && modalSeedEmission && (
         <AssignModal
-          seedEmission={seedEmission}
-          selectedCount={selected.size}
-          onCancel={() => setShowAssignModal(false)}
+          seedEmission={modalSeedEmission}
+          selectedCount={modalSelectedCount}
+          onCancel={() => setAssignTarget(null)}
           onAssigned={handleAssigned}
         />
       )}

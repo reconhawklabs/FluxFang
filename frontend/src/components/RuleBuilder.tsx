@@ -101,6 +101,7 @@ export default function RuleBuilder({ kind, value, onChange, showPreview = false
               fields={fields}
               condition={condition}
               index={index}
+              idPrefix="rule-"
               onChange={(next) => handleConditionChange(index, next)}
               onRemove={() => handleRemoveCondition(index)}
             />
