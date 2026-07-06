@@ -22,8 +22,16 @@ import type { ChangeEvent, FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError } from '../api/client';
 import { queryKeys } from '../api/queryKeys';
-import { createEntity, deleteEntity, getEntityDetail, listEntities, patchEntity } from '../api/entities';
-import type { CreateEntityInput, Entity, PatchEntityInput } from '../api/entities';
+import {
+  bulkDeleteEntities,
+  clearEntities,
+  createEntity,
+  deleteEntity,
+  getEntityDetail,
+  listEntities,
+  patchEntity,
+} from '../api/entities';
+import type { CreateEntityInput, Entity, ListEntitiesParams, PatchEntityInput } from '../api/entities';
 import { listZones } from '../api/zones';
 import { listAlertMethods } from '../api/alertMethods';
 import { createAlertRule, listAlertRules } from '../api/alertRules';
@@ -32,8 +40,14 @@ import RuleBuilder from '../components/RuleBuilder';
 import type { Rule } from '../types/rule';
 import EmissionsHeatmap from '../components/EmissionsHeatmap';
 import type { HeatmapPoint } from '../components/mapData';
+import Pagination from '../components/Pagination';
+import SearchBar from '../components/SearchBar';
+import SelectionToolbar from '../components/SelectionToolbar';
+import { useRowSelection } from '../hooks/useRowSelection';
 
-const TABLE_COLUMN_COUNT = 3;
+const DEFAULT_LIMIT = 50;
+// [checkbox] Name, Notes, Created.
+const TABLE_COLUMN_COUNT = 4;
 
 /** How recently an entity must have been seen (its aggregate `last_seen`)
  * to show as "live" (green dot) rather than "stale" (gray dot). Purely a
@@ -574,15 +588,45 @@ export default function Entities() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [showAddForm, setShowAddForm] = useState(false);
   const [addAlertEntity, setAddAlertEntity] = useState<Entity | null>(null);
+  const [q, setQ] = useState('');
+  const [limit, setLimit] = useState(DEFAULT_LIMIT);
+  const [offset, setOffset] = useState(0);
 
-  // Interim `{limit: 500}` cap — `GET /api/entities` now returns a
-  // paginated `{items, total}` envelope, but this page still renders every
-  // row with no pagination UI of its own (a later redesign phase); 500
-  // keeps today's "show everything" behavior intact.
-  const entitiesQuery = useQuery({ queryKey: queryKeys.entities, queryFn: () => listEntities({ limit: 500 }) });
+  const queryParams = useMemo<ListEntitiesParams>(() => {
+    const params: ListEntitiesParams = { limit, offset };
+    const trimmedQ = q.trim();
+    if (trimmedQ.length > 0) params.search = trimmedQ;
+    return params;
+  }, [q, limit, offset]);
+
+  const entitiesQuery = useQuery({
+    queryKey: [...queryKeys.entities, JSON.stringify(queryParams)],
+    queryFn: () => listEntities(queryParams),
+  });
+
+  const entities = entitiesQuery.data?.items ?? [];
+  const total = entitiesQuery.data?.total ?? 0;
+  const itemIds = entities.map((entity) => entity.id);
+  const selection = useRowSelection(itemIds);
 
   function invalidateEntities(): void {
     void queryClient.invalidateQueries({ queryKey: queryKeys.entities });
+  }
+
+  function resetToFirstPage(): void {
+    setOffset(0);
+    selection.clear();
+  }
+
+  function handleSearchChange(next: string): void {
+    setQ(next);
+    resetToFirstPage();
+  }
+
+  function handlePaginationChange(nextLimit: number, nextOffset: number): void {
+    setLimit(nextLimit);
+    setOffset(nextOffset);
+    selection.clear();
   }
 
   const createMutation = useMutation({
@@ -600,7 +644,21 @@ export default function Entities() {
         ? 'Failed to create entity.'
         : null;
 
-  const entities = entitiesQuery.data?.items ?? [];
+  const bulkDeleteMutation = useMutation({
+    mutationFn: bulkDeleteEntities,
+    onSuccess: () => {
+      selection.clear();
+      invalidateEntities();
+    },
+  });
+
+  const clearAllMutation = useMutation({
+    mutationFn: clearEntities,
+    onSuccess: () => {
+      selection.clear();
+      invalidateEntities();
+    },
+  });
 
   return (
     <div className="space-y-4">
@@ -615,16 +673,39 @@ export default function Entities() {
         </button>
       </div>
 
+      <SearchBar value={q} onChange={handleSearchChange} placeholder="Search entities…" />
+
+      <div className="flex items-center justify-between">
+        <SelectionToolbar
+          selectedCount={selection.selected.size}
+          onDeleteSelected={() => bulkDeleteMutation.mutate(Array.from(selection.selected))}
+          onClearAll={() => clearAllMutation.mutate()}
+          itemLabelPlural="Entities"
+        />
+        <p data-testid="entities-total" className="text-sm text-slate-400">
+          {total} entit{total === 1 ? 'y' : 'ies'}
+        </p>
+      </div>
+
       {entitiesQuery.isLoading && <p className="text-sm text-slate-500">Loading entities…</p>}
       {entitiesQuery.isError && <p className="text-sm text-red-400">Failed to load entities.</p>}
       {entitiesQuery.data && entities.length === 0 && (
-        <p className="text-sm text-slate-500">No entities yet.</p>
+        <p className="text-sm text-slate-500">No entities match this filter.</p>
       )}
 
       {entities.length > 0 && (
         <table className="w-full border-collapse text-left text-sm">
           <thead>
             <tr className="border-b border-slate-800 text-xs uppercase tracking-wide text-slate-500">
+              <th className="py-2 pr-2 font-medium">
+                <input
+                  type="checkbox"
+                  aria-label="Select all entities on this page"
+                  checked={selection.allSelected}
+                  onChange={() => selection.toggleAll(itemIds)}
+                  className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
+                />
+              </th>
               <th className="py-2 pr-4 font-medium">Name</th>
               <th className="py-2 pr-4 font-medium">Notes</th>
               <th className="py-2 pr-4 font-medium">Created</th>
@@ -636,6 +717,15 @@ export default function Entities() {
               return (
                 <Fragment key={entity.id}>
                   <tr data-testid={`entity-row-${entity.id}`} className="border-b border-slate-900 align-top">
+                    <td className="py-2 pr-2">
+                      <input
+                        type="checkbox"
+                        aria-label={`Select entity ${entity.id}`}
+                        checked={selection.selected.has(entity.id)}
+                        onChange={() => selection.toggle(entity.id)}
+                        className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
+                      />
+                    </td>
                     <td className="py-2 pr-4 text-slate-200">
                       <button
                         type="button"
@@ -661,6 +751,8 @@ export default function Entities() {
           </tbody>
         </table>
       )}
+
+      <Pagination total={total} limit={limit} offset={offset} onChange={handlePaginationChange} />
 
       {showAddForm && (
         <AddEntityForm

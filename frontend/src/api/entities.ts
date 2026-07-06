@@ -91,3 +91,24 @@ export function patchEntity(id: string, body: PatchEntityInput): Promise<Entity>
 export function deleteEntity(id: string): Promise<void> {
   return del<void>(`/api/entities/${encodeURIComponent(id)}`);
 }
+
+/** Shared response shape for both endpoints below (mirrors
+ * `fluxfang-api::entities`'s `DeletedCountDto` — same shape
+ * `api/emitters.ts`'s own `DeletedCount` mirrors for its bulk endpoints). */
+export interface DeletedCount {
+  deleted: number;
+}
+
+/** `POST /api/entities/bulk-delete {ids}` — the Entities page's mass-select
+ * "Delete selected" action (Phase 4, `SelectionToolbar`). A `POST` to a
+ * dedicated path rather than `DELETE` with a body, same convention as
+ * `bulkDeleteEmitters`. */
+export function bulkDeleteEntities(ids: string[]): Promise<DeletedCount> {
+  return post<DeletedCount>('/api/entities/bulk-delete', { ids });
+}
+
+/** `POST /api/entities/clear` (no body) — "Clear All Entities", gated by
+ * `SelectionToolbar`'s confirm dialog before this is ever called. */
+export function clearEntities(): Promise<DeletedCount> {
+  return post<DeletedCount>('/api/entities/clear');
+}
