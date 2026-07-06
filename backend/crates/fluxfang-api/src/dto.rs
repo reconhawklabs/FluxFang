@@ -277,6 +277,20 @@ pub struct CaptureDevicesDto {
     pub serial_devices: Vec<String>,
 }
 
+/// `GET /api/gps/status` response (Phase 5): what the Dashboard's GPS block
+/// and the map's auto-centering consume. See `gps_status.rs` module docs
+/// for how each field is derived.
+#[derive(Debug, Clone, Serialize)]
+pub struct GpsStatusDto {
+    pub source_running: bool,
+    pub has_fix: bool,
+    pub lat: Option<f64>,
+    pub lon: Option<f64>,
+    pub quality: Option<i32>,
+    pub fix_age_seconds: Option<f64>,
+    pub status: &'static str,
+}
+
 impl From<&Zone> for ZoneDto {
     fn from(z: &Zone) -> Self {
         ZoneDto {

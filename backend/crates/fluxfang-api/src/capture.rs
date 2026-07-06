@@ -512,6 +512,19 @@ impl CaptureSupervisor {
         self.events.subscribe()
     }
 
+    /// The most recent GPS fix seen by the currently-open session, if any
+    /// (Phase 5's `GET /api/gps/status`). `None` whenever no session is
+    /// open (nothing running at all, or only a wifi-only/`InertGps`-backed
+    /// session — see module docs) or a real gps session is open but hasn't
+    /// received its first fix yet; both cases are indistinguishable from
+    /// here on purpose, since the handler derives its own `"acquiring"` vs
+    /// `"disabled"` distinction separately from whether a `kind='gps'` data
+    /// source is `running` (see `gps_status.rs`), not from this alone.
+    pub async fn latest_gps_fix(&self) -> Option<GpsFix> {
+        let guard = self.session.lock().await;
+        guard.as_ref()?.manager.latest_fix()
+    }
+
     fn ctx_for(&self, manager: Arc<SessionManager>) -> IngestCtx {
         IngestCtx {
             pool: self.pool.clone(),

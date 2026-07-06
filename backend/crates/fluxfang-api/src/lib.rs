@@ -50,6 +50,7 @@ pub mod emissions;
 pub mod emitter_type_routes;
 pub mod emitters;
 pub mod entities;
+pub mod gps_status;
 pub mod ingest;
 pub mod middleware;
 pub mod notifications;
@@ -91,6 +92,7 @@ pub fn app(state: AppState) -> Router {
         .merge(emitter_type_routes::protected_routes())
         .merge(emitters::protected_routes())
         .merge(entities::protected_routes())
+        .merge(gps_status::protected_routes())
         .merge(notifications::protected_routes())
         .merge(system::protected_routes())
         .merge(ws::protected_routes())
