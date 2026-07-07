@@ -22,10 +22,17 @@
 // just draw on a blank background if the tile host is unreachable.
 //
 // Data sources for the layers:
-//   - Emissions heatmap: `GET /api/emissions` (scoped by the Sources group +
-//     the time window), shaped by `emissionsToHeatmapGeoJSON`
-//     (`components/mapData.ts`) — drops emissions with no location
-//     (`lon`/`lat` null).
+//   - Emissions heatmap: `GET /api/emissions/points` (Task 8 — scoped by the
+//     Sources group + the time window, same as the old `GET /api/emissions`
+//     query it replaced), shaped by `emissionPointsToHeatmapGeoJSON`
+//     (`components/mapData.ts`). Unlike the old page-sized `GET /api/emissions`
+//     list (capped at 500, oldest points silently dropped on a long drive),
+//     the points endpoint is uncapped up to its own server-side safety cap
+//     (`MAX_POINTS`, 50,000) and reports `truncated` when that cap is hit —
+//     see `anyTruncated` below.
+//   - Emitter markers still read from a separate `GET /api/emissions` query
+//     (`allEmissionsQueries`/`emissionsItems` below) — the points endpoint
+//     returns bare coordinates with no `emitter_id` to group by.
 //   - Entity markers: `GET /api/entities` for the id/name list, then
 //     `GET /api/entities/:id` per entity (parallel, via `useQueries`) for
 //     `recent_detections`; each entity's marker sits at its detection with
@@ -83,7 +90,7 @@ import type {
 } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { queryKeys } from "../api/queryKeys";
-import { listEmissions } from "../api/emissions";
+import { listEmissionPoints, listEmissions } from "../api/emissions";
 import { getEntityDetail, listEntities } from "../api/entities";
 import { listZones } from "../api/zones";
 import { isEmittingSource, listDataSources } from "../api/dataSources";
@@ -92,7 +99,7 @@ import type { Emitter } from "../api/emitters";
 import { getGpsStatus } from "../api/gps";
 import type { EntityMarker } from "../components/mapData";
 import {
-  emissionsToHeatmapGeoJSON,
+  emissionPointsToHeatmapGeoJSON,
   emitterMarkersFromEmissions,
   entitiesToMarkerFeatures,
   zonesToCircleGeoJSON,
@@ -134,11 +141,14 @@ const ZONE_LAYER_IDS = [
 const EMPTY_POINT_FC = { type: "FeatureCollection" as const, features: [] };
 const EMPTY_POLYGON_FC = { type: "FeatureCollection" as const, features: [] };
 
-// 500 is a generous cap for a single map view — see task brief ("use
-// GET /api/emissions?limit=500 and filter to those with non-null lon/lat
-// client-side"). Located-only filtering happens in
-// `emissionsToHeatmapGeoJSON`, not here.
-const MAP_EMISSIONS_LIMIT = 500;
+// Task 8: the heatmap itself no longer uses a client-side limit — it's fed by
+// `GET /api/emissions/points`, which is uncapped up to its own server-side
+// `MAX_POINTS` safety cap (see the module doc comment). This cap now bounds
+// only the SEPARATE `allEmissionsQueries` fetch below, which exists solely to
+// resolve emitter markers (the points endpoint has no `emitter_id` to group
+// by) — same "interim cap, fine at today's scale" rationale as the
+// `emittersQuery`/`entitiesQuery` limits further down.
+const EMITTER_MARKER_EMISSIONS_LIMIT = 500;
 
 /** Fallback map view when there's no GPS fix to center on: roughly the
  * geographic center of the contiguous United States, zoomed out to show
@@ -160,19 +170,21 @@ const DEFAULT_LAYER_VISIBILITY: LayerVisibility = {
   emitters: true,
 };
 
-/** `GET /api/emissions` params for the emissions heatmap — time-range scoping
- * plus an optional `data_source_id` (Sources group, see module doc comment).
- * `timeFrom`/`timeTo` are already RFC3339 strings when they come from the
- * Dashboard's range selector, or `datetime-local` strings from the Map page's
- * pickers; both parse cleanly through `new Date(...)`. */
+/** Shared `GET /api/emissions`(`/points`) params — time-range scoping plus an
+ * optional `data_source_id` (Sources group, see module doc comment). No
+ * `limit`: the points endpoint ignores any client-supplied limit/offset
+ * (server-side `MAX_POINTS` cap instead, see module doc comment), and the
+ * separate emitter-markers `allEmissionsQueries` fetch below sets its own
+ * `limit` directly on top of this (see that call site). `timeFrom`/`timeTo`
+ * are already RFC3339 strings when they come from the Dashboard's range
+ * selector, or `datetime-local` strings from the Map page's pickers; both
+ * parse cleanly through `new Date(...)`. */
 function buildEmissionsParams(opts: {
-  limit: number;
   dataSourceId: string;
   timeFrom: string;
   timeTo: string;
 }): URLSearchParams {
   const params = new URLSearchParams();
-  params.set("limit", String(opts.limit));
   if (opts.dataSourceId.length > 0)
     params.set("data_source_id", opts.dataSourceId);
   if (opts.timeFrom.length > 0)
@@ -479,17 +491,22 @@ export default function MapView({
       .filter((id) => sourceSelected[id] === true);
   }, [allSources, dataSourcesQuery.data, sourceSelected]);
 
-  // The "All emissions" layer's data: one query per selected source (see
+  // Emitter markers' source data: one query per selected source (see
   // `sourceScopeIds` above), unioned client-side — the backend only accepts
-  // a single `data_source_id` per request.
+  // a single `data_source_id` per request. NOT the heatmap's data source
+  // (see `allPointsQueries` below) — this fetch exists only to resolve
+  // `emitter_id`s (via `emitterMarkersFromEmissions`), which the points
+  // endpoint doesn't carry. `EMITTER_MARKER_EMISSIONS_LIMIT` is set directly
+  // on top of `buildEmissionsParams`'s output since that helper itself no
+  // longer takes a `limit` (see its doc comment).
   const allEmissionsQueries = useQueries({
     queries: sourceScopeIds.map((sourceId) => {
       const params = buildEmissionsParams({
-        limit: MAP_EMISSIONS_LIMIT,
         dataSourceId: sourceId,
         timeFrom,
         timeTo,
       });
+      params.set("limit", String(EMITTER_MARKER_EMISSIONS_LIMIT));
       return {
         queryKey: [...queryKeys.emissions, "map", params.toString()],
         queryFn: () => listEmissions(params),
@@ -502,6 +519,36 @@ export default function MapView({
     [allEmissionsQueries],
   );
   const emissionsIsError = allEmissionsQueries.some((query) => query.isError);
+
+  // Task 8: the heatmap's own data — every located point in scope, not just
+  // the newest `EMITTER_MARKER_EMISSIONS_LIMIT`-sized page (see module doc
+  // comment). Same per-source fan-out as `allEmissionsQueries` above, but
+  // hitting the uncapped points endpoint instead.
+  const allPointsQueries = useQueries({
+    queries: sourceScopeIds.map((sourceId) => {
+      const params = buildEmissionsParams({
+        dataSourceId: sourceId,
+        timeFrom,
+        timeTo,
+      });
+      return {
+        queryKey: [...queryKeys.emissions, "map-points", params.toString()],
+        queryFn: () => listEmissionPoints(params),
+      };
+    }),
+  });
+
+  const heatmapPoints = useMemo<[number, number][]>(
+    () => allPointsQueries.flatMap((query) => query.data?.points ?? []),
+    [allPointsQueries],
+  );
+  // True if ANY selected source's points fetch hit the server's `MAX_POINTS`
+  // safety cap — surfaced as a small notice near the map (see the JSX below)
+  // rather than silently under-representing the track.
+  const anyTruncated = useMemo(
+    () => allPointsQueries.some((query) => query.data?.truncated === true),
+    [allPointsQueries],
+  );
 
   // Emitters are fetched only to resolve emitter *names* for the Emitters
   // marker layer's labels (`emitterNames` below). Interim `{limit: 500}` cap
@@ -755,13 +802,15 @@ export default function MapView({
   }, [autoTrack]);
 
   // Push fresh source data whenever the underlying queries resolve/change,
-  // once the style (and thus the sources) exist.
+  // once the style (and thus the sources) exist. Task 8: fed by
+  // `heatmapPoints` (the uncapped points endpoint), not `emissionsItems`
+  // (the 500-capped list, which now only backs the emitter markers).
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !styleLoaded) return;
     const source = map.getSource<GeoJSONSource>(EMISSIONS_SOURCE_ID);
-    source?.setData(emissionsToHeatmapGeoJSON(emissionsItems));
-  }, [styleLoaded, emissionsItems]);
+    source?.setData(emissionPointsToHeatmapGeoJSON(heatmapPoints));
+  }, [styleLoaded, heatmapPoints]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -952,6 +1001,16 @@ export default function MapView({
             <p className="text-sm text-red-400">Failed to load emissions.</p>
           )}
         </div>
+      )}
+
+      {/* Task 8: a small, non-blocking notice when the points endpoint's
+          server-side `MAX_POINTS` cap was hit for any selected source —
+          rendered unconditionally (not gated on `showControls`) since the
+          Dashboard's embedded map needs it too, not just the `/map` route. */}
+      {anyTruncated && (
+        <p className="text-xs text-amber-400">
+          Showing up to 50,000 points; some older points are hidden.
+        </p>
       )}
 
       {/* The sizing classes (`min-h-[420px] flex-1`) live on the ref'd

@@ -81,6 +81,35 @@ export function pointsToHeatmapGeoJSON(points: HeatmapPoint[]): FeatureCollectio
   };
 }
 
+/**
+ * `points` (raw `[lon, lat]` pairs, as returned by `GET /api/emissions/points`
+ * — see `api/emissions.ts`'s `EmissionPoints.points`) -> a GeoJSON
+ * `FeatureCollection<Point>` for the Map/Dashboard heatmap layer
+ * (`MapView.tsx`), replacing the old `emissionsToHeatmapGeoJSON(emissionsItems)`
+ * feed now that the heatmap is fed by the uncapped points endpoint instead of
+ * the 500-capped `GET /api/emissions` list.
+ *
+ * Deliberately distinct from `pointsToHeatmapGeoJSON` above — that one takes
+ * `HeatmapPoint` (`{lon, lat}`) objects, the shape `EmissionsHeatmap.tsx`'s
+ * callers already have on hand; this one takes the points endpoint's raw
+ * tuples directly, so `MapView` doesn't need to re-map every point into an
+ * object just to shape it. Same conventions otherwise: no filtering (every
+ * point the endpoint returns is already located) and no properties beyond
+ * the geometry.
+ */
+export function emissionPointsToHeatmapGeoJSON(
+  points: [number, number][],
+): FeatureCollection<Point, Record<string, never>> {
+  return {
+    type: 'FeatureCollection',
+    features: points.map(([lon, lat]) => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [lon, lat] },
+      properties: {},
+    })),
+  };
+}
+
 /** One entity's last known location — the caller (`MapView`) derives this
  * per entity from `GET /api/entities/:id`'s `recent_detections` (see that
  * component's doc comment for exactly how "last" is chosen), so this module
