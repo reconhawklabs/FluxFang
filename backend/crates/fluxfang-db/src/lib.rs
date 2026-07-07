@@ -9,11 +9,13 @@ use sqlx::PgPool;
 
 pub mod models;
 pub mod repo;
+pub mod sort;
 
 pub use repo::{
     AlertMethodRepo, AlertRuleRepo, AppConfigRepo, DataSourceRepo, EmissionRepo, EmitterRepo,
     EntityRepo, LocationRepo, NotificationRepo, SessionRepo, ZoneMembershipRepo, ZoneRepo,
 };
+pub use sort::resolve_order_by;
 
 /// Connect to Postgres and return a ready-to-use connection pool.
 pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
