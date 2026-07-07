@@ -502,6 +502,38 @@ test('clicking "Recenter to me" flies the map to the current GPS fix', async () 
   );
 });
 
+test("Auto Track recenters on GPS immediately and every 5s while enabled", async () => {
+  vi.useFakeTimers();
+  try {
+    const fetchMock = mockRoutes(
+      baseRoutes({ "GET /api/gps/status": () => GPS_STATUS_FIX }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<MapView />, { wrapper });
+    // let the map 'load' + first GPS poll resolve
+    await vi.advanceTimersByTimeAsync(0);
+    const map = latestFakeMap();
+
+    const button = screen.getByRole("button", { name: /auto track/i });
+    expect(button).toBeEnabled();
+    const before = map.flyTo.mock.calls.length;
+
+    fireEvent.click(button);
+    // immediate recenter on enable
+    expect(map.flyTo.mock.calls.length - before).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(map.flyTo.mock.calls.length - before).toBe(2);
+
+    fireEvent.click(button); // disable
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(map.flyTo.mock.calls.length - before).toBe(2); // no more calls
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test("clicking an emitter marker opens a popup with its details", async () => {
   const emitter: Emitter = {
     id: "emitter-1",

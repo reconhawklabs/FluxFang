@@ -429,6 +429,7 @@ export default function MapView({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const [styleLoaded, setStyleLoaded] = useState(false);
+  const [autoTrack, setAutoTrack] = useState(false);
 
   // "Layers" group: independent of each other.
   const [layerVisibility, setLayerVisibility] = useState<LayerVisibility>(
@@ -601,6 +602,17 @@ export default function MapView({
   );
   const hasCenteredOnLoadRef = useRef(false);
 
+  // Latest GPS fix, read by the Auto Track interval so its callback never
+  // closes over a stale fix.
+  const gpsFixRef = useRef<{ lon: number; lat: number } | null>(null);
+  useEffect(() => {
+    const gps = gpsStatusQuery.data;
+    gpsFixRef.current =
+      gps?.has_fix && gps.lat !== null && gps.lon !== null
+        ? { lon: gps.lon, lat: gps.lat }
+        : null;
+  }, [gpsStatusQuery.data]);
+
   // Map init — runs once. In tests, `maplibre-gl` is mocked
   // (`vi.mock('maplibre-gl', ...)` in `MapView.test.tsx`) so this never
   // touches a real WebGL canvas; jsdom itself is never specially detected
@@ -724,6 +736,23 @@ export default function MapView({
     if (!map || !gps?.has_fix || gps.lat === null || gps.lon === null) return;
     map.flyTo({ center: [gps.lon, gps.lat], zoom: USER_LOCATION_ZOOM });
   }
+
+  // Auto Track: while enabled, recenter on the latest GPS fix immediately and
+  // every 5s — snapping back even after a manual pan (per design). Reads the
+  // fix through `gpsFixRef` so the interval callback stays current. Cleared on
+  // disable/unmount.
+  useEffect(() => {
+    if (!autoTrack) return undefined;
+    const recenter = () => {
+      const map = mapRef.current;
+      const fix = gpsFixRef.current;
+      if (!map || !fix) return;
+      map.flyTo({ center: [fix.lon, fix.lat], zoom: USER_LOCATION_ZOOM });
+    };
+    recenter();
+    const interval = setInterval(recenter, 5000);
+    return () => clearInterval(interval);
+  }, [autoTrack]);
 
   // Push fresh source data whenever the underlying queries resolve/change,
   // once the style (and thus the sources) exist.
@@ -948,6 +977,22 @@ export default function MapView({
             className="rounded border border-slate-700 bg-slate-900/90 px-2 py-1.5 text-xs font-medium text-slate-200 shadow hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
           >
             Recenter to me
+          </button>
+          <button
+            type="button"
+            onClick={() => setAutoTrack((prev) => !prev)}
+            disabled={!hasGpsFix && !autoTrack}
+            title={
+              hasGpsFix ? "Continuously recenter on my location" : "No GPS fix"
+            }
+            aria-pressed={autoTrack}
+            className={`rounded border px-2 py-1.5 text-xs font-medium shadow disabled:cursor-not-allowed disabled:opacity-50 ${
+              autoTrack
+                ? "border-amber-500 bg-amber-500/20 text-amber-300"
+                : "border-slate-700 bg-slate-900/90 text-slate-200 hover:bg-slate-800"
+            }`}
+          >
+            {autoTrack ? "Auto Track: On" : "Auto Track"}
           </button>
           {overlayTopLeft}
         </div>
