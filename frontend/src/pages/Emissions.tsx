@@ -31,33 +31,38 @@
 // Mass-select ("Delete selected"/"Clear All Emissions") uses the shared
 // `useRowSelection`/`SelectionToolbar` (Phase 2) against
 // `bulkDeleteEmissions`/`clearEmissions`.
-import { useMemo, useState } from 'react';
-import type { FormEvent } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ApiError } from '../api/client';
-import { queryKeys } from '../api/queryKeys';
-import type { Emission } from '../api/emissions';
-import { bulkDeleteEmissions, clearEmissions, listEmissions } from '../api/emissions';
-import { createEmitter, listEmitters, listEmitterTypes } from '../api/emitters';
-import type { EmitterType } from '../api/emitters';
-import { listDataSources } from '../api/dataSources';
-import type { DataSource } from '../api/dataSources';
-import Pagination from '../components/Pagination';
-import RuleBuilder from '../components/RuleBuilder';
-import SearchBar from '../components/SearchBar';
-import SelectionToolbar from '../components/SelectionToolbar';
-import StackedFilterBuilder from '../components/StackedFilterBuilder';
-import { conditionsToQueryParams } from '../components/filterState';
-import { useRowSelection } from '../hooks/useRowSelection';
-import type { Condition, Rule } from '../types/rule';
+import { useMemo, useState } from "react";
+import type { FormEvent } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ApiError } from "../api/client";
+import { queryKeys } from "../api/queryKeys";
+import type { Emission } from "../api/emissions";
+import {
+  bulkDeleteEmissions,
+  clearEmissions,
+  listEmissions,
+} from "../api/emissions";
+import { createEmitter, listEmitters, listEmitterTypes } from "../api/emitters";
+import type { EmitterType } from "../api/emitters";
+import { isEmittingSource, listDataSources } from "../api/dataSources";
+import type { DataSource } from "../api/dataSources";
+import Pagination from "../components/Pagination";
+import RuleBuilder from "../components/RuleBuilder";
+import SearchBar from "../components/SearchBar";
+import SelectionToolbar from "../components/SelectionToolbar";
+import StackedFilterBuilder from "../components/StackedFilterBuilder";
+import { conditionsToQueryParams } from "../components/filterState";
+import { useRowSelection } from "../hooks/useRowSelection";
+import type { Condition, Rule } from "../types/rule";
 
 const DEFAULT_LIMIT = 50;
 
 const inputClassName =
-  'w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 focus:border-amber-500 focus:outline-none';
-const labelClassName = 'block text-xs font-medium uppercase tracking-wide text-slate-500';
+  "w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 focus:border-amber-500 focus:outline-none";
+const labelClassName =
+  "block text-xs font-medium uppercase tracking-wide text-slate-500";
 const selectClassName =
-  'rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 focus:border-amber-500 focus:outline-none';
+  "rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 focus:border-amber-500 focus:outline-none";
 
 function formatObservedAt(iso: string): string {
   const date = new Date(iso);
@@ -68,7 +73,9 @@ function formatObservedAt(iso: string): string {
  * (see `Emission`'s doc comment), so any of these may be absent. */
 function payloadText(payload: Record<string, unknown>, key: string): string {
   const value = payload[key];
-  return typeof value === 'string' || typeof value === 'number' ? String(value) : '—';
+  return typeof value === "string" || typeof value === "number"
+    ? String(value)
+    : "—";
 }
 
 /** A `DataSource`'s label in the filter dropdown: kind plus whatever
@@ -89,14 +96,20 @@ function dataSourceLabel(dataSource: DataSource): string {
  * string. */
 function defaultRuleFor(emission: Emission): Rule {
   const bssid = emission.payload.bssid;
-  if (typeof bssid === 'string' && bssid.length > 0) {
-    return { match: 'all', conditions: [{ field: 'bssid', op: 'eq', value: bssid }] };
+  if (typeof bssid === "string" && bssid.length > 0) {
+    return {
+      match: "all",
+      conditions: [{ field: "bssid", op: "eq", value: bssid }],
+    };
   }
   const srcMac = emission.payload.src_mac;
-  if (typeof srcMac === 'string' && srcMac.length > 0) {
-    return { match: 'all', conditions: [{ field: 'src_mac', op: 'eq', value: srcMac }] };
+  if (typeof srcMac === "string" && srcMac.length > 0) {
+    return {
+      match: "all",
+      conditions: [{ field: "src_mac", op: "eq", value: srcMac }],
+    };
   }
-  return { match: 'all', conditions: [] };
+  return { match: "all", conditions: [] };
 }
 
 /** Sentinel `<select>` value for the escape-hatch "Other (custom)…" option
@@ -105,7 +118,7 @@ function defaultRuleFor(emission: Emission): Rule {
  * it reveals a free-text input and, on submit, sends that text as `type`
  * with `emitter_type` omitted (kept `null` server-side), same as today's
  * free-text field. */
-const OTHER_TYPE_VALUE = '__other__';
+const OTHER_TYPE_VALUE = "__other__";
 
 interface AssignModalProps {
   /** The emission the default rule is derived from — for a bulk assign,
@@ -117,16 +130,21 @@ interface AssignModalProps {
   onAssigned: (attachedCount: number) => void;
 }
 
-function AssignModal({ seedEmission, selectedCount, onCancel, onAssigned }: AssignModalProps) {
-  const [name, setName] = useState('');
+function AssignModal({
+  seedEmission,
+  selectedCount,
+  onCancel,
+  onAssigned,
+}: AssignModalProps) {
+  const [name, setName] = useState("");
   // Which `<select>` option is chosen: an `EmitterType.key` (a known type,
   // e.g. "wifi_access_point") or `OTHER_TYPE_VALUE` (the custom-text escape
   // hatch). `''` means "not yet chosen" — the select falls back to the
   // first fetched option (or `OTHER_TYPE_VALUE` if the list is empty/still
   // loading) below, so the field always has a sensible selection without an
   // effect.
-  const [typeSelection, setTypeSelection] = useState('');
-  const [customType, setCustomType] = useState('');
+  const [typeSelection, setTypeSelection] = useState("");
+  const [customType, setCustomType] = useState("");
   const [rule, setRule] = useState<Rule>(() => defaultRuleFor(seedEmission));
 
   // The emitter-types dropdown is scoped to this emission's `kind` (e.g.
@@ -136,7 +154,10 @@ function AssignModal({ seedEmission, selectedCount, onCancel, onAssigned }: Assi
     queryKey: queryKeys.emitterTypes(seedEmission.kind),
     queryFn: () => listEmitterTypes(seedEmission.kind),
   });
-  const emitterTypes = useMemo(() => emitterTypesQuery.data ?? [], [emitterTypesQuery.data]);
+  const emitterTypes = useMemo(
+    () => emitterTypesQuery.data ?? [],
+    [emitterTypesQuery.data],
+  );
 
   const effectiveTypeSelection =
     typeSelection.length > 0
@@ -155,7 +176,7 @@ function AssignModal({ seedEmission, selectedCount, onCancel, onAssigned }: Assi
     createMutation.error instanceof ApiError
       ? createMutation.error.message
       : createMutation.isError
-        ? 'Failed to create emitter.'
+        ? "Failed to create emitter."
         : null;
 
   function handleSubmit(event: FormEvent<HTMLFormElement>): void {
@@ -171,7 +192,9 @@ function AssignModal({ seedEmission, selectedCount, onCancel, onAssigned }: Assi
       return;
     }
 
-    const selected = emitterTypes.find((entry: EmitterType) => entry.key === effectiveTypeSelection);
+    const selected = emitterTypes.find(
+      (entry: EmitterType) => entry.key === effectiveTypeSelection,
+    );
     createMutation.mutate({
       name: name.trim(),
       type: selected?.label,
@@ -187,7 +210,8 @@ function AssignModal({ seedEmission, selectedCount, onCancel, onAssigned }: Assi
         className="w-full max-w-lg space-y-4 rounded-lg border border-slate-800 bg-slate-900 p-6 shadow-xl"
       >
         <h2 className="text-lg font-semibold text-slate-100">
-          Assign {selectedCount} emission{selectedCount === 1 ? '' : 's'} to emitter
+          Assign {selectedCount} emission{selectedCount === 1 ? "" : "s"} to
+          emitter
         </h2>
 
         <div className="space-y-1">
@@ -240,7 +264,12 @@ function AssignModal({ seedEmission, selectedCount, onCancel, onAssigned }: Assi
 
         <div className="space-y-1">
           <span className={labelClassName}>Match rule</span>
-          <RuleBuilder kind="wifi" value={rule} onChange={setRule} showPreview />
+          <RuleBuilder
+            kind="wifi"
+            value={rule}
+            onChange={setRule}
+            showPreview
+          />
         </div>
 
         {errorMessage && (
@@ -262,7 +291,7 @@ function AssignModal({ seedEmission, selectedCount, onCancel, onAssigned }: Assi
             disabled={createMutation.isPending || name.trim().length === 0}
             className="rounded bg-amber-500 px-3 py-1.5 text-sm font-semibold text-slate-950 transition hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {createMutation.isPending ? 'Assigning…' : 'Assign'}
+            {createMutation.isPending ? "Assigning…" : "Assign"}
           </button>
         </div>
       </form>
@@ -275,12 +304,12 @@ function AssignModal({ seedEmission, selectedCount, onCancel, onAssigned }: Assi
  * single row's own trailing "+" (`seedEmission` is that row, regardless of
  * whether it's checked). Kept as one piece of state (rather than two
  * booleans) so the two flows can never both render a modal at once. */
-type AssignTarget = { mode: 'bulk' } | { mode: 'single'; emission: Emission };
+type AssignTarget = { mode: "bulk" } | { mode: "single"; emission: Emission };
 
 export default function Emissions() {
   const queryClient = useQueryClient();
-  const [dataSourceId, setDataSourceId] = useState('');
-  const [q, setQ] = useState('');
+  const [dataSourceId, setDataSourceId] = useState("");
+  const [q, setQ] = useState("");
   const [conditions, setConditions] = useState<Condition[]>([]);
   const [limit, setLimit] = useState<number>(DEFAULT_LIMIT);
   const [offset, setOffset] = useState(0);
@@ -290,10 +319,10 @@ export default function Emissions() {
   const queryParams = useMemo(() => {
     const params = conditionsToQueryParams(conditions);
     const trimmedQ = q.trim();
-    if (trimmedQ.length > 0) params.set('q', trimmedQ);
-    if (dataSourceId.length > 0) params.set('data_source_id', dataSourceId);
-    params.set('limit', String(limit));
-    params.set('offset', String(offset));
+    if (trimmedQ.length > 0) params.set("q", trimmedQ);
+    if (dataSourceId.length > 0) params.set("data_source_id", dataSourceId);
+    params.set("limit", String(limit));
+    params.set("offset", String(offset));
     return params;
   }, [conditions, q, dataSourceId, limit, offset]);
 
@@ -302,7 +331,10 @@ export default function Emissions() {
     queryFn: () => listEmissions(queryParams),
   });
 
-  const dataSourcesQuery = useQuery({ queryKey: queryKeys.dataSources, queryFn: listDataSources });
+  const dataSourcesQuery = useQuery({
+    queryKey: queryKeys.dataSources,
+    queryFn: listDataSources,
+  });
 
   // Resolves an emission's `emitter_id` to a display name. Not itself
   // invalidated by `useLiveEvents` (emitters aren't touched by a plain
@@ -313,11 +345,15 @@ export default function Emissions() {
   // paginated `{items, total}` envelope; this lookup map just needs "every
   // emitter's name," so 500 keeps today's coverage without adding
   // pagination here (a later redesign phase).
-  const emittersQuery = useQuery({ queryKey: queryKeys.emitters, queryFn: () => listEmitters({ limit: 500 }) });
+  const emittersQuery = useQuery({
+    queryKey: queryKeys.emitters,
+    queryFn: () => listEmitters({ limit: 500 }),
+  });
 
   const emitterNameById = useMemo(() => {
     const map = new Map<string, string>();
-    for (const emitter of emittersQuery.data?.items ?? []) map.set(emitter.id, emitter.name);
+    for (const emitter of emittersQuery.data?.items ?? [])
+      map.set(emitter.id, emitter.name);
     return map;
   }, [emittersQuery.data]);
 
@@ -354,17 +390,26 @@ export default function Emissions() {
 
   // List order's first selected row — deterministic regardless of click
   // order — is what a bulk assign's default rule is derived from.
-  const bulkSeedEmission = items.find((emission) => selection.selected.has(emission.id));
+  const bulkSeedEmission = items.find((emission) =>
+    selection.selected.has(emission.id),
+  );
 
   const modalSeedEmission =
-    assignTarget?.mode === 'single' ? assignTarget.emission : assignTarget?.mode === 'bulk' ? bulkSeedEmission : undefined;
-  const modalSelectedCount = assignTarget?.mode === 'single' ? 1 : selection.selected.size;
+    assignTarget?.mode === "single"
+      ? assignTarget.emission
+      : assignTarget?.mode === "bulk"
+        ? bulkSeedEmission
+        : undefined;
+  const modalSelectedCount =
+    assignTarget?.mode === "single" ? 1 : selection.selected.size;
 
   function handleAssigned(attachedCount: number): void {
-    const wasBulk = assignTarget?.mode === 'bulk';
+    const wasBulk = assignTarget?.mode === "bulk";
     setAssignTarget(null);
     if (wasBulk) selection.clear();
-    setAssignedMessage(`Assigned ${attachedCount} emission${attachedCount === 1 ? '' : 's'}.`);
+    setAssignedMessage(
+      `Assigned ${attachedCount} emission${attachedCount === 1 ? "" : "s"}.`,
+    );
     void queryClient.invalidateQueries({ queryKey: queryKeys.emissions });
     void queryClient.invalidateQueries({ queryKey: queryKeys.emitters });
   }
@@ -407,42 +452,58 @@ export default function Emissions() {
           className={selectClassName}
         >
           <option value="">All data sources</option>
-          {(dataSourcesQuery.data ?? []).map((dataSource) => (
-            <option key={dataSource.id} value={dataSource.id}>
-              {dataSourceLabel(dataSource)}
-            </option>
-          ))}
+          {(dataSourcesQuery.data ?? [])
+            .filter(isEmittingSource)
+            .map((dataSource) => (
+              <option key={dataSource.id} value={dataSource.id}>
+                {dataSourceLabel(dataSource)}
+              </option>
+            ))}
         </select>
 
-        <SearchBar value={q} onChange={handleSearchChange} placeholder="Search emissions…" />
+        <SearchBar
+          value={q}
+          onChange={handleSearchChange}
+          placeholder="Search emissions…"
+        />
       </div>
 
-      <StackedFilterBuilder kind="wifi" value={conditions} onChange={handleConditionsChange} />
+      <StackedFilterBuilder
+        kind="wifi"
+        value={conditions}
+        onChange={handleConditionsChange}
+      />
 
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <button
             type="button"
             disabled={selection.selected.size === 0}
-            onClick={() => setAssignTarget({ mode: 'bulk' })}
+            onClick={() => setAssignTarget({ mode: "bulk" })}
             className="rounded bg-amber-500 px-3 py-1.5 text-sm font-semibold text-slate-950 transition hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
           >
             Assign to emitter ({selection.selected.size})
           </button>
           <SelectionToolbar
             selectedCount={selection.selected.size}
-            onDeleteSelected={() => bulkDeleteMutation.mutate(Array.from(selection.selected))}
+            onDeleteSelected={() =>
+              bulkDeleteMutation.mutate(Array.from(selection.selected))
+            }
             onClearAll={() => clearAllMutation.mutate()}
             itemLabelPlural="Emissions"
           />
         </div>
         <p data-testid="emissions-total" className="text-sm text-slate-400">
-          {total} emission{total === 1 ? '' : 's'}
+          {total} emission{total === 1 ? "" : "s"}
         </p>
       </div>
 
-      {emissionsQuery.isLoading && <p className="text-sm text-slate-500">Loading emissions…</p>}
-      {emissionsQuery.isError && <p className="text-sm text-red-400">Failed to load emissions.</p>}
+      {emissionsQuery.isLoading && (
+        <p className="text-sm text-slate-500">Loading emissions…</p>
+      )}
+      {emissionsQuery.isError && (
+        <p className="text-sm text-red-400">Failed to load emissions.</p>
+      )}
 
       {items.length > 0 && (
         <table className="w-full border-collapse text-left text-sm">
@@ -483,24 +544,39 @@ export default function Emissions() {
                     className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
                   />
                 </td>
-                <td className="py-2 pr-4 text-slate-300">{formatObservedAt(emission.observed_at)}</td>
-                <td className="py-2 pr-4 font-mono text-slate-300">{payloadText(emission.payload, 'bssid')}</td>
-                <td data-testid="emission-src-mac" className="py-2 pr-4 font-mono text-slate-300">
-                  {payloadText(emission.payload, 'src_mac')}
+                <td className="py-2 pr-4 text-slate-300">
+                  {formatObservedAt(emission.observed_at)}
                 </td>
-                <td className="py-2 pr-4 text-slate-300">{payloadText(emission.payload, 'ssid')}</td>
-                <td className="py-2 pr-4 text-slate-300">{payloadText(emission.payload, 'channel')}</td>
                 <td className="py-2 pr-4 font-mono text-slate-300">
-                  {emission.signal_strength ?? '—'}
+                  {payloadText(emission.payload, "bssid")}
+                </td>
+                <td
+                  data-testid="emission-src-mac"
+                  className="py-2 pr-4 font-mono text-slate-300"
+                >
+                  {payloadText(emission.payload, "src_mac")}
                 </td>
                 <td className="py-2 pr-4 text-slate-300">
-                  {emission.emitter_id ? (emitterNameById.get(emission.emitter_id) ?? '—') : '—'}
+                  {payloadText(emission.payload, "ssid")}
+                </td>
+                <td className="py-2 pr-4 text-slate-300">
+                  {payloadText(emission.payload, "channel")}
+                </td>
+                <td className="py-2 pr-4 font-mono text-slate-300">
+                  {emission.signal_strength ?? "—"}
+                </td>
+                <td className="py-2 pr-4 text-slate-300">
+                  {emission.emitter_id
+                    ? (emitterNameById.get(emission.emitter_id) ?? "—")
+                    : "—"}
                 </td>
                 <td className="py-2 pr-2">
                   <button
                     type="button"
                     aria-label={`Quick-assign emission ${emission.id} to emitter`}
-                    onClick={() => setAssignTarget({ mode: 'single', emission })}
+                    onClick={() =>
+                      setAssignTarget({ mode: "single", emission })
+                    }
                     className="rounded border border-slate-700 px-2 py-0.5 text-sm text-slate-300 transition hover:border-amber-500 hover:text-amber-400"
                   >
                     +
@@ -513,10 +589,17 @@ export default function Emissions() {
       )}
 
       {emissionsQuery.data && items.length === 0 && (
-        <p className="text-sm text-slate-500">No emissions match this filter.</p>
+        <p className="text-sm text-slate-500">
+          No emissions match this filter.
+        </p>
       )}
 
-      <Pagination total={total} limit={limit} offset={offset} onChange={handlePaginationChange} />
+      <Pagination
+        total={total}
+        limit={limit}
+        offset={offset}
+        onChange={handlePaginationChange}
+      />
 
       {assignTarget && modalSeedEmission && (
         <AssignModal

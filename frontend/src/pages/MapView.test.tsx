@@ -331,6 +331,28 @@ test("renders one Sources checkbox per GET /api/data-sources entry, replacing th
   expect(screen.queryByLabelText(/data source/i)).not.toBeInTheDocument();
 });
 
+test("Sources group lists wifi sources but hides gps sources (gps provides location, not emissions)", async () => {
+  const GPS_SOURCE: DataSource = {
+    id: "gps-1",
+    created_at: "2026-07-06T00:00:00Z",
+    kind: "gps",
+    mode: "gpsd",
+    interface: null,
+    status: "running",
+    config: {},
+    last_error: null,
+  };
+  const fetchMock = mockRoutes(
+    baseRoutes({ "GET /api/data-sources": () => [DATA_SOURCE_1, GPS_SOURCE] }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<MapView />, { wrapper });
+
+  expect(await screen.findByLabelText(/wifi \(wlan0\)/i)).toBeInTheDocument();
+  expect(screen.queryByLabelText(/gps/i)).not.toBeInTheDocument();
+});
+
 test("toggling the Layers checkboxes does not crash the page", async () => {
   const fetchMock = mockRoutes(baseRoutes());
   vi.stubGlobal("fetch", fetchMock);

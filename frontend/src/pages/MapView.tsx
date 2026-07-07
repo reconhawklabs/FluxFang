@@ -86,7 +86,7 @@ import { queryKeys } from "../api/queryKeys";
 import { listEmissions } from "../api/emissions";
 import { getEntityDetail, listEntities } from "../api/entities";
 import { listZones } from "../api/zones";
-import { listDataSources } from "../api/dataSources";
+import { isEmittingSource, listDataSources } from "../api/dataSources";
 import { listEmitters } from "../api/emitters";
 import type { Emitter } from "../api/emitters";
 import { getGpsStatus } from "../api/gps";
@@ -902,18 +902,20 @@ export default function MapView({
                 />
                 All Sources
               </label>
-              {(dataSourcesQuery.data ?? []).map((source) => (
-                <label key={source.id} className={checkboxLabelClassName}>
-                  <input
-                    type="checkbox"
-                    checked={isSourceSelected(source.id)}
-                    disabled={allSources}
-                    onChange={() => toggleSource(source.id)}
-                    className={checkboxInputClassName}
-                  />
-                  {source.kind} ({source.interface ?? source.id})
-                </label>
-              ))}
+              {(dataSourcesQuery.data ?? [])
+                .filter(isEmittingSource)
+                .map((source) => (
+                  <label key={source.id} className={checkboxLabelClassName}>
+                    <input
+                      type="checkbox"
+                      checked={isSourceSelected(source.id)}
+                      disabled={allSources}
+                      onChange={() => toggleSource(source.id)}
+                      className={checkboxInputClassName}
+                    />
+                    {source.kind} ({source.interface ?? source.id})
+                  </label>
+                ))}
             </div>
           </fieldset>
 

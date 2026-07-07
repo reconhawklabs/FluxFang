@@ -29,7 +29,7 @@ import { useQuery } from "@tanstack/react-query";
 import { queryKeys } from "../api/queryKeys";
 import type { Emission } from "../api/emissions";
 import { listEmissions } from "../api/emissions";
-import { listDataSources } from "../api/dataSources";
+import { isEmittingSource, listDataSources } from "../api/dataSources";
 import { listEmitters } from "../api/emitters";
 import { listEntities } from "../api/entities";
 import { listNotifications } from "../api/notifications";
@@ -287,16 +287,18 @@ export default function Dashboard() {
             >
               All Emissions
             </button>
-            {(dataSourcesQuery.data ?? []).map((source) => (
-              <button
-                key={source.id}
-                type="button"
-                onClick={() => setFeedSourceId(source.id)}
-                className={feedTabClassName(feedSourceId === source.id)}
-              >
-                {source.kind} ({source.interface ?? source.id})
-              </button>
-            ))}
+            {(dataSourcesQuery.data ?? [])
+              .filter(isEmittingSource)
+              .map((source) => (
+                <button
+                  key={source.id}
+                  type="button"
+                  onClick={() => setFeedSourceId(source.id)}
+                  className={feedTabClassName(feedSourceId === source.id)}
+                >
+                  {source.kind} ({source.interface ?? source.id})
+                </button>
+              ))}
           </div>
 
           {feedQuery.isLoading && (

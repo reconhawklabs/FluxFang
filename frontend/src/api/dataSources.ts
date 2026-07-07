@@ -10,11 +10,11 @@
 //   - gps  + gpsd     -> `config: { host, port }`
 //   - gps  + serial   -> `config: { device, baud }`, `baud` one of
 //     `BAUD_RATES` (the backend's `ALLOWED_BAUD_RATES`)
-import { del, get, post } from './client';
+import { del, get, post } from "./client";
 
-export type DataSourceKind = 'wifi' | 'gps';
-export type DataSourceMode = 'monitor' | 'scan' | 'gpsd' | 'serial';
-export type DataSourceStatus = 'stopped' | 'starting' | 'running' | 'error';
+export type DataSourceKind = "wifi" | "gps";
+export type DataSourceMode = "monitor" | "scan" | "gpsd" | "serial";
+export type DataSourceStatus = "stopped" | "starting" | "running" | "error";
 
 /** The backend's `ALLOWED_BAUD_RATES` (`fluxfang-api::capture`) — the only
  * baud values `validate_data_source` accepts for a `serial` gps source.
@@ -43,7 +43,8 @@ export interface WifiConfig {
   auto_create_emitters?: boolean;
 }
 
-export type DataSourceConfig = WifiConfig | GpsdConfig | SerialConfig | Record<string, never>;
+export type DataSourceConfig =
+  WifiConfig | GpsdConfig | SerialConfig | Record<string, never>;
 
 /** Mirrors `fluxfang_db::models::DataSource` exactly. */
 export interface DataSource {
@@ -57,6 +58,14 @@ export interface DataSource {
   last_error: string | null;
 }
 
+/** A GPS data source provides *location*, not emissions — so it must not
+ * appear anywhere emissions are scoped/filtered by source (dashboard feed
+ * tabs, the Emissions page's data-source dropdown, the Map page's Sources
+ * group). Everything else (currently only wifi) does emit. */
+export function isEmittingSource(source: DataSource): boolean {
+  return source.kind !== "gps";
+}
+
 /** `POST /api/data-sources` body — mirrors the backend's
  * `CreateDataSourceRequest`. */
 export interface CreateDataSourceInput {
@@ -67,11 +76,13 @@ export interface CreateDataSourceInput {
 }
 
 export function listDataSources(): Promise<DataSource[]> {
-  return get<DataSource[]>('/api/data-sources');
+  return get<DataSource[]>("/api/data-sources");
 }
 
-export function createDataSource(input: CreateDataSourceInput): Promise<DataSource> {
-  return post<DataSource>('/api/data-sources', input);
+export function createDataSource(
+  input: CreateDataSourceInput,
+): Promise<DataSource> {
+  return post<DataSource>("/api/data-sources", input);
 }
 
 export function startDataSource(id: string): Promise<DataSource> {
@@ -99,5 +110,5 @@ export interface CaptureDevices {
 }
 
 export function listCaptureDevices(): Promise<CaptureDevices> {
-  return get<CaptureDevices>('/api/system/capture-devices');
+  return get<CaptureDevices>("/api/system/capture-devices");
 }

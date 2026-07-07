@@ -337,6 +337,42 @@ test('the feed defaults to the "All Emissions" tab and scopes to a data source w
   );
 });
 
+test("feed tabs list wifi sources but hide gps sources (gps provides location, not emissions)", async () => {
+  const WIFI_SOURCE: DataSource = {
+    id: "w1",
+    created_at: "2026-07-06T00:00:00Z",
+    kind: "wifi",
+    mode: "monitor",
+    interface: "wlan0",
+    status: "running",
+    config: {},
+    last_error: null,
+  };
+  const GPS_SOURCE: DataSource = {
+    id: "g1",
+    created_at: "2026-07-06T00:00:00Z",
+    kind: "gps",
+    mode: "gpsd",
+    interface: null,
+    status: "running",
+    config: {},
+    last_error: null,
+  };
+  const fetchMock = mockRoutes(
+    baseRoutes({ "GET /api/data-sources": () => [WIFI_SOURCE, GPS_SOURCE] }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<Dashboard />, { wrapper });
+
+  expect(
+    await screen.findByRole("button", { name: /wifi \(wlan0\)/i }),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: /gps/i }),
+  ).not.toBeInTheDocument();
+});
+
 test("dashboard time-range selector offers 15m/1h/4h/24h and defaults to 1h", async () => {
   vi.stubGlobal("fetch", mockRoutes(baseRoutes()));
   render(<Dashboard />, { wrapper });
