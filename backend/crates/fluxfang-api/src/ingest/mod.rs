@@ -266,6 +266,11 @@ pub async fn ingest(
         auto_create_emitter(ctx, data_source_id, &mut emission).await;
     }
 
+    // Wifi-association enrichment: if this is a client association frame that
+    // attached to a wifi_client emitter, record the AP it connected to on that
+    // emitter (latest-wins). Self-contained, like alerts/zones below.
+    maybe_enrich_connected_ap(ctx, &emission).await;
+
     alerts::evaluate_alerts(ctx, &emission).await;
     zones::update_target_zones(ctx, &emission).await;
 
@@ -391,6 +396,46 @@ async fn auto_create_emitter(ctx: &IngestCtx, data_source_id: Uuid, emission: &m
     };
     *emission = updated;
     let _ = EmitterRepo::touch_seen(&ctx.pool, emitter.id, emission.observed_at).await;
+}
+
+/// If `emission` is a wifi association/reassociation frame carrying a
+/// `target_bssid` and it attached to an emitter, merge that AP
+/// (`connected_bssid`/`connected_ssid`) onto the emitter's attributes.
+/// [`EmitterRepo::merge_client_attributes`] is itself type-guarded to
+/// `wifi_client`, so this is a no-op for any other emitter type. Self-
+/// contained: a DB error here (like alerts/zones) is swallowed, never failing
+/// `ingest`.
+async fn maybe_enrich_connected_ap(ctx: &IngestCtx, emission: &Emission) {
+    let Some(emitter_id) = emission.emitter_id else {
+        return;
+    };
+    let frame_type = emission
+        .payload
+        .get("frame_type")
+        .and_then(serde_json::Value::as_str);
+    if !matches!(
+        frame_type,
+        Some("association_request") | Some("reassociation_request")
+    ) {
+        return;
+    }
+    let Some(target_bssid) = emission
+        .payload
+        .get("target_bssid")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+    else {
+        return;
+    };
+    let target_ssid = emission
+        .payload
+        .get("target_ssid")
+        .and_then(serde_json::Value::as_str);
+    let patch = serde_json::json!({
+        "connected_bssid": target_bssid,
+        "connected_ssid": target_ssid,
+    });
+    let _ = EmitterRepo::merge_client_attributes(&ctx.pool, emitter_id, &patch).await;
 }
 
 #[cfg(test)]
@@ -520,6 +565,28 @@ mod tests {
             payload: serde_json::json!({
                 "src_mac": src_mac,
                 "frame_type": "probe_request",
+            }),
+        }
+    }
+
+    /// A client association-request observation -- `src_mac` (the client) plus
+    /// the target AP under `target_bssid`/`target_ssid` (never plain `bssid`),
+    /// matching the parser's serialization for these frames.
+    fn association_obs(
+        src_mac: &str,
+        target_bssid: &str,
+        target_ssid: &str,
+        observed_at: chrono::DateTime<Utc>,
+    ) -> RawObservation {
+        RawObservation {
+            kind: "wifi".to_string(),
+            observed_at,
+            signal_strength: Some(-58),
+            payload: serde_json::json!({
+                "frame_type": "association_request",
+                "src_mac": src_mac,
+                "target_bssid": target_bssid,
+                "target_ssid": target_ssid,
             }),
         }
     }
@@ -1045,5 +1112,132 @@ mod tests {
             .expect("ingest should succeed, not panic, even when classify() returns None");
         assert_eq!(emission.emitter_id, None);
         assert_eq!(EmitterRepo::list(&pool).await.unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn ingest_association_attaches_to_client_not_ap_and_records_connected_ap() {
+        let pool = fresh_pool().await;
+        let ds = seed_wifi_source(&pool).await;
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+
+        // Pre-existing AP emitter (rule bssid == the target), created FIRST so
+        // first-match-wins would attach to it if the association carried a
+        // plain `bssid`. It must not.
+        let ap = EmitterRepo::insert(
+            &pool,
+            NewEmitter {
+                name: "AP".to_string(),
+                match_criteria: serde_json::json!({
+                    "match": "all",
+                    "conditions": [{"field": "bssid", "op": "eq", "value": "aa:bb:cc:dd:ee:ff"}]
+                }),
+                emitter_type: Some("wifi_access_point".to_string()),
+                attributes: serde_json::json!({"bssid": "aa:bb:cc:dd:ee:ff"}),
+                match_enabled: true,
+                identity_key: Some("wifi_access_point:aa:bb:cc:dd:ee:ff".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // The associating client's emitter (rule src_mac == the client).
+        let client = EmitterRepo::insert(
+            &pool,
+            NewEmitter {
+                name: "Client".to_string(),
+                match_criteria: serde_json::json!({
+                    "match": "all",
+                    "conditions": [{"field": "src_mac", "op": "eq", "value": "3a:de:ad:be:ef:00"}]
+                }),
+                emitter_type: Some("wifi_client".to_string()),
+                attributes: serde_json::json!({
+                    "src_mac": "3a:de:ad:be:ef:00",
+                    "randomized_mac": true
+                }),
+                match_enabled: true,
+                identity_key: Some("wifi_client:3a:de:ad:be:ef:00".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let (events_tx, _rx) = broadcast::channel(8);
+        let ctx = IngestCtx {
+            pool: pool.clone(),
+            sessions: Some(Arc::new(manager)),
+            events: events_tx,
+            secret_key: [0x11u8; 32],
+        };
+
+        let obs = association_obs("3a:de:ad:be:ef:00", "aa:bb:cc:dd:ee:ff", "HomeNet", base);
+        let emission = ingest(&ctx, ds, obs).await.expect("ingest ok");
+
+        assert_eq!(
+            emission.emitter_id,
+            Some(client.id),
+            "association must attach to the client, not the AP"
+        );
+
+        let got = EmitterRepo::get(&pool, client.id).await.unwrap().unwrap();
+        assert_eq!(got.attributes["connected_bssid"], "aa:bb:cc:dd:ee:ff");
+        assert_eq!(got.attributes["connected_ssid"], "HomeNet");
+        assert_eq!(got.attributes["src_mac"], "3a:de:ad:be:ef:00");
+
+        let got_ap = EmitterRepo::get(&pool, ap.id).await.unwrap().unwrap();
+        assert!(got_ap.attributes.get("connected_bssid").is_none());
+    }
+
+    #[tokio::test]
+    async fn ingest_association_auto_creates_client_with_connected_ap() {
+        let pool = fresh_pool().await;
+        let ds =
+            seed_wifi_source_with_config(&pool, serde_json::json!({"auto_create_emitters": true}))
+                .await;
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+
+        let (events_tx, _rx) = broadcast::channel(8);
+        let ctx = IngestCtx {
+            pool: pool.clone(),
+            sessions: Some(Arc::new(manager)),
+            events: events_tx,
+            secret_key: [0x11u8; 32],
+        };
+
+        let obs = association_obs("3a:de:ad:be:ef:00", "aa:bb:cc:dd:ee:ff", "HomeNet", base);
+        let emission = ingest(&ctx, ds, obs).await.expect("ingest ok");
+
+        let emitter_id = emission.emitter_id.expect("auto-created client emitter");
+        let created = EmitterRepo::get(&pool, emitter_id).await.unwrap().unwrap();
+        assert_eq!(created.emitter_type.as_deref(), Some("wifi_client"));
+        assert_eq!(created.attributes["src_mac"], "3a:de:ad:be:ef:00");
+        assert_eq!(created.attributes["connected_bssid"], "aa:bb:cc:dd:ee:ff");
+        assert_eq!(created.attributes["connected_ssid"], "HomeNet");
+    }
+
+    #[tokio::test]
+    async fn ingest_association_unassigned_when_no_client_and_auto_create_off() {
+        let pool = fresh_pool().await;
+        let ds = seed_wifi_source(&pool).await; // no auto_create config => off
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+
+        let (events_tx, _rx) = broadcast::channel(8);
+        let ctx = IngestCtx {
+            pool: pool.clone(),
+            sessions: Some(Arc::new(manager)),
+            events: events_tx,
+            secret_key: [0x11u8; 32],
+        };
+
+        let obs = association_obs("3a:de:ad:be:ef:00", "aa:bb:cc:dd:ee:ff", "HomeNet", base);
+        let emission = ingest(&ctx, ds, obs).await.expect("ingest ok");
+        assert_eq!(
+            emission.emitter_id, None,
+            "no client emitter and auto-create off => unassigned, no enrichment, no panic"
+        );
     }
 }
