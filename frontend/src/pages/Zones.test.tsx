@@ -1,17 +1,20 @@
-// Task 9.8 acceptance tests. The key RED->GREEN targets per the task brief:
-// creating a zone POSTs `{name, center:{lon,lat}, radius_m, notes}` (with
-// `center` numeric and nested, not flattened) and the detail view renders
-// the emitters/entities the API says are currently in the zone. Also covers
-// client-side lat/lon/radius validation (out-of-range values block the POST
-// entirely — the backend's own `validate_zone` range is mirrored here so bad
-// input never leaves the browser) and the list/edit/delete flows.
+// Task 9.8 acceptance tests, pared down for Task 5's list-pages UX cleanup:
+// each zone's name now links to its own deep-linkable detail page
+// (`/zones/:id`, `pages/ZoneDetailPage.tsx`, see `ZoneDetailPage.test.tsx`
+// for the subjects-in-zone/edit/delete coverage that used to live here
+// inline). This file only covers what's still true of the list itself:
+// rendering the list, and add-zone (including the client-side lat/lon/radius
+// validation — out-of-range values block the POST entirely, mirroring the
+// backend's own `validate_zone` range so bad input never leaves the
+// browser).
 import type { ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { afterEach, expect, test, vi } from 'vitest';
 import Zones from './Zones';
 import { jsonResponse } from '../test-utils/fetchMocks';
-import type { Zone, ZoneDetail } from '../api/zones';
+import type { Zone } from '../api/zones';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -19,7 +22,11 @@ afterEach(() => {
 
 function wrapper({ children }: { children: ReactNode }) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+  return (
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter>{children}</MemoryRouter>
+    </QueryClientProvider>
+  );
 }
 
 /** Method+pathname-aware fetch mock — same convention as
@@ -47,28 +54,6 @@ const ZONE_1: Zone = {
   radius_m: 50,
   notes: 'Front yard perimeter',
   created_at: '2026-01-01T00:00:00Z',
-};
-
-const ZONE_1_DETAIL: ZoneDetail = {
-  ...ZONE_1,
-  emitters: [
-    {
-      id: 'emitter-1',
-      name: "Bob's Phone",
-      type: 'wifi-client',
-      entity_id: 'entity-1',
-      match_criteria: { match: 'all', conditions: [] },
-      first_seen_at: '2026-06-01T00:00:00Z',
-      last_seen_at: '2026-07-04T12:00:00Z',
-      created_at: '2026-06-01T00:00:00Z',
-      emitter_type: null,
-      attributes: {},
-      match_enabled: true,
-      type_label: 'wifi-client',
-      category: null,
-    },
-  ],
-  entities: [{ id: 'entity-1', name: 'Bob', notes: null, created_at: '2026-06-01T00:00:00Z' }],
 };
 
 const ZONE_2: Zone = {
@@ -100,6 +85,16 @@ test('renders the zones list with name, center, and radius', async () => {
   expect(screen.getByTestId('zone-center-zone-1')).toHaveTextContent('1.5');
   expect(screen.getByTestId('zone-center-zone-1')).toHaveTextContent('2.5');
   expect(screen.getByTestId('zone-radius-zone-1')).toHaveTextContent('50');
+});
+
+test('a zone name links to its detail page', async () => {
+  const fetchMock = mockRoutes(baseRoutes());
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Zones />, { wrapper });
+
+  const link = await screen.findByRole('link', { name: /home/i });
+  expect(link).toHaveAttribute('href', '/zones/zone-1');
 });
 
 test('add zone: submitting name/lat/lon/radius/notes POSTs /api/zones with {name, center:{lon,lat}, radius_m, notes}', async () => {
@@ -185,100 +180,4 @@ test('a zero radius shows a validation error and does not POST', async () => {
 
   expect(await screen.findByRole('alert')).toHaveTextContent(/radius/i);
   expect(fetchMock).not.toHaveBeenCalledWith('/api/zones', expect.objectContaining({ method: 'POST' }));
-});
-
-test('viewing a zone shows the emitters and entities currently in it', async () => {
-  const fetchMock = mockRoutes(
-    baseRoutes({
-      'GET /api/zones/zone-1': () => ZONE_1_DETAIL,
-    }),
-  );
-  vi.stubGlobal('fetch', fetchMock);
-
-  render(<Zones />, { wrapper });
-  await screen.findByTestId('zone-row-zone-1');
-
-  fireEvent.click(within(screen.getByTestId('zone-row-zone-1')).getByRole('button', { name: /home/i }));
-
-  const detail = await screen.findByTestId('zone-detail-zone-1');
-  await within(detail).findByText("Bob's Phone");
-  expect(within(detail).getByText('Bob')).toBeInTheDocument();
-});
-
-test('viewing an empty zone shows a "no subjects" message', async () => {
-  const fetchMock = mockRoutes(
-    baseRoutes({
-      'GET /api/zones/zone-1': () => ({ ...ZONE_1, emitters: [], entities: [] }),
-    }),
-  );
-  vi.stubGlobal('fetch', fetchMock);
-
-  render(<Zones />, { wrapper });
-  await screen.findByTestId('zone-row-zone-1');
-
-  fireEvent.click(within(screen.getByTestId('zone-row-zone-1')).getByRole('button', { name: /home/i }));
-
-  const detail = await screen.findByTestId('zone-detail-zone-1');
-  await within(detail).findByText(/no subjects currently in this zone/i);
-});
-
-test('editing a zone PATCHes /api/zones/:id with the updated fields', async () => {
-  const fetchMock = mockRoutes(
-    baseRoutes({
-      'GET /api/zones/zone-1': () => ZONE_1_DETAIL,
-      'PATCH /api/zones/zone-1': () => ({ ...ZONE_1, name: 'Home Base', radius_m: 75 }),
-    }),
-  );
-  vi.stubGlobal('fetch', fetchMock);
-
-  render(<Zones />, { wrapper });
-  await screen.findByTestId('zone-row-zone-1');
-
-  fireEvent.click(within(screen.getByTestId('zone-row-zone-1')).getByRole('button', { name: /home/i }));
-  const detail = await screen.findByTestId('zone-detail-zone-1');
-
-  fireEvent.click(within(detail).getByRole('button', { name: /edit/i }));
-  await screen.findByRole('heading', { name: /edit zone/i });
-
-  fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: 'Home Base' } });
-  fireEvent.change(screen.getByLabelText(/radius/i), { target: { value: '75' } });
-  fireEvent.click(screen.getByRole('button', { name: /save/i }));
-
-  await waitFor(() =>
-    expect(fetchMock).toHaveBeenCalledWith('/api/zones/zone-1', expect.objectContaining({ method: 'PATCH' })),
-  );
-  const patchCall = fetchMock.mock.calls.find(
-    ([url, init]) => String(url) === '/api/zones/zone-1' && init?.method === 'PATCH',
-  );
-  const [, init] = patchCall as [RequestInfo | URL, RequestInit];
-  const body = JSON.parse(init.body as string);
-  expect(body).toEqual({
-    name: 'Home Base',
-    center: { lon: 2.5, lat: 1.5 },
-    radius_m: 75,
-    notes: 'Front yard perimeter',
-  });
-});
-
-test('deleting a zone confirms then DELETEs /api/zones/:id', async () => {
-  const fetchMock = mockRoutes(
-    baseRoutes({
-      'GET /api/zones/zone-1': () => ZONE_1_DETAIL,
-      'DELETE /api/zones/zone-1': () => undefined,
-    }),
-  );
-  vi.stubGlobal('fetch', fetchMock);
-  vi.stubGlobal('confirm', vi.fn(() => true));
-
-  render(<Zones />, { wrapper });
-  await screen.findByTestId('zone-row-zone-1');
-
-  fireEvent.click(within(screen.getByTestId('zone-row-zone-1')).getByRole('button', { name: /home/i }));
-  const detail = await screen.findByTestId('zone-detail-zone-1');
-
-  fireEvent.click(within(detail).getByRole('button', { name: /delete/i }));
-
-  await waitFor(() =>
-    expect(fetchMock).toHaveBeenCalledWith('/api/zones/zone-1', expect.objectContaining({ method: 'DELETE' })),
-  );
 });
