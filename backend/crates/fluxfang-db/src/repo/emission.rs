@@ -63,6 +63,7 @@ use sqlx::{PgPool, Postgres};
 use uuid::Uuid;
 
 use crate::models::{Emission, NewEmission};
+use crate::resolve_order_by;
 
 pub struct EmissionRepo;
 
@@ -71,6 +72,12 @@ pub struct EmissionRepo;
 const EMISSION_COLUMNS: &str = "id, created_at, data_source_id, emitter_id, session_id, \
      observed_at, signal_strength, kind, payload, \
      ST_X(location::geometry) AS lon, ST_Y(location::geometry) AS lat";
+
+/// Allow-listed sort keys for the emissions list -> SQL ordering expressions.
+/// Only real columns (cheap/indexed); JSONB payload keys and the emitter join
+/// are intentionally excluded.
+const EMISSION_SORTS: &[(&str, &str)] =
+    &[("observed_at", "observed_at"), ("rssi", "signal_strength")];
 
 /// Filter/paginate criteria for [`EmissionRepo::query`]. Build with
 /// `EmissionFilter { data_source_id: Some(id), ..Default::default() }` —
@@ -107,6 +114,10 @@ pub struct EmissionFilter {
     pub emitter_category: Option<String>,
     pub limit: i64,
     pub offset: i64,
+    /// Public sort key (see `EMISSION_SORTS`); unknown/None -> default.
+    pub sort: Option<String>,
+    /// `"asc"`/`"desc"`; other/None -> default direction.
+    pub dir: Option<String>,
 }
 
 impl Default for EmissionFilter {
@@ -127,6 +138,8 @@ impl Default for EmissionFilter {
             emitter_category: None,
             limit: 50,
             offset: 0,
+            sort: None,
+            dir: None,
         }
     }
 }
@@ -404,11 +417,18 @@ impl EmissionRepo {
             .await
             .map_err(EmissionQueryError::Sql)?;
 
+        let order_by = resolve_order_by(
+            filter.sort.as_deref(),
+            filter.dir.as_deref(),
+            EMISSION_SORTS,
+            "observed_at",
+            "DESC",
+        );
         let limit_idx = next_bind;
         let offset_idx = next_bind + 1;
         let data_sql = format!(
             "SELECT {EMISSION_COLUMNS} FROM emission WHERE {where_sql} \
-             ORDER BY observed_at DESC LIMIT ${limit_idx} OFFSET ${offset_idx}"
+             ORDER BY {order_by} LIMIT ${limit_idx} OFFSET ${offset_idx}"
         );
         let mut data_q = sqlx::query_as::<_, Emission>(&data_sql);
         for b in &binds {

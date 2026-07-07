@@ -614,3 +614,87 @@ async fn delete_all_on_empty_table_returns_zero() {
     let deleted = EmissionRepo::delete_all(&pool).await.unwrap();
     assert_eq!(deleted, 0);
 }
+
+// ---------------------------------------------------------------------
+// Task 2: allow-listed `sort`/`dir` (observed_at/rssi) via resolve_order_by.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn query_sorts_by_signal_strength_asc_and_desc() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+
+    let e_hi = EmissionRepo::insert(
+        &pool,
+        NewEmission {
+            signal_strength: Some(-30),
+            ..NewEmission::wifi(ds, session, wifi_payload("aa:aa:aa:aa:aa:aa", 1))
+        },
+    )
+    .await
+    .unwrap();
+    let e_lo = EmissionRepo::insert(
+        &pool,
+        NewEmission {
+            signal_strength: Some(-70),
+            ..NewEmission::wifi(ds, session, wifi_payload("bb:bb:bb:bb:bb:bb", 1))
+        },
+    )
+    .await
+    .unwrap();
+    let e_mid = EmissionRepo::insert(
+        &pool,
+        NewEmission {
+            signal_strength: Some(-50),
+            ..NewEmission::wifi(ds, session, wifi_payload("cc:cc:cc:cc:cc:cc", 1))
+        },
+    )
+    .await
+    .unwrap();
+    let _ = (&e_hi, &e_lo, &e_mid);
+
+    let asc = EmissionFilter {
+        sort: Some("rssi".to_string()),
+        dir: Some("asc".to_string()),
+        ..Default::default()
+    };
+    let (rows, _total) = EmissionRepo::query(&pool, asc).await.unwrap();
+    let strengths: Vec<Option<i32>> = rows.iter().map(|e| e.signal_strength).collect();
+    // Ascending by signal_strength: -70, -50, -30.
+    assert_eq!(strengths, vec![Some(-70), Some(-50), Some(-30)]);
+
+    let desc = EmissionFilter {
+        sort: Some("rssi".to_string()),
+        dir: Some("desc".to_string()),
+        ..Default::default()
+    };
+    let (rows, _total) = EmissionRepo::query(&pool, desc).await.unwrap();
+    let strengths: Vec<Option<i32>> = rows.iter().map(|e| e.signal_strength).collect();
+    assert_eq!(strengths, vec![Some(-30), Some(-50), Some(-70)]);
+}
+
+#[tokio::test]
+async fn query_default_sort_is_observed_at_desc() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+
+    let now = Utc::now();
+    let t1 = NewEmission {
+        observed_at: now - Duration::hours(2),
+        ..NewEmission::wifi(ds, session, wifi_payload("aa:aa:aa:aa:aa:aa", 1))
+    };
+    let t2 = NewEmission {
+        observed_at: now,
+        ..NewEmission::wifi(ds, session, wifi_payload("bb:bb:bb:bb:bb:bb", 1))
+    };
+    EmissionRepo::insert(&pool, t1).await.unwrap();
+    EmissionRepo::insert(&pool, t2).await.unwrap();
+
+    let (rows, _total) = EmissionRepo::query(&pool, EmissionFilter::default())
+        .await
+        .unwrap();
+    // Newest first (unchanged default).
+    assert!(rows[0].observed_at >= rows[rows.len() - 1].observed_at);
+}

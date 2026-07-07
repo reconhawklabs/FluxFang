@@ -201,6 +201,8 @@ fn parse_filter(raw: &str) -> Result<EmissionFilter, ApiError> {
     let mut cond_raw: Vec<String> = Vec::new();
     let mut emitter_type = None;
     let mut emitter_category = None;
+    let mut sort = None;
+    let mut dir = None;
 
     for (key, value) in form_urlencoded::parse(raw.as_bytes()) {
         match key.as_ref() {
@@ -219,6 +221,8 @@ fn parse_filter(raw: &str) -> Result<EmissionFilter, ApiError> {
             "cond" => cond_raw.push(value.into_owned()),
             "emitter_type" => emitter_type = Some(value.into_owned()),
             "emitter_category" => emitter_category = Some(value.into_owned()),
+            "sort" => sort = Some(value.into_owned()),
+            "dir" => dir = Some(value.into_owned()),
             _ => {}
         }
     }
@@ -251,6 +255,8 @@ fn parse_filter(raw: &str) -> Result<EmissionFilter, ApiError> {
         emitter_category,
         limit,
         offset,
+        sort,
+        dir,
     })
 }
 
