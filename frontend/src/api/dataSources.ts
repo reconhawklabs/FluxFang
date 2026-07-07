@@ -7,12 +7,14 @@
 // `config`'s shape depends on `kind`/`mode` (see `capture::validate_data_source`
 // for the exact rules this UI must satisfy before submitting):
 //   - wifi + monitor  -> top-level `interface` set, `config: {}`
+//   - bluetooth + scan -> top-level `interface` set, `config: {
+//     auto_create_emitters, active_scan }`
 //   - gps  + gpsd     -> `config: { host, port }`
 //   - gps  + serial   -> `config: { device, baud }`, `baud` one of
 //     `BAUD_RATES` (the backend's `ALLOWED_BAUD_RATES`)
 import { del, get, post } from "./client";
 
-export type DataSourceKind = "wifi" | "gps";
+export type DataSourceKind = "wifi" | "gps" | "bluetooth";
 export type DataSourceMode = "monitor" | "scan" | "gpsd" | "serial";
 export type DataSourceStatus = "stopped" | "starting" | "running" | "error";
 
@@ -43,8 +45,18 @@ export interface WifiConfig {
   auto_create_emitters?: boolean;
 }
 
+/** bluetooth's `config` — like wifi, the adapter lives on the top-level
+ * `interface` field; `auto_create_emitters` mirrors wifi's checkbox, and
+ * `active_scan` toggles active (scan-request) vs. passive BLE advertisement
+ * scanning. Both optional/omittable so existing sources without them still
+ * narrow. */
+export interface BtConfig {
+  auto_create_emitters?: boolean;
+  active_scan?: boolean;
+}
+
 export type DataSourceConfig =
-  WifiConfig | GpsdConfig | SerialConfig | Record<string, never>;
+  WifiConfig | BtConfig | GpsdConfig | SerialConfig | Record<string, never>;
 
 /** Mirrors `fluxfang_db::models::DataSource` exactly. */
 export interface DataSource {
@@ -61,7 +73,7 @@ export interface DataSource {
 /** A GPS data source provides *location*, not emissions — so it must not
  * appear anywhere emissions are scoped/filtered by source (dashboard feed
  * tabs, the Emissions page's data-source dropdown, the Map page's Sources
- * group). Everything else (currently only wifi) does emit. */
+ * group). Everything else (wifi, bluetooth) does emit. */
 export function isEmittingSource(source: DataSource): boolean {
   return source.kind !== "gps";
 }
@@ -107,6 +119,7 @@ export function deleteDataSource(id: string): Promise<void> {
 export interface CaptureDevices {
   wifi_interfaces: string[];
   serial_devices: string[];
+  bluetooth_interfaces: string[];
 }
 
 export function listCaptureDevices(): Promise<CaptureDevices> {

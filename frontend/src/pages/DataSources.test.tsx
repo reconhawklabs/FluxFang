@@ -100,10 +100,14 @@ test('renders the source list with color-coded status badges and last_error', as
 });
 
 /** `GET /api/system/capture-devices` fixture builder — the Add form fetches
- * this whenever it's mounted (both wifi and gps-serial paths depend on it),
- * so every Add-form test below registers a route for it. */
-function captureDevices(wifiInterfaces: string[], serialDevices: string[]) {
-  return { wifi_interfaces: wifiInterfaces, serial_devices: serialDevices };
+ * this whenever it's mounted (wifi, gps-serial, and bluetooth paths all
+ * depend on it), so every Add-form test below registers a route for it. */
+function captureDevices(wifiInterfaces: string[], serialDevices: string[], bluetoothInterfaces: string[] = []) {
+  return {
+    wifi_interfaces: wifiInterfaces,
+    serial_devices: serialDevices,
+    bluetooth_interfaces: bluetoothInterfaces,
+  };
 }
 
 test('add source: wifi kind with enumerated interfaces shows a Mode dropdown and an interface SELECT (not free text), and posts the chosen mode/interface', async () => {
@@ -226,6 +230,81 @@ test('add source: wifi kind — SSID Scan mode also shows the auto-create checkb
   fireEvent.change(await screen.findByLabelText(/^mode$/i), { target: { value: 'scan' } });
 
   expect(screen.getByLabelText(/automatically create emitters/i)).toBeInTheDocument();
+});
+
+test('add source: bluetooth kind — picking an adapter and enabling Active Scanning posts the scan config', async () => {
+  const created: DataSource = {
+    id: 'new-bt',
+    created_at: '2026-01-01T00:00:00Z',
+    kind: 'bluetooth',
+    mode: 'scan',
+    interface: 'hci0',
+    status: 'stopped',
+    config: { auto_create_emitters: false, active_scan: true },
+    last_error: null,
+  };
+  const fetchMock = mockMethodRoutes({
+    'GET /api/data-sources': () => [],
+    'GET /api/system/capture-devices': () => captureDevices([], [], ['hci0']),
+    'POST /api/data-sources': () => created,
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<DataSources />, { wrapper });
+  await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+
+  fireEvent.click(screen.getByRole('button', { name: /add data source/i }));
+  fireEvent.change(screen.getByLabelText(/^kind$/i), { target: { value: 'bluetooth' } });
+
+  const ifaceField = await screen.findByLabelText(/adapter/i);
+  expect(ifaceField.tagName).toBe('SELECT');
+  const ifaceOptions = within(ifaceField as HTMLSelectElement)
+    .getAllByRole('option')
+    .map((o) => o.textContent);
+  expect(ifaceOptions).toEqual(['Select an adapter…', 'hci0']);
+  fireEvent.change(ifaceField, { target: { value: 'hci0' } });
+
+  const activeScanCheckbox = screen.getByLabelText(/enable active scanning/i);
+  expect(activeScanCheckbox).not.toBeChecked();
+  fireEvent.click(activeScanCheckbox);
+  expect(activeScanCheckbox).toBeChecked();
+
+  const submitButton = screen.getByRole('button', { name: /^add$|^create$|^save$/i });
+  expect(submitButton).not.toBeDisabled();
+  fireEvent.click(submitButton);
+
+  await waitFor(() => expect(screen.queryByLabelText(/adapter/i)).not.toBeInTheDocument());
+
+  const postCall = fetchMock.mock.calls.find(([, init]) => init?.method === 'POST');
+  expect(postCall).toBeDefined();
+  const [url, init] = postCall as [RequestInfo | URL, RequestInit];
+  expect(String(url)).toBe('/api/data-sources');
+  expect(JSON.parse(init.body as string)).toEqual({
+    kind: 'bluetooth',
+    mode: 'scan',
+    interface: 'hci0',
+    config: { auto_create_emitters: false, active_scan: true },
+  });
+});
+
+test('add source: bluetooth kind with NO enumerated adapters shows "No Bluetooth adapter found." and disables the Add button', async () => {
+  const fetchMock = mockMethodRoutes({
+    'GET /api/data-sources': () => [],
+    'GET /api/system/capture-devices': () => captureDevices([], [], []),
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<DataSources />, { wrapper });
+  await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+
+  fireEvent.click(screen.getByRole('button', { name: /add data source/i }));
+  fireEvent.change(screen.getByLabelText(/^kind$/i), { target: { value: 'bluetooth' } });
+
+  expect(await screen.findByText('No Bluetooth adapter found.')).toBeInTheDocument();
+  expect(screen.queryByLabelText(/adapter/i)).not.toBeInTheDocument();
+
+  const submitButton = screen.getByRole('button', { name: /^add$|^create$|^save$/i });
+  expect(submitButton).toBeDisabled();
 });
 
 test('add source: wifi kind with NO enumerated interfaces shows "No compatible WiFi card found." and disables the Add button, with no text input fallback', async () => {
