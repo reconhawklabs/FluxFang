@@ -399,7 +399,25 @@ async fn attach_emissions_matching_bluetooth_filters_by_kind_and_catalog() {
         .unwrap();
         e.id
     };
-    let _wifi_emission_id = insert_unassigned_wifi(&pool, ds, session, "aa:bb:cc:dd:ee:ff").await;
+    // Same payload shape/value as the bluetooth emission above (an
+    // "address" field with the identical value) — only the `kind` filter
+    // distinguishes the two rows, so this genuinely exercises the `kind =
+    // $2` filter rather than merely benefiting from a catalog/field
+    // mismatch (see Task 4 review finding: the previous wifi row used a
+    // `bssid`/`channel` payload, which was excluded on shape alone).
+    let wifi_emission_id = {
+        let e = EmissionRepo::insert(
+            &pool,
+            NewEmission::wifi(
+                ds,
+                session,
+                serde_json::json!({"address": "aa:bb:cc:dd:ee:ff"}),
+            ),
+        )
+        .await
+        .unwrap();
+        e.id
+    };
 
     let emitter = EmitterRepo::insert(
         &pool,
@@ -427,6 +445,15 @@ async fn attach_emissions_matching_bluetooth_filters_by_kind_and_catalog() {
         .unwrap()
         .unwrap();
     assert_eq!(emission.emitter_id, Some(emitter_id));
+
+    let wifi_emission = EmissionRepo::get(&pool, wifi_emission_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        wifi_emission.emitter_id, None,
+        "the wifi emission with the same address value must not be attached — only kind differs"
+    );
 }
 
 // ---------------------------------------------------------------------

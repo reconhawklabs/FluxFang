@@ -354,7 +354,7 @@ async fn resolve_match_criteria(
                 value: serde_json::Value::String(bssid.to_string()),
             }],
         };
-        validate_rule(&rule, "wifi").map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        validate_rule(&rule, kind).map_err(|e| ApiError::BadRequest(e.to_string()))?;
         let json = serde_json::to_value(&rule).expect("Rule always serializes");
         return Ok((json, Some(rule)));
     }
