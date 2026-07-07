@@ -578,6 +578,18 @@ impl EmitterRepo {
         Ok(result.rows_affected())
     }
 
+    /// Distinct `emitter_type` values that actually have at least one emitter
+    /// (NULL excluded), for the stable Type-filter dropdown. Unordered here;
+    /// the API layer attaches labels and sorts.
+    pub async fn distinct_types_in_use(pool: &PgPool) -> Result<Vec<String>, sqlx::Error> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT emitter_type FROM emitter WHERE emitter_type IS NOT NULL",
+        )
+        .fetch_all(pool)
+        .await?;
+        Ok(rows.into_iter().map(|(t,)| t).collect())
+    }
+
     /// Delete every `emitter` row, returning how many were removed. Phase
     /// 1c's "Clear All Emitters" action — an unconditional `DELETE`, no
     /// `WHERE` clause, no confirmation of its own (the caller/UI gates this

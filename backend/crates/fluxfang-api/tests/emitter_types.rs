@@ -1,7 +1,17 @@
+use std::sync::Arc;
+
 use axum::http::StatusCode;
+use serde_json::json;
+
+use fluxfang_api::capture::MockCapturerFactory;
+use fluxfang_db::models::NewEmitter;
+use fluxfang_db::EmitterRepo;
 
 mod common;
-use common::{assert_status, body_json, get, get_with_cookie, post_json, session_cookie, test_app};
+use common::{
+    assert_status, body_json, get, get_with_cookie, post_json, session_cookie, test_app,
+    test_app_with_factory,
+};
 
 /// Log in against a fresh app and return its session cookie, running setup
 /// first since a fresh instance has no password configured yet.
@@ -57,5 +67,73 @@ async fn emitter_types_for_unknown_kind_is_empty_array() {
 async fn emitter_types_requires_auth() {
     let app = test_app().await;
     let resp = get(&app, "/api/emitter-types/wifi").await;
+    assert_status(&resp, StatusCode::UNAUTHORIZED);
+}
+
+// ---------------------------------------------------------------------
+// Task 4: GET /api/emitters/types — the distinct emitter types that
+// actually have emitters, with labels, sorted by label. The stable
+// Type-filter dropdown's backend source.
+// ---------------------------------------------------------------------
+
+/// `GET /api/emitters/types` returns one entry per distinct `emitter_type`
+/// actually in use, each with its machine `key` and human-readable `label`.
+#[tokio::test]
+async fn emitters_types_lists_in_use_types_with_labels() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            name: "BT Device".to_string(),
+            emitter_type: Some("bluetooth_device".to_string()),
+            match_criteria: json!({}),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("seed bluetooth_device emitter");
+    EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            name: "WiFi Client".to_string(),
+            emitter_type: Some("wifi_client".to_string()),
+            match_criteria: json!({}),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("seed wifi_client emitter");
+    // Unclassified emitter — must not appear in the response.
+    EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            name: "Unclassified".to_string(),
+            match_criteria: json!({}),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("seed unclassified emitter");
+
+    let resp = get_with_cookie(&app, "/api/emitters/types", &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let body = body_json(resp).await;
+    let arr = body.as_array().expect("body should be a JSON array");
+    assert_eq!(arr.len(), 2, "body: {body}");
+    assert!(arr
+        .iter()
+        .any(|t| t["key"] == "bluetooth_device" && t["label"] == "Bluetooth Device"));
+    assert!(arr
+        .iter()
+        .any(|t| t["key"] == "wifi_client" && t["label"] == "WiFi Client"));
+}
+
+/// The endpoint is behind auth like every other protected route.
+#[tokio::test]
+async fn emitters_types_requires_auth() {
+    let app = test_app().await;
+    let resp = get(&app, "/api/emitters/types").await;
     assert_status(&resp, StatusCode::UNAUTHORIZED);
 }

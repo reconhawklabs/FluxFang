@@ -1314,6 +1314,69 @@ async fn delete_all_empties_the_table() {
     assert!(all.is_empty());
 }
 
+// ---------------------------------------------------------------------
+// Task 4: EmitterRepo::distinct_types_in_use — the stable Type-filter
+// dropdown's backend source (distinct emitter_type values actually in use,
+// NULL excluded, duplicates collapsed).
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn distinct_types_in_use_returns_only_present_types() {
+    let pool = fresh_pool().await;
+
+    EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            emitter_type: Some("wifi_access_point".to_string()),
+            ..new_emitter("AP One")
+        },
+    )
+    .await
+    .unwrap();
+    EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            emitter_type: Some("wifi_client".to_string()),
+            ..new_emitter("Client One")
+        },
+    )
+    .await
+    .unwrap();
+    EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            emitter_type: Some("wifi_client".to_string()),
+            ..new_emitter("Client Two")
+        },
+    )
+    .await
+    .unwrap();
+    EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            emitter_type: Some("bluetooth_device".to_string()),
+            ..new_emitter("BT One")
+        },
+    )
+    .await
+    .unwrap();
+    // NULL emitter_type — must be excluded.
+    EmitterRepo::insert(&pool, new_emitter("Unclassified"))
+        .await
+        .unwrap();
+
+    let mut types = EmitterRepo::distinct_types_in_use(&pool).await.unwrap();
+    types.sort();
+    assert_eq!(
+        types,
+        vec![
+            "bluetooth_device".to_string(),
+            "wifi_access_point".to_string(),
+            "wifi_client".to_string(),
+        ]
+    );
+}
+
 /// `delete_all` also SET NULLs every emission's `emitter_id`, same as
 /// deleting one emitter at a time would.
 #[tokio::test]

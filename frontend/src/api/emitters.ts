@@ -137,6 +137,15 @@ export interface EmittersPage {
   total: number;
 }
 
+/** `GET /api/emitters/types` — the distinct `emitter_type` values that
+ * actually have at least one emitter, each with its machine `key` and
+ * human-readable `label`, sorted by label. Backs the Emitters page's
+ * Type-filter dropdown with a stable option set, instead of deriving
+ * options from whatever rows happen to be currently loaded/paginated. */
+export function listEmitterTypesInUse(): Promise<EmitterType[]> {
+  return get<EmitterType[]>("/api/emitters/types");
+}
+
 export function listEmitters(
   params: ListEmittersParams = {},
 ): Promise<EmittersPage> {

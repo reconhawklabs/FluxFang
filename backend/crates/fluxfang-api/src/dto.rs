@@ -229,6 +229,17 @@ impl EmitterDto {
     }
 }
 
+/// One entry in `GET /api/emitters/types`' response (Task 4): a machine
+/// `emitter_type` key that actually has at least one emitter, plus its
+/// human-readable label — the stable Type-filter dropdown's backend source,
+/// as opposed to the frontend deriving its options from whatever rows
+/// happen to be loaded.
+#[derive(Debug, Serialize)]
+pub struct EmitterTypeDto {
+    pub key: String,
+    pub label: String,
+}
+
 /// One row in `GET /api/entities`/`POST /api/entities`/`PATCH
 /// /api/entities/:id`, and the base fields `GET /api/entities/:id`'s detail
 /// response (see `entities::EntityDetailDto`) builds on top of (Task 6.5).
