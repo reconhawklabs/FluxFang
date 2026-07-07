@@ -116,6 +116,7 @@ use uuid::Uuid;
 
 use crate::models::{Emitter, Entity, NewEmitter, NewEntity};
 use crate::repo::entity::ENTITY_COLUMNS;
+use crate::sort::resolve_order_by;
 
 pub struct EmitterRepo;
 
@@ -142,6 +143,8 @@ pub struct EmitterListFilter {
     pub emitter_type: Option<String>,
     pub limit: i64,
     pub offset: i64,
+    pub sort: Option<String>,
+    pub dir: Option<String>,
 }
 
 impl Default for EmitterListFilter {
@@ -152,6 +155,8 @@ impl Default for EmitterListFilter {
             emitter_type: None,
             limit: 50,
             offset: 0,
+            sort: None,
+            dir: None,
         }
     }
 }
@@ -165,6 +170,30 @@ impl Default for EmitterListFilter {
 /// built from this constant to pick them up.
 const EMITTER_COLUMNS: &str = "id, created_at, name, type, entity_id, match_criteria, \
      first_seen_at, last_seen_at, emitter_type, attributes, match_enabled, identity_key";
+
+/// Allow-listed emitter sort keys -> SQL ordering expressions. `identity`
+/// mirrors `MacIdentityCell`'s display precedence; `emissions` orders by the
+/// correlated-count alias selected below.
+const EMITTER_SORTS: &[(&str, &str)] = &[
+    ("name", "name"),
+    (
+        "identity",
+        "COALESCE(attributes->>'bssid', attributes->>'src_mac', attributes->>'address')",
+    ),
+    ("first_seen", "first_seen_at"),
+    ("last_seen", "last_seen_at"),
+    ("emissions", "emission_count"),
+];
+
+/// One row of the emitter list query: the emitter plus its correlated
+/// emission count. `#[sqlx(flatten)]` maps the `EMITTER_COLUMNS` into
+/// `emitter` and the extra `emission_count` alias into its own field.
+#[derive(sqlx::FromRow)]
+struct EmitterListRow {
+    #[sqlx(flatten)]
+    emitter: Emitter,
+    emission_count: i64,
+}
 
 /// Error from [`EmitterRepo::attach_emissions_matching`] /
 /// [`EmitterRepo::count_matching`]: either a DB error, or the rule
@@ -389,14 +418,24 @@ impl EmitterRepo {
     /// `text`/ILIKE filter uses); `emitter_type` is likewise bound as a plain
     /// string parameter, never interpolated.
     ///
-    /// Ordered `created_at ASC`, same as [`Self::list`]/[`Self::list_by_entity`].
-    /// Returns the requested page plus `total`, the count of matching rows
-    /// ignoring `limit`/`offset` (for pagination UIs), same shape as
-    /// `repo::emission::EmissionRepo::query`.
+    /// `filter.sort`/`filter.dir` select an `ORDER BY` via
+    /// [`crate::sort::resolve_order_by`] against the [`EMITTER_SORTS`]
+    /// allow-list (`name`, `identity`, `first_seen`, `last_seen`,
+    /// `emissions`), defaulting to `last_seen DESC` (most-recently-seen
+    /// first) when unset or unrecognized — a change from the previous
+    /// unconditional `created_at ASC`.
+    ///
+    /// Every row also carries a correlated `emission_count` — the number of
+    /// `emission` rows currently assigned to that emitter, `0` for an
+    /// emitter with none — selected via a `(SELECT COUNT(*) ...)`
+    /// subquery aliased `emission_count`, which is also what `sort:
+    /// "emissions"` orders by. Returns `(Emitter, emission_count)` pairs
+    /// plus `total`, the count of matching rows ignoring `limit`/`offset`
+    /// (for pagination UIs), same shape as `repo::emission::EmissionRepo::query`.
     pub async fn query(
         pool: &PgPool,
         filter: EmitterListFilter,
-    ) -> Result<(Vec<Emitter>, i64), sqlx::Error> {
+    ) -> Result<(Vec<(Emitter, i64)>, i64), sqlx::Error> {
         let mut clauses: Vec<String> = vec!["TRUE".to_string()];
         let mut next_bind = 1usize;
 
@@ -441,14 +480,28 @@ impl EmitterRepo {
 
         let limit_idx = next_bind;
         let offset_idx = next_bind + 1;
-        let data_sql = format!(
-            "SELECT {EMITTER_COLUMNS} FROM emitter WHERE {where_sql} \
-             ORDER BY created_at ASC LIMIT ${limit_idx} OFFSET ${offset_idx}"
+        let order_by = resolve_order_by(
+            filter.sort.as_deref(),
+            filter.dir.as_deref(),
+            EMITTER_SORTS,
+            "last_seen",
+            "DESC",
         );
-        let data_q = bind_shared!(sqlx::query_as::<_, Emitter>(&data_sql))
+        let data_sql = format!(
+            "SELECT {EMITTER_COLUMNS}, \
+             (SELECT COUNT(*) FROM emission WHERE emission.emitter_id = emitter.id) \
+                 AS emission_count \
+             FROM emitter WHERE {where_sql} \
+             ORDER BY {order_by} LIMIT ${limit_idx} OFFSET ${offset_idx}"
+        );
+        let data_q = bind_shared!(sqlx::query_as::<_, EmitterListRow>(&data_sql))
             .bind(filter.limit)
             .bind(filter.offset);
         let rows = data_q.fetch_all(pool).await?;
+        let rows = rows
+            .into_iter()
+            .map(|r| (r.emitter, r.emission_count))
+            .collect();
 
         Ok((rows, total))
     }

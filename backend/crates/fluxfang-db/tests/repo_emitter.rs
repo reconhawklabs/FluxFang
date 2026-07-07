@@ -833,7 +833,7 @@ async fn query_search_matches_by_name_case_insensitively() {
     .await
     .unwrap();
     assert_eq!(total, 1, "rows: {rows:?}");
-    assert_eq!(rows[0].name, "Cafe Free WiFi");
+    assert_eq!(rows[0].0.name, "Cafe Free WiFi");
 }
 
 /// Typing a MAC/BSSID substring that only appears inside the JSON
@@ -871,7 +871,7 @@ async fn query_search_matches_by_mac_inside_attributes_json() {
     .await
     .unwrap();
     assert_eq!(total, 1, "rows: {rows:?}");
-    assert_eq!(rows[0].id, with_mac.id);
+    assert_eq!(rows[0].0.id, with_mac.id);
 }
 
 /// Same as above but the MAC only appears in `match_criteria`, not
@@ -908,7 +908,7 @@ async fn query_search_matches_by_mac_inside_match_criteria_json() {
     .await
     .unwrap();
     assert_eq!(total, 1, "rows: {rows:?}");
-    assert_eq!(rows[0].id, with_rule.id);
+    assert_eq!(rows[0].0.id, with_rule.id);
 }
 
 #[tokio::test]
@@ -947,7 +947,7 @@ async fn query_entity_id_filters_to_only_that_entitys_emitters() {
     .await
     .unwrap();
     assert_eq!(total, 1, "rows: {rows:?}");
-    assert_eq!(rows[0].id, under_entity.id);
+    assert_eq!(rows[0].0.id, under_entity.id);
 }
 
 #[tokio::test]
@@ -957,11 +957,16 @@ async fn query_paginates_with_correct_total_ignoring_limit_offset() {
         EmitterRepo::insert(&pool, new_emitter(name)).await.unwrap();
     }
 
+    // Explicit `sort: "name"`/`dir: "asc"` for a deterministic page order —
+    // the default order (`last_seen DESC`) ties on these never-seen
+    // emitters' NULL `last_seen_at`, which this test isn't exercising.
     let (page1, total1) = EmitterRepo::query(
         &pool,
         EmitterListFilter {
             limit: 2,
             offset: 0,
+            sort: Some("name".to_string()),
+            dir: Some("asc".to_string()),
             ..Default::default()
         },
     )
@@ -969,14 +974,16 @@ async fn query_paginates_with_correct_total_ignoring_limit_offset() {
     .unwrap();
     assert_eq!(total1, 5);
     assert_eq!(page1.len(), 2);
-    assert_eq!(page1[0].name, "A");
-    assert_eq!(page1[1].name, "B");
+    assert_eq!(page1[0].0.name, "A");
+    assert_eq!(page1[1].0.name, "B");
 
     let (page2, total2) = EmitterRepo::query(
         &pool,
         EmitterListFilter {
             limit: 2,
             offset: 2,
+            sort: Some("name".to_string()),
+            dir: Some("asc".to_string()),
             ..Default::default()
         },
     )
@@ -984,14 +991,16 @@ async fn query_paginates_with_correct_total_ignoring_limit_offset() {
     .unwrap();
     assert_eq!(total2, 5);
     assert_eq!(page2.len(), 2);
-    assert_eq!(page2[0].name, "C");
-    assert_eq!(page2[1].name, "D");
+    assert_eq!(page2[0].0.name, "C");
+    assert_eq!(page2[1].0.name, "D");
 
     let (page3, total3) = EmitterRepo::query(
         &pool,
         EmitterListFilter {
             limit: 2,
             offset: 4,
+            sort: Some("name".to_string()),
+            dir: Some("asc".to_string()),
             ..Default::default()
         },
     )
@@ -999,7 +1008,7 @@ async fn query_paginates_with_correct_total_ignoring_limit_offset() {
     .unwrap();
     assert_eq!(total3, 5);
     assert_eq!(page3.len(), 1);
-    assert_eq!(page3[0].name, "E");
+    assert_eq!(page3[0].0.name, "E");
 }
 
 /// `filter.emitter_type` restricts the list to emitters with that exact
@@ -1041,7 +1050,7 @@ async fn query_emitter_type_filters_to_only_that_type() {
     .await
     .unwrap();
     assert_eq!(total, 1, "rows: {rows:?}");
-    assert_eq!(rows[0].id, ap.id);
+    assert_eq!(rows[0].0.id, ap.id);
 }
 
 /// `emitter_type` combines (ANDed) with `search`/`entity_id`: a matching
@@ -1103,7 +1112,7 @@ async fn query_emitter_type_combines_with_search_and_entity_id() {
     .await
     .unwrap();
     assert_eq!(total, 1, "rows: {rows:?}");
-    assert_eq!(rows[0].id, target.id);
+    assert_eq!(rows[0].0.id, target.id);
 }
 
 /// `emitter_type` also constrains the `total` count, not just the returned
@@ -1145,6 +1154,78 @@ async fn query_emitter_type_total_respects_filter_with_pagination() {
     .unwrap();
     assert_eq!(total, 3, "rows: {rows:?}");
     assert_eq!(rows.len(), 2);
+}
+
+/// `EmitterRepo::query` selects a correlated `emission_count` per emitter
+/// and supports sorting by it (`sort: "emissions"`) — emitters with more
+/// attached emissions sort first when `dir: "desc"`, and an emitter with no
+/// emissions reports `0`, not a missing/null count.
+#[tokio::test]
+async fn query_returns_emission_count_and_sorts_by_it() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+
+    let a = EmitterRepo::insert(&pool, new_emitter("A")).await.unwrap();
+    let b = EmitterRepo::insert(&pool, new_emitter("B")).await.unwrap();
+    let c = EmitterRepo::insert(&pool, new_emitter("C")).await.unwrap();
+
+    for i in 0..2 {
+        insert_wifi_assigned_to(&pool, ds, session, &format!("aa:00:00:00:00:0{i}"), a.id).await;
+    }
+    for i in 0..5 {
+        insert_wifi_assigned_to(&pool, ds, session, &format!("cc:00:00:00:00:0{i}"), c.id).await;
+    }
+
+    let desc = EmitterListFilter {
+        sort: Some("emissions".to_string()),
+        dir: Some("desc".to_string()),
+        ..Default::default()
+    };
+    let (rows, _total) = EmitterRepo::query(&pool, desc).await.unwrap();
+    let counts: Vec<i64> = rows.iter().map(|(_, n)| *n).collect();
+    // Descending by count: 5, 2, 0.
+    assert_eq!(counts, vec![5, 2, 0]);
+    // The emitter with 5 emissions is first.
+    assert_eq!(rows[0].0.id, c.id);
+    // The emitter with 0 emissions reports 0 (not missing).
+    assert_eq!(rows.iter().find(|(e, _)| e.id == b.id).unwrap().1, 0);
+}
+
+/// With no `sort`/`dir` given, `EmitterRepo::query` defaults to
+/// `last_seen DESC` (most-recently-seen first), with a never-seen
+/// (`last_seen_at IS NULL`) emitter sorting last (`NULLS LAST`).
+#[tokio::test]
+async fn query_default_sort_is_last_seen_desc() {
+    let pool = fresh_pool().await;
+
+    let older = EmitterRepo::insert(&pool, new_emitter("Older"))
+        .await
+        .unwrap();
+    let newer = EmitterRepo::insert(&pool, new_emitter("Newer"))
+        .await
+        .unwrap();
+    let never_seen = EmitterRepo::insert(&pool, new_emitter("NeverSeen"))
+        .await
+        .unwrap();
+
+    let older_at = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+    let newer_at = older_at + Duration::hours(1);
+    EmitterRepo::touch_seen(&pool, older.id, older_at)
+        .await
+        .unwrap();
+    EmitterRepo::touch_seen(&pool, newer.id, newer_at)
+        .await
+        .unwrap();
+
+    let (rows, _total) = EmitterRepo::query(&pool, EmitterListFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(rows[0].0.id, newer.id, "most-recently-seen first");
+    assert_eq!(rows[1].0.id, older.id);
+    let last = rows.last().unwrap();
+    assert_eq!(last.0.id, never_seen.id, "never-seen emitter sorts last");
+    assert!(last.0.last_seen_at.is_none());
 }
 
 // ---------------------------------------------------------------------

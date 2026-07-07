@@ -198,6 +198,15 @@ struct ListEmittersQuery {
     limit: Option<i64>,
     #[serde(default)]
     offset: Option<i64>,
+    /// Sort key, allow-listed against `EMITTER_SORTS` (`name`, `identity`,
+    /// `first_seen`, `last_seen`, `emissions`); an unrecognized/absent value
+    /// falls back to `last_seen`. See `EmitterRepo::query`'s doc comment.
+    #[serde(default)]
+    sort: Option<String>,
+    /// Sort direction (`"asc"`/`"desc"`, case-insensitive); anything else
+    /// falls back to the default direction (`desc`).
+    #[serde(default)]
+    dir: Option<String>,
 }
 
 /// `GET /api/emitters`' response — response-shape change from a bare
@@ -219,10 +228,15 @@ async fn list_emitters(
         emitter_type: q.emitter_type,
         limit: q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT),
         offset: q.offset.unwrap_or(0).max(0),
+        sort: q.sort,
+        dir: q.dir,
     };
     let (rows, total) = EmitterRepo::query(&state.pool, filter).await?;
     Ok(Json(EmittersPageDto {
-        items: rows.iter().map(EmitterDto::from).collect(),
+        items: rows
+            .iter()
+            .map(|(e, count)| EmitterDto::from_parts(e, *count))
+            .collect(),
         total,
     }))
 }
