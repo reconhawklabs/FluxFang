@@ -172,6 +172,37 @@ pub fn list_serial_devices() -> Vec<String> {
     paths
 }
 
+/// Filter `/sys/class/bluetooth` entry names to HCI adapter names
+/// (`hci0`, `hci1`, …), sorted and deduped. Pure; unit-testable against a
+/// fixture list.
+fn filter_hci_adapters(names: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = names
+        .iter()
+        .filter(|n| {
+            n.strip_prefix("hci")
+                .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+        })
+        .cloned()
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Lists Bluetooth HCI adapter names by walking `/sys/class/bluetooth`.
+/// Never panics: a missing/unreadable directory (no adapter, restricted
+/// container) yields an empty `Vec`.
+pub fn list_bluetooth_adapters() -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(Path::new("/sys/class/bluetooth")) else {
+        return Vec::new();
+    };
+    let names: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+        .collect();
+    filter_hci_adapters(&names)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,6 +342,26 @@ phy#1
     /// never panic regardless of what hardware (or lack thereof) the test
     /// runner has. Contents aren't asserted since they're host-dependent;
     /// only that the call returns at all.
+    #[test]
+    fn filter_hci_adapters_keeps_only_hci_names_sorted_deduped() {
+        let names = vec![
+            "hci1".to_string(),
+            "rfkill".to_string(),
+            "hci0".to_string(),
+            "hci0".to_string(),
+            "hcixyz".to_string(),
+        ];
+        assert_eq!(
+            filter_hci_adapters(&names),
+            vec!["hci0".to_string(), "hci1".to_string()]
+        );
+    }
+
+    #[test]
+    fn list_bluetooth_adapters_never_panics() {
+        let _ = list_bluetooth_adapters();
+    }
+
     #[test]
     fn list_wifi_interfaces_never_panics() {
         let _ = list_wifi_interfaces();
