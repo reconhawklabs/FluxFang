@@ -422,6 +422,39 @@ test('a probe-request emission (payload.src_mac, no bssid) renders the Src MAC c
   expect(within(row).getByText("de:ad:be:ef:00:01")).toHaveClass("font-mono");
 });
 
+test("renders bluetooth emission fields in the shared columns", async () => {
+  const emissionBluetooth: Emission = {
+    id: "e4",
+    data_source_id: "ds1",
+    emitter_id: null,
+    session_id: null,
+    observed_at: "2026-07-05T12:15:00Z",
+    signal_strength: -65,
+    lon: null,
+    lat: null,
+    kind: "bluetooth",
+    payload: { address: "aa:bb:cc:dd:ee:ff", name: "Johns iPhone" },
+  };
+  const fetchMock = mockRoutes(
+    baseRoutes({
+      "GET /api/emissions": () => ({ items: [emissionBluetooth], total: 1 }),
+    }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<Emissions />, { wrapper });
+  await waitFor(() =>
+    expect(screen.getByTestId("emission-row-e4")).toBeInTheDocument(),
+  );
+
+  expect(screen.getByText("SSID/Name")).toBeInTheDocument();
+  expect(screen.getByText("Channel/Frequency")).toBeInTheDocument();
+  expect(screen.getByTestId("emission-src-mac")).toHaveTextContent(
+    "aa:bb:cc:dd:ee:ff",
+  );
+  expect(screen.getByText("Johns iPhone")).toBeInTheDocument();
+});
+
 // --- Task C: Assign-modal Type dropdown (GET /api/emitter-types/:kind) ---
 
 test('the Assign modal shows a Type <select> (not a text input) with options from the emitter-types endpoint plus "Other"', async () => {

@@ -78,6 +78,19 @@ function payloadText(payload: Record<string, unknown>, key: string): string {
     : "—";
 }
 
+/** Like `payloadText`, but tries each key in turn — the first that's a
+ * string/number wins. Lets one column render either kind's payload shape
+ * (e.g. wifi's `src_mac` or bluetooth's `address`) without a `kind` branch. */
+function payloadTextAny(payload: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = payload[key];
+    if (typeof value === "string" || typeof value === "number") {
+      return String(value);
+    }
+  }
+  return "—";
+}
+
 /** A `DataSource`'s label in the filter dropdown: kind plus whatever
  * identifies it (its interface, when set — wifi monitor sources — or
  * otherwise its mode, e.g. a gpsd/serial gps source with no `interface`). */
@@ -521,8 +534,8 @@ export default function Emissions() {
               <th className="py-2 pr-4 font-medium">Observed At</th>
               <th className="py-2 pr-4 font-medium">BSSID</th>
               <th className="py-2 pr-4 font-medium">Src MAC</th>
-              <th className="py-2 pr-4 font-medium">SSID</th>
-              <th className="py-2 pr-4 font-medium">Channel</th>
+              <th className="py-2 pr-4 font-medium">SSID/Name</th>
+              <th className="py-2 pr-4 font-medium">Channel/Frequency</th>
               <th className="py-2 pr-4 font-medium">RSSI</th>
               <th className="py-2 pr-4 font-medium">Emitter</th>
               <th className="py-2 pr-2 font-medium" />
@@ -554,13 +567,13 @@ export default function Emissions() {
                   data-testid="emission-src-mac"
                   className="py-2 pr-4 font-mono text-slate-300"
                 >
-                  {payloadText(emission.payload, "src_mac")}
+                  {payloadTextAny(emission.payload, ["src_mac", "address"])}
                 </td>
                 <td className="py-2 pr-4 text-slate-300">
-                  {payloadText(emission.payload, "ssid")}
+                  {payloadTextAny(emission.payload, ["ssid", "name"])}
                 </td>
                 <td className="py-2 pr-4 text-slate-300">
-                  {payloadText(emission.payload, "channel")}
+                  {payloadTextAny(emission.payload, ["channel", "frequency"])}
                 </td>
                 <td className="py-2 pr-4 font-mono text-slate-300">
                   {emission.signal_strength ?? "—"}
