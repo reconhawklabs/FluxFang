@@ -7,6 +7,7 @@
 //! for the rest of this crate.
 
 pub mod auth;
+pub mod bluetooth;
 pub mod catalog;
 pub mod classify;
 pub mod rule;
@@ -14,6 +15,7 @@ pub mod rule_sql;
 pub mod secrets;
 
 pub use auth::{hash_password, verify_password};
+pub use bluetooth::{appearance_device_type, cod_device_type, company_name, oui_vendor};
 pub use catalog::{catalog_for, FieldDef, FieldType};
 pub use classify::{
     classify, emitter_category, emitter_type_label, emitter_types_for_kind, is_known_emitter_type,

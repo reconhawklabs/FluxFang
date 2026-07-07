@@ -1,0 +1,5 @@
+# IEEE OUI assignments (seed subset).
+# Regenerate/expand with backend/scripts/fetch-bt-vendor-data.sh
+3C:15:C2	Apple, Inc.
+00:1A:11	Google, Inc.
+FC:FB:FB	Cisco Systems, Inc
