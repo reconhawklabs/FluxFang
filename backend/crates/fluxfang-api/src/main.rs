@@ -28,6 +28,17 @@ async fn main() {
 
     let state = AppState::with_capture(pool, secret_key, Arc::new(RealCapturerFactory));
 
+    // Data sources that were capturing when this process last stopped still
+    // carry `status = 'running'` in Postgres, but the supervisor's in-memory
+    // running set and capture session don't survive a restart. Resume them so
+    // capture actually comes back (rather than a phantom "running" that
+    // captures nothing). Spawned, not awaited, so a slow or unavailable device
+    // can't delay the HTTP listener coming up.
+    let startup = state.clone();
+    tokio::spawn(async move {
+        startup.capture.resume_running().await;
+    });
+
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
     axum::serve(listener, fluxfang_api::app(state))
         .await

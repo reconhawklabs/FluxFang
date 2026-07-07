@@ -11,13 +11,15 @@ use serde_json::json;
 
 use fluxfang_api::capture::MockCapturerFactory;
 use fluxfang_capture::{GpsFix, RawObservation};
+use fluxfang_db::models::NewDataSource;
 use fluxfang_db::repo::emission::EmissionFilter;
-use fluxfang_db::{EmissionRepo, LocationRepo, SessionRepo};
+use fluxfang_db::{DataSourceRepo, EmissionRepo, LocationRepo, SessionRepo};
 
 mod common;
 use common::{
-    assert_status, body_json, delete_with_cookie, get, get_with_cookie, patch_json_with_cookie,
-    post_json, post_json_with_cookie, post_with_cookie, session_cookie, test_app_with_factory,
+    assert_status, body_json, delete_with_cookie, fresh_pool_shared, get, get_with_cookie,
+    patch_json_with_cookie, post_json, post_json_with_cookie, post_with_cookie, session_cookie,
+    state_with_factory, test_app_with_factory,
 };
 
 /// Log in against a fresh app and return its session cookie, running setup
@@ -570,4 +572,185 @@ async fn data_source_endpoints_require_auth() {
         .await,
         StatusCode::UNAUTHORIZED,
     );
+}
+
+/// After a restart, a data source left `status = 'running'` in the DB (whose
+/// in-memory capturer did *not* survive the restart) is genuinely resumed by
+/// `CaptureSupervisor::resume_running` — not merely shown as running, but
+/// actually capturing again: the mock capturer's observation flows through
+/// `ingest` into a queryable emission. Regression guard for the field bug
+/// where a `docker compose down && up` left sources phantom-"running" but
+/// dead.
+#[tokio::test]
+async fn resume_running_restarts_a_wifi_source_after_restart() {
+    let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+    let bssid = "aa:bb:cc:dd:ee:ff";
+    let pool = fresh_pool_shared().await;
+
+    // Model a wifi source that was capturing when the previous process died:
+    // present in the DB and marked running, but with no live supervisor.
+    let created = DataSourceRepo::insert(&pool, NewDataSource::wifi_monitor("wlan0"))
+        .await
+        .expect("insert data source");
+    DataSourceRepo::set_status(&pool, created.id, "running", None)
+        .await
+        .expect("mark running");
+
+    // A fresh supervisor (empty in-memory set) on the same DB == a restart.
+    let factory = Arc::new(MockCapturerFactory::with_wifi_observations(vec![wifi_obs(
+        bssid, base,
+    )]));
+    let state = state_with_factory(pool.clone(), factory);
+    state.capture.resume_running().await;
+
+    // Genuinely resumed: the mock's observation flows through ingest.
+    let found = wait_until(Duration::from_secs(5), || {
+        let pool = pool.clone();
+        async move {
+            let (rows, total) = EmissionRepo::query(
+                &pool,
+                EmissionFilter {
+                    data_source_id: Some(created.id),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("query should succeed");
+            total >= 1 && rows[0].payload["bssid"] == bssid
+        }
+    })
+    .await;
+    assert!(
+        found,
+        "resume_running should restart capture, not just flip status"
+    );
+
+    let row = DataSourceRepo::get(&pool, created.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status, "running");
+}
+
+/// `resume_running` resumes GPS before wifi so the shared survey session is
+/// opened gps-backed. With both a gps and a wifi source left "running", the
+/// gps source must end up `running`, not `error` — the deterministic proof of
+/// ordering: `ensure_gps_session` only succeeds (→ `running`) when the gps
+/// source opens the session itself, which requires it to run *before* any
+/// wifi source opens an `InertGps` session. Resume the other way round and the
+/// gps start is rejected, leaving it `error`. `resume_running().await` commits
+/// both statuses before returning, so no polling (and no unbounded mock-gps
+/// loop) is needed.
+#[tokio::test]
+async fn resume_running_brings_up_gps_before_wifi() {
+    let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+    let pool = fresh_pool_shared().await;
+
+    let gps_src = NewDataSource {
+        config: json!({"host": "127.0.0.1", "port": 2947}),
+        ..NewDataSource::gps_gpsd()
+    };
+    let gps = DataSourceRepo::insert(&pool, gps_src).await.unwrap();
+    DataSourceRepo::set_status(&pool, gps.id, "running", None)
+        .await
+        .unwrap();
+
+    let wifi = DataSourceRepo::insert(&pool, NewDataSource::wifi_monitor("wlan0"))
+        .await
+        .unwrap();
+    DataSourceRepo::set_status(&pool, wifi.id, "running", None)
+        .await
+        .unwrap();
+
+    let factory = Arc::new(MockCapturerFactory::with_gps_fixes(vec![GpsFix {
+        at: base,
+        lon: -122.4,
+        lat: 37.7,
+        altitude: None,
+        speed: None,
+        heading: None,
+        quality: 1,
+    }]));
+    let state = state_with_factory(pool.clone(), factory);
+
+    state.capture.resume_running().await;
+
+    assert_eq!(
+        DataSourceRepo::get(&pool, gps.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "running",
+        "gps must be resumed before wifi so it opens the gps-backed session \
+         (a wifi-first resume would reject the gps start, leaving it 'error')"
+    );
+    assert_eq!(
+        DataSourceRepo::get(&pool, wifi.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "running"
+    );
+}
+
+/// A Stop after a restart must take effect even though this fresh supervisor
+/// has no in-memory handle for the source: the DB's phantom `running` row is
+/// reconciled to `stopped`. This is the exact stuck-"running" symptom from the
+/// field (clicking Stop did nothing after a container restart).
+#[tokio::test]
+async fn stop_reconciles_a_phantom_running_row_after_restart() {
+    let pool = fresh_pool_shared().await;
+    let created = DataSourceRepo::insert(&pool, NewDataSource::wifi_monitor("wlan0"))
+        .await
+        .unwrap();
+    DataSourceRepo::set_status(&pool, created.id, "running", None)
+        .await
+        .unwrap();
+
+    // Fresh supervisor: never started this source, so no in-memory handle.
+    let state = state_with_factory(pool.clone(), Arc::new(MockCapturerFactory::new()));
+    state
+        .capture
+        .stop(created.id)
+        .await
+        .expect("stop should succeed");
+
+    let row = DataSourceRepo::get(&pool, created.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.status, "stopped",
+        "stop must reconcile a phantom-running row after restart"
+    );
+}
+
+/// The phantom-running reconciliation in `stop` is narrow: a Stop on a source
+/// that isn't `running` (e.g. one left in `error`) leaves its status *and*
+/// `last_error` untouched, rather than clobbering them to `stopped`/`None`.
+#[tokio::test]
+async fn stop_leaves_a_non_running_source_untouched() {
+    let pool = fresh_pool_shared().await;
+    let created = DataSourceRepo::insert(&pool, NewDataSource::wifi_monitor("wlan0"))
+        .await
+        .unwrap();
+    DataSourceRepo::set_status(&pool, created.id, "error", Some("boom"))
+        .await
+        .unwrap();
+
+    let state = state_with_factory(pool.clone(), Arc::new(MockCapturerFactory::new()));
+    state
+        .capture
+        .stop(created.id)
+        .await
+        .expect("stop should succeed");
+
+    let row = DataSourceRepo::get(&pool, created.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status, "error");
+    assert_eq!(row.last_error.as_deref(), Some("boom"));
 }

@@ -166,6 +166,23 @@ pub async fn test_app_with_factory(factory: Arc<dyn CapturerFactory>) -> (Router
     (app(state), pool)
 }
 
+/// Build an `AppState` on a caller-supplied pool + factory (same fixed test
+/// key as [`test_app_with_factory`]) *without* wrapping it in a router, so a
+/// test can reach `state.capture` directly — e.g. to drive
+/// `CaptureSupervisor::resume_running`, which has no HTTP route. Pair with
+/// [`fresh_pool_shared`] to build two states on the *same* schema and model a
+/// process restart: the in-memory supervisor state resets while the DB
+/// persists.
+pub fn state_with_factory(pool: PgPool, factory: Arc<dyn CapturerFactory>) -> AppState {
+    AppState::with_capture(pool, TEST_SECRET_KEY, factory)
+}
+
+/// A fresh, schema-isolated, migrated pool — exposed so a test can hand the
+/// *same* pool to two [`state_with_factory`] calls (see its doc comment).
+pub async fn fresh_pool_shared() -> PgPool {
+    fresh_pool().await
+}
+
 /// Run a request against the app via `tower::ServiceExt::oneshot`.
 pub async fn call(app: &Router, req: Request<Body>) -> Response<Body> {
     app.clone().oneshot(req).await.expect("request failed")

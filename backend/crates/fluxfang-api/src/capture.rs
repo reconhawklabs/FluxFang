@@ -772,6 +772,54 @@ impl CaptureSupervisor {
         Ok(())
     }
 
+    /// Reconcile persisted `status = 'running'` rows with this freshly-built
+    /// supervisor's (empty) in-memory running set by actually (re)starting
+    /// capture for each. Call once at process startup: a data source's
+    /// `status` survives a restart in Postgres, but the running capturers and
+    /// the shared survey session do not — so without this, a source that was
+    /// running when the process last stopped comes back as a phantom
+    /// "running" that captures nothing (GPS never acquires, wifi ingests
+    /// nothing), and whose Stop button, with no in-memory handle to remove,
+    /// would silently no-op (now also handled defensively in [`Self::stop`]).
+    ///
+    /// GPS sources are resumed before wifi sources so the shared session is
+    /// opened gps-backed: a wifi-first resume would open an [`InertGps`]
+    /// session that a subsequent gps resume can't join (see
+    /// [`Self::ensure_gps_session`]), needlessly downgrading a gps+wifi survey
+    /// to wifi-only and flipping the gps source to `error`.
+    ///
+    /// Best-effort per source and never fatal: a source whose hardware isn't
+    /// available at boot is flipped to `error`/`last_error` by [`Self::start`]
+    /// itself, leaving the others (and startup) unaffected.
+    pub async fn resume_running(&self) {
+        let sources = match DataSourceRepo::list(&self.pool).await {
+            Ok(sources) => sources,
+            Err(err) => {
+                eprintln!(
+                    "CaptureSupervisor: could not list data sources to resume after restart: \
+                     {err:#}"
+                );
+                return;
+            }
+        };
+
+        let mut to_resume: Vec<DataSource> = sources
+            .into_iter()
+            .filter(|source| source.status == "running")
+            .collect();
+        // gps (0) before wifi (1) — see the doc comment above.
+        to_resume.sort_by_key(|source| if source.kind == "gps" { 0 } else { 1 });
+
+        for source in to_resume {
+            if let Err(err) = self.start(source.id).await {
+                eprintln!(
+                    "CaptureSupervisor: failed to resume data source {} ({}) after restart: {err:#}",
+                    source.id, source.kind
+                );
+            }
+        }
+    }
+
     /// Stop capturing from `data_source_id`.
     ///
     /// No-op (`Ok(())`) if it isn't currently running. Otherwise stops its
@@ -782,6 +830,20 @@ impl CaptureSupervisor {
     pub async fn stop(&self, data_source_id: Uuid) -> anyhow::Result<()> {
         let mut running = self.running.lock().await;
         let Some(handle) = running.remove(&data_source_id) else {
+            // No in-memory handle. Usually the source is already stopped and
+            // this is a harmless no-op — but after a process restart the DB
+            // can still carry `status = 'running'` for a source this fresh
+            // supervisor never started (its in-memory set starts empty;
+            // `resume_running` normally repopulates it, but a source that
+            // failed to resume — or a Stop that races resume — would
+            // otherwise be stuck "running" forever with no handle to remove).
+            // Reconcile only that phantom-running case, leaving an already
+            // `stopped`/`error` row (and its `last_error`) untouched.
+            if let Some(source) = DataSourceRepo::get(&self.pool, data_source_id).await? {
+                if source.status == "running" {
+                    DataSourceRepo::set_status(&self.pool, data_source_id, "stopped", None).await?;
+                }
+            }
             return Ok(());
         };
 
