@@ -7,6 +7,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, expect, test, vi } from "vitest";
 import Emitters from "./Emitters";
@@ -64,6 +65,7 @@ function baseRoutes(
 ) {
   return {
     "GET /api/entities": () => ({ items: [], total: 0 }),
+    "GET /api/emitters/types": () => [],
     ...overrides,
   };
 }
@@ -85,6 +87,7 @@ const EMITTER_UNASSIGNED: Emitter = {
   first_seen_at: "2026-07-01T00:00:00Z",
   last_seen_at: "2026-07-04T12:00:00Z",
   created_at: "2026-07-01T00:00:00Z",
+  emission_count: 0,
 };
 
 const EMITTER_ASSIGNED: Emitter = {
@@ -101,6 +104,7 @@ const EMITTER_ASSIGNED: Emitter = {
   first_seen_at: null,
   last_seen_at: null,
   created_at: "2026-07-01T00:00:00Z",
+  emission_count: 0,
 };
 
 /** An auto-classified WiFi client emitter (Phase A backend / Phase B
@@ -123,6 +127,7 @@ const EMITTER_CLIENT: Emitter = {
   first_seen_at: "2026-07-05T00:00:00Z",
   last_seen_at: "2026-07-05T01:00:00Z",
   created_at: "2026-07-05T00:00:00Z",
+  emission_count: 42,
 };
 
 /** An auto-classified WiFi access-point emitter with a visible SSID and no
@@ -144,6 +149,7 @@ const EMITTER_AP: Emitter = {
   first_seen_at: "2026-07-05T00:00:00Z",
   last_seen_at: "2026-07-05T01:00:00Z",
   created_at: "2026-07-05T00:00:00Z",
+  emission_count: 7,
 };
 
 const ENTITY_1: Entity = {
@@ -503,13 +509,17 @@ test("choosing an entity in the filter refetches with the entity_id param", asyn
   });
 });
 
-test('the Type filter offers "All types" plus the distinct emitter types in the result set', async () => {
+test('the Type filter offers "All types" plus the in-use types from the stable endpoint', async () => {
   const fetchMock = mockRoutes(
     baseRoutes({
       "GET /api/emitters": () => ({
         items: [EMITTER_CLIENT, EMITTER_AP],
         total: 2,
       }),
+      "GET /api/emitters/types": () => [
+        { key: "wifi_client", label: "WiFi Client" },
+        { key: "wifi_access_point", label: "WiFi Access Point" },
+      ],
     }),
   );
   vi.stubGlobal("fetch", fetchMock);
@@ -525,13 +535,61 @@ test('the Type filter offers "All types" plus the distinct emitter types in the 
   expect(
     within(typeSelect).getByRole("option", { name: "All types" }),
   ).toBeInTheDocument();
-  // Derived from the two loaded emitters' distinct type labels.
+  // Populated from `GET /api/emitters/types`, not derived from loaded rows.
   expect(
     within(typeSelect).getByRole("option", { name: "WiFi Client" }),
   ).toHaveValue("wifi_client");
   expect(
     within(typeSelect).getByRole("option", { name: "WiFi Access Point" }),
   ).toHaveValue("wifi_access_point");
+});
+
+test("shows the emission count column and sorts when a header is clicked", async () => {
+  let lastEmittersUrl: URL | null = null;
+  const fetchMock = mockRoutes(
+    baseRoutes({
+      "GET /api/emitters": (url) => {
+        lastEmittersUrl = url;
+        return { items: [EMITTER_CLIENT], total: 1 };
+      },
+    }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<Emitters />, { wrapper });
+  expect(await screen.findByText("42")).toBeInTheDocument();
+
+  // Click the "Last Seen" header -> toggles to ascending (default is desc).
+  await userEvent.click(screen.getByRole("button", { name: /Last Seen/ }));
+
+  // The most recent listEmitters call carries sort=last_seen & dir=asc.
+  await waitFor(() => {
+    expect(lastEmittersUrl?.searchParams.get("sort")).toBe("last_seen");
+    expect(lastEmittersUrl?.searchParams.get("dir")).toBe("asc");
+  });
+});
+
+test("populates the Type filter from the in-use endpoint, stable across selection", async () => {
+  const fetchMock = mockRoutes(
+    baseRoutes({
+      "GET /api/emitters": () => ({ items: [EMITTER_CLIENT], total: 1 }),
+      "GET /api/emitters/types": () => [
+        { key: "wifi_client", label: "WiFi Client" },
+        { key: "bluetooth_device", label: "Bluetooth Device" },
+      ],
+    }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<Emitters />, { wrapper });
+
+  // Both options are present even though the only loaded row is wifi_client.
+  expect(
+    await screen.findByRole("option", { name: "Bluetooth Device" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("option", { name: "WiFi Client" }),
+  ).toBeInTheDocument();
 });
 
 test("choosing a type in the Type filter refetches with the emitter_type param", async () => {
@@ -541,6 +599,10 @@ test("choosing a type in the Type filter refetches with the emitter_type param",
         items: [EMITTER_CLIENT, EMITTER_AP],
         total: 2,
       }),
+      "GET /api/emitters/types": () => [
+        { key: "wifi_client", label: "WiFi Client" },
+        { key: "wifi_access_point", label: "WiFi Access Point" },
+      ],
     }),
   );
   vi.stubGlobal("fetch", fetchMock);

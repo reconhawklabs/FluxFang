@@ -38,12 +38,14 @@ import {
   clearEmitters,
   deleteEmitter,
   listEmitters,
+  listEmitterTypesInUse,
   patchEmitter,
 } from "../api/emitters";
 import type { Emitter, ListEmittersParams } from "../api/emitters";
 import Pagination from "../components/Pagination";
 import SearchBar from "../components/SearchBar";
 import SelectionToolbar from "../components/SelectionToolbar";
+import { SortableTh, type SortDir } from "../components/SortableTh";
 import { useRowSelection } from "../hooks/useRowSelection";
 import {
   MacIdentityCell,
@@ -72,6 +74,8 @@ export default function Emitters() {
   const [emitterType, setEmitterType] = useState(ALL_TYPES_VALUE);
   const [limit, setLimit] = useState(DEFAULT_LIMIT);
   const [offset, setOffset] = useState(0);
+  const [sortKey, setSortKey] = useState<string>("last_seen");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
 
   const queryParams = useMemo<ListEmittersParams>(() => {
     const params: ListEmittersParams = { limit, offset };
@@ -79,8 +83,10 @@ export default function Emitters() {
     if (trimmedQ.length > 0) params.search = trimmedQ;
     if (entityId.length > 0) params.entity_id = entityId;
     if (emitterType.length > 0) params.emitter_type = emitterType;
+    params.sort = sortKey;
+    params.dir = sortDir;
     return params;
-  }, [q, entityId, emitterType, limit, offset]);
+  }, [q, entityId, emitterType, limit, offset, sortKey, sortDir]);
 
   const emittersQuery = useQuery({
     queryKey: [...queryKeys.emitters, JSON.stringify(queryParams)],
@@ -112,25 +118,15 @@ export default function Emitters() {
   const itemIds = emitters.map((emitter) => emitter.id);
   const selection = useRowSelection(itemIds);
 
-  // Type-filter dropdown options — distinct non-null `emitter_type` keys from
-  // the current result set (paired with each type's human `type_label`),
-  // same "derive from what's loaded" approach `MapView` uses for its category
-  // layers. Server-side filtering means once a type is picked the result set
-  // is all that one type, so it stays present; clearing back to "All types"
-  // restores the full spread on the next unfiltered fetch.
-  const typeOptions = useMemo(() => {
-    const byKey = new Map<string, string>();
-    for (const emitter of emitters) {
-      if (emitter.emitter_type)
-        byKey.set(
-          emitter.emitter_type,
-          emitter.type_label ?? emitter.emitter_type,
-        );
-    }
-    return Array.from(byKey, ([key, label]) => ({ key, label })).sort((a, b) =>
-      a.label.localeCompare(b.label),
-    );
-  }, [emitters]);
+  // Type-filter dropdown options — the stable, server-side "in use" set
+  // (`GET /api/emitters/types`), not derived from whatever page of rows
+  // happens to be currently loaded, so a selection stays populated even when
+  // the filtered result set narrows to a single type.
+  const typesQuery = useQuery({
+    queryKey: [...queryKeys.emitters, "types-in-use"],
+    queryFn: listEmitterTypesInUse,
+  });
+  const typeOptions = typesQuery.data ?? [];
 
   function invalidateEmitters(): void {
     void queryClient.invalidateQueries({ queryKey: queryKeys.emitters });
@@ -153,6 +149,16 @@ export default function Emitters() {
 
   function handleTypeFilterChange(next: string): void {
     setEmitterType(next);
+    resetToFirstPage();
+  }
+
+  function handleSort(key: string): void {
+    if (sortKey === key) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir("asc");
+    }
     resetToFirstPage();
   }
 
@@ -333,11 +339,12 @@ export default function Emitters() {
                   className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
                 />
               </th>
-              <th className="py-2 pr-4 font-medium">Name</th>
+              <SortableTh label="Name" sortKey="name" activeKey={sortKey} activeDir={sortDir} onSort={handleSort} />
               <th className="py-2 pr-4 font-medium">Type</th>
-              <th className="py-2 pr-4 font-medium">MAC/Identity</th>
-              <th className="py-2 pr-4 font-medium">First Seen</th>
-              <th className="py-2 pr-4 font-medium">Last Seen</th>
+              <SortableTh label="MAC/Identity" sortKey="identity" activeKey={sortKey} activeDir={sortDir} onSort={handleSort} />
+              <SortableTh label="First Seen" sortKey="first_seen" activeKey={sortKey} activeDir={sortDir} onSort={handleSort} />
+              <SortableTh label="Last Seen" sortKey="last_seen" activeKey={sortKey} activeDir={sortDir} onSort={handleSort} />
+              <SortableTh label="Emissions" sortKey="emissions" activeKey={sortKey} activeDir={sortDir} onSort={handleSort} className="py-2 pr-4 font-medium text-right" />
               <th className="py-2 pr-4 font-medium">Entity</th>
               <th className="py-2 pr-2 font-medium">Actions</th>
             </tr>
@@ -390,6 +397,9 @@ export default function Emitters() {
                   </td>
                   <td className="py-2 pr-4 whitespace-nowrap text-slate-300">
                     {formatCompact(emitter.last_seen_at)}
+                  </td>
+                  <td className="py-2 pr-4 text-right font-mono text-slate-300">
+                    {emitter.emission_count}
                   </td>
                   <td
                     data-testid={`emitter-entity-${emitter.id}`}

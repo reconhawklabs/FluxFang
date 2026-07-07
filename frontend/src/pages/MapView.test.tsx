@@ -549,6 +549,7 @@ test("clicking an emitter marker opens a popup with its details", async () => {
     first_seen_at: "2026-07-05T00:00:00Z",
     last_seen_at: "2026-07-05T01:00:00Z",
     created_at: "2026-07-05T00:00:00Z",
+    emission_count: 0,
   };
   const fetchMock = mockRoutes(
     baseRoutes({ "GET /api/emitters": () => ({ items: [emitter], total: 1 }) }),
