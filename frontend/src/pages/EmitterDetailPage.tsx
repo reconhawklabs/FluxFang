@@ -13,6 +13,7 @@ import type { Entity } from "../api/entities";
 import {
   deleteEmitter,
   getEmitter,
+  listEmitters,
   patchEmitter,
   setEmitterRule,
 } from "../api/emitters";
@@ -77,6 +78,16 @@ export default function EmitterDetailPage() {
   );
 
   const emitter = emitterQuery.data;
+
+  const isClient = emitter?.emitter_type === "wifi_client";
+
+  // Look up AP emitters (only for a client) to resolve connected-AP links.
+  const apLookupQuery = useQuery({
+    queryKey: [...queryKeys.emitters, "ap-lookup"],
+    queryFn: () =>
+      listEmitters({ emitter_type: "wifi_access_point", limit: 500 }),
+    enabled: isClient,
+  });
 
   const [draftRule, setDraftRule] = useState<Rule>(EMPTY_RULE);
   // Seed the rule editor once the emitter arrives (keyed by id so navigating
@@ -145,6 +156,58 @@ export default function EmitterDetailPage() {
       a.observed_at > b.observed_at ? a : b,
     );
   }, [locatedEmissions]);
+
+  // Lowercased BSSID → AP emitter id, for linking connected APs.
+  const apByBssid = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const ap of apLookupQuery.data?.items ?? []) {
+      const bssid =
+        typeof ap.attributes?.bssid === "string"
+          ? ap.attributes.bssid.toLowerCase()
+          : null;
+      if (bssid) map.set(bssid, ap.id);
+    }
+    return map;
+  }, [apLookupQuery.data]);
+
+  // Distinct APs this client has (re)associated with, newest first — derived
+  // from the client's association/reassociation emissions.
+  const connectedAps = useMemo(() => {
+    const byBssid = new Map<
+      string,
+      { bssid: string; ssid: string | null; lastSeen: string; count: number }
+    >();
+    for (const e of emissions) {
+      const ft = e.payload.frame_type;
+      if (ft !== "association_request" && ft !== "reassociation_request")
+        continue;
+      const bssid =
+        typeof e.payload.target_bssid === "string"
+          ? e.payload.target_bssid
+          : null;
+      if (!bssid) continue;
+      const ssid =
+        typeof e.payload.target_ssid === "string" &&
+        e.payload.target_ssid.length > 0
+          ? e.payload.target_ssid
+          : null;
+      const existing = byBssid.get(bssid);
+      if (!existing) {
+        byBssid.set(bssid, { bssid, ssid, lastSeen: e.observed_at, count: 1 });
+      } else {
+        existing.count += 1;
+        if (e.observed_at > existing.lastSeen) {
+          existing.lastSeen = e.observed_at;
+          if (ssid) existing.ssid = ssid;
+        } else if (!existing.ssid && ssid) {
+          existing.ssid = ssid;
+        }
+      }
+    }
+    return Array.from(byBssid.values()).sort((a, b) =>
+      a.lastSeen > b.lastSeen ? -1 : 1,
+    );
+  }, [emissions]);
 
   function handleAssociate(value: string): void {
     if (value === NEW_ENTITY_VALUE) {
@@ -351,6 +414,57 @@ export default function EmitterDetailPage() {
           </div>
         </div>
       </section>
+
+      {/* Connected access points (wifi clients only) */}
+      {isClient && (
+        <section className="space-y-1">
+          <h2 className={sectionTitleClassName}>Connected access points</h2>
+          {connectedAps.length === 0 ? (
+            <p className="text-sm text-slate-500">
+              No association frames captured for this client yet.
+            </p>
+          ) : (
+            <table className="w-full border-collapse text-left text-xs">
+              <thead>
+                <tr className="border-b border-slate-800 text-slate-500">
+                  <th className="py-1 pr-4 font-medium">BSSID</th>
+                  <th className="py-1 pr-4 font-medium">SSID</th>
+                  <th className="py-1 pr-4 font-medium">Last seen</th>
+                  <th className="py-1 pr-4 font-medium">Count</th>
+                </tr>
+              </thead>
+              <tbody>
+                {connectedAps.map((ap) => {
+                  const apId = apByBssid.get(ap.bssid.toLowerCase());
+                  return (
+                    <tr key={ap.bssid}>
+                      <td className="py-1 pr-4 font-mono text-slate-300">
+                        {apId ? (
+                          <Link
+                            to={`/emitters/${apId}`}
+                            className="text-amber-400 hover:underline"
+                          >
+                            {ap.bssid}
+                          </Link>
+                        ) : (
+                          ap.bssid
+                        )}
+                      </td>
+                      <td className="py-1 pr-4 text-slate-300">
+                        {ap.ssid ?? "—"}
+                      </td>
+                      <td className="py-1 pr-4 text-slate-300">
+                        {formatTimestamp(ap.lastSeen)}
+                      </td>
+                      <td className="py-1 pr-4 text-slate-300">{ap.count}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </section>
+      )}
 
       {/* Detection heatmap */}
       <section className="space-y-1">

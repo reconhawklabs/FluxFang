@@ -55,6 +55,23 @@ const EMITTER: Emitter = {
   last_seen_at: "2026-07-06T01:00:00Z",
 } as unknown as Emitter;
 
+const CLIENT_EMITTER: Emitter = {
+  id: "client-1",
+  name: "Phone",
+  type: "WiFi Client",
+  type_label: "WiFi Client",
+  emitter_type: "wifi_client",
+  entity_id: null,
+  match_enabled: true,
+  match_criteria: {
+    match: "all",
+    conditions: [{ field: "src_mac", op: "eq", value: "3a:de:ad:be:ef:00" }],
+  },
+  attributes: { src_mac: "3a:de:ad:be:ef:00", randomized_mac: true },
+  first_seen_at: "2026-07-06T00:00:00Z",
+  last_seen_at: "2026-07-06T02:05:00Z",
+} as unknown as Emitter;
+
 function mockRoutes(
   handlers: Record<string, (url: URL, init?: RequestInit) => unknown>,
 ) {
@@ -161,4 +178,84 @@ test("saving a rule POSTs to /rule", async () => {
       expect.objectContaining({ method: "POST" }),
     ),
   );
+});
+
+test("wifi client shows connected APs, linking only when the AP emitter exists", async () => {
+  vi.stubGlobal(
+    "fetch",
+    mockRoutes({
+      "GET /api/emitters/emitter-1": () => CLIENT_EMITTER,
+      "GET /api/entities": () => ({ items: [], total: 0 }),
+      "GET /api/emissions": () => ({
+        items: [
+          {
+            id: "a1",
+            observed_at: "2026-07-06T02:00:00Z",
+            kind: "wifi",
+            payload: {
+              frame_type: "association_request",
+              src_mac: "3a:de:ad:be:ef:00",
+              target_bssid: "aa:bb:cc:dd:ee:ff",
+              target_ssid: "HomeNet",
+            },
+            signal_strength: -50,
+            lon: null,
+            lat: null,
+            emitter_id: "client-1",
+          },
+          {
+            id: "a2",
+            observed_at: "2026-07-06T02:05:00Z",
+            kind: "wifi",
+            payload: {
+              frame_type: "reassociation_request",
+              src_mac: "3a:de:ad:be:ef:00",
+              target_bssid: "11:22:33:44:55:66",
+              target_ssid: "CoffeeShop",
+            },
+            signal_strength: -70,
+            lon: null,
+            lat: null,
+            emitter_id: "client-1",
+          },
+        ],
+        total: 2,
+      }),
+      "GET /api/emitters": () => ({
+        items: [
+          {
+            id: "ap-1",
+            name: "Home",
+            type: null,
+            type_label: "WiFi Access Point",
+            emitter_type: "wifi_access_point",
+            entity_id: null,
+            match_enabled: true,
+            match_criteria: {},
+            attributes: { bssid: "aa:bb:cc:dd:ee:ff", ssid: "HomeNet" },
+            first_seen_at: null,
+            last_seen_at: null,
+          },
+        ],
+        total: 1,
+      }),
+    }),
+  );
+  renderPage();
+
+  expect(
+    await screen.findByText(/connected access points/i),
+  ).toBeInTheDocument();
+
+  // The HomeNet AP exists → its BSSID links to that AP emitter.
+  const homeLink = await screen.findByRole("link", {
+    name: "aa:bb:cc:dd:ee:ff",
+  });
+  expect(homeLink).toHaveAttribute("href", "/emitters/ap-1");
+
+  // The CoffeeShop AP has no emitter → BSSID is plain text, not a link.
+  expect(screen.getByText("11:22:33:44:55:66")).toBeInTheDocument();
+  expect(
+    screen.queryByRole("link", { name: "11:22:33:44:55:66" }),
+  ).not.toBeInTheDocument();
 });
