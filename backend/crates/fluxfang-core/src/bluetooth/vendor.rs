@@ -70,7 +70,7 @@ pub fn appearance_device_type(value: u16) -> Option<&'static str> {
         7 => Some("Eye-glasses"),
         8 => Some("Tag"),
         10 => Some("Media Player"),
-        13 => Some("Wearable"),
+        13 => Some("Heart Rate Sensor"),
         _ => None,
     }
 }

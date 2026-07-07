@@ -65,7 +65,7 @@ fn bluetooth_catalog() -> Vec<FieldDef> {
         field("name", "Local name", FieldType::Text),
         field("vendor", "Vendor", FieldType::Text),
         field("device_type", "Device type", FieldType::Text),
-        field("service_uuid", "Service UUID", FieldType::Text),
+        field("service_uuids", "Service UUIDs", FieldType::Text),
         field("company_id", "Company ID", FieldType::Number),
         field("rssi", "RSSI", FieldType::Number),
         field("tx_power", "TX power", FieldType::Number),
