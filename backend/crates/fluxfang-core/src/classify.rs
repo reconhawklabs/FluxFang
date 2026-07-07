@@ -308,6 +308,18 @@ pub fn emitter_category(type_key: &str) -> &'static str {
     }
 }
 
+/// The data-source `kind` whose field catalog and emission set a rule for an
+/// emitter of type `emitter_type` should be validated/backfilled against.
+/// Bluetooth emitter types map to `"bluetooth"`; everything else (including
+/// `None`/free-text emitters) defaults to `"wifi"`, preserving the original
+/// wifi-only behavior of the emitter-rule endpoints.
+pub fn catalog_kind_for(emitter_type: Option<&str>) -> &'static str {
+    match emitter_type.map(emitter_category) {
+        Some("bluetooth") => "bluetooth",
+        _ => "wifi",
+    }
+}
+
 /// One emitter type as exposed to a caller building a "pick a type"
 /// dropdown (see [`emitter_types_for_kind`]): a machine `key` (what gets
 /// stored as `Emitter::emitter_type`/sent as `POST /api/emitters`'
@@ -550,6 +562,19 @@ mod tests {
         assert_eq!(emitter_category("wifi_access_point"), "wifi");
         assert_eq!(emitter_category("wifi_client"), "wifi");
         assert_eq!(emitter_category("bluetooth_device"), "bluetooth");
+    }
+
+    #[test]
+    fn catalog_kind_for_bluetooth_types_maps_to_bluetooth() {
+        assert_eq!(catalog_kind_for(Some("bluetooth_device")), "bluetooth");
+    }
+
+    #[test]
+    fn catalog_kind_for_wifi_types_none_and_unknown_default_to_wifi() {
+        assert_eq!(catalog_kind_for(Some("wifi_access_point")), "wifi");
+        assert_eq!(catalog_kind_for(Some("wifi_client")), "wifi");
+        assert_eq!(catalog_kind_for(None), "wifi");
+        assert_eq!(catalog_kind_for(Some("something_unrecognized")), "wifi");
     }
 
     // -- emitter_types_for_kind / is_known_emitter_type ----------------------

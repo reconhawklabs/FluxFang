@@ -18,8 +18,8 @@ pub use auth::{hash_password, verify_password};
 pub use bluetooth::{appearance_device_type, cod_device_type, company_name, oui_vendor};
 pub use catalog::{catalog_for, FieldDef, FieldType};
 pub use classify::{
-    classify, emitter_category, emitter_type_label, emitter_types_for_kind, is_known_emitter_type,
-    is_randomized_mac, Classification, EmitterTypeInfo,
+    catalog_kind_for, classify, emitter_category, emitter_type_label, emitter_types_for_kind,
+    is_known_emitter_type, is_randomized_mac, Classification, EmitterTypeInfo,
 };
 pub use rule::{Condition, MatchMode, Op, Rule};
 pub use rule_sql::{conditions_to_sql, conditions_to_sql_checked, RuleSqlError};
