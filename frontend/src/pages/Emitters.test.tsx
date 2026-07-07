@@ -7,44 +7,12 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, expect, test, vi } from "vitest";
 import Emitters from "./Emitters";
 import { jsonResponse } from "../test-utils/fetchMocks";
 import type { Emitter } from "../api/emitters";
 import type { Entity } from "../api/entities";
-import type { Emission } from "../api/emissions";
-
-// `EmitterDetail` embeds `EmissionsHeatmap` (Task C), which inits a real
-// MapLibre map whenever it's given non-empty points — mocked wholesale here
-// (same convention as `MapView.test.tsx`) so that never touches a real
-// WebGL canvas jsdom doesn't have.
-vi.mock("maplibre-gl", () => {
-  class FakeMap {
-    constructor(_options: unknown) {}
-    addControl(): void {}
-    on(event: string, cb: () => void): void {
-      if (event === "load") cb();
-    }
-    remove(): void {}
-    resize(): void {}
-    addSource(): void {}
-    addLayer(): void {}
-    getSource() {
-      return { setData: vi.fn() };
-    }
-    getLayer() {
-      return true;
-    }
-    setLayoutProperty(): void {}
-    fitBounds(): void {}
-  }
-
-  class FakeNavigationControl {}
-
-  return {
-    default: { Map: FakeMap, NavigationControl: FakeNavigationControl },
-  };
-});
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -55,7 +23,9 @@ function wrapper({ children }: { children: ReactNode }) {
     defaultOptions: { queries: { retry: false } },
   });
   return (
-    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter>{children}</MemoryRouter>
+    </QueryClientProvider>
   );
 }
 
@@ -86,44 +56,17 @@ function mockRoutes(
 }
 
 /** Default empty responses for the endpoints every render touches even when
- * a test doesn't care about them (entities list, expanded-detail
- * emissions), so each test only needs to override what it's actually
+ * a test doesn't care about them (the entities list, for the filter/associate
+ * dropdowns), so each test only needs to override what it's actually
  * exercising. */
 function baseRoutes(
   overrides: Record<string, (url: URL, init?: RequestInit) => unknown> = {},
 ) {
   return {
     "GET /api/entities": () => ({ items: [], total: 0 }),
-    "GET /api/emissions": () => ({ items: [], total: 0 }),
-    // The expanded-row rule editor (`RuleBuilder`) fetches the "wifi" field
-    // catalog to drive its field/operator dropdowns.
-    "GET /api/catalog/wifi": () => WIFI_CATALOG,
     ...overrides,
   };
 }
-
-/** Minimal `GET /api/catalog/wifi` stub — enough fields for the expanded
- * row's `RuleBuilder` to render its condition rows. */
-const WIFI_CATALOG = [
-  {
-    key: "bssid",
-    label: "BSSID",
-    type: "mac",
-    ops: [
-      { code: "eq", label: "equals" },
-      { code: "neq", label: "not equals" },
-    ],
-  },
-  {
-    key: "src_mac",
-    label: "Source MAC",
-    type: "mac",
-    ops: [
-      { code: "eq", label: "equals" },
-      { code: "neq", label: "not equals" },
-    ],
-  },
-];
 
 const EMITTER_UNASSIGNED: Emitter = {
   id: "emitter-1",
@@ -243,12 +186,6 @@ test("a randomized-MAC client emitter renders name/type/MAC/randomized-badge all
   expect(mac.closest("td")).toContainElement(
     screen.getByTestId("emitter-randomized-badge-emitter-3"),
   );
-
-  // Only a single <tr> renders for this emitter while collapsed — no
-  // second "detail" row is present.
-  expect(
-    screen.queryByTestId("emitter-detail-emitter-3"),
-  ).not.toBeInTheDocument();
 });
 
 test("a plain AP emitter (no randomized flag) shows its BSSID monospace with no randomized badge", async () => {
@@ -294,9 +231,9 @@ test('renders emitter rows resolving the associated entity name, and "—" when 
   );
 });
 
-// --- Phase 3: expand reveals rule + attributes ---
+// --- Phase 3: name links to the dedicated detail page ---
 
-test("the match rule and attributes are only shown once the row is expanded", async () => {
+test("emitter name links to its detail page", async () => {
   const fetchMock = mockRoutes(
     baseRoutes({
       "GET /api/emitters": () => ({ items: [EMITTER_CLIENT], total: 1 }),
@@ -305,232 +242,10 @@ test("the match rule and attributes are only shown once the row is expanded", as
   vi.stubGlobal("fetch", fetchMock);
 
   render(<Emitters />, { wrapper });
-  await waitFor(() =>
-    expect(screen.getByTestId("emitter-row-emitter-3")).toBeInTheDocument(),
-  );
-
-  // Collapsed: no rule text, no attributes dump, no rule-enabled switch
-  // anywhere on the page.
-  expect(
-    screen.queryByText(/src_mac eq aa:bb:cc:dd:ee:ff/i),
-  ).not.toBeInTheDocument();
-  expect(
-    screen.queryByRole("switch", { name: /rule enabled/i }),
-  ).not.toBeInTheDocument();
-  expect(screen.queryByText("src_mac")).not.toBeInTheDocument();
-
-  fireEvent.click(
-    screen.getByRole("button", { name: "WiFi Client aa:bb:cc:dd:ee:ff" }),
-  );
-
-  const detail = await screen.findByTestId("emitter-detail-emitter-3");
-  expect(
-    within(detail).getByText(/src_mac eq aa:bb:cc:dd:ee:ff/i),
-  ).toBeInTheDocument();
-  expect(
-    within(detail).getByRole("switch", { name: /rule enabled/i }),
-  ).toBeChecked();
-  // Full attributes dump.
-  expect(within(detail).getByText("src_mac")).toBeInTheDocument();
-  expect(within(detail).getByText("randomized_mac")).toBeInTheDocument();
-});
-
-test("toggling the rule switch (in the expanded panel) PATCHes {match_enabled: false}", async () => {
-  const disabled: Emitter = { ...EMITTER_CLIENT, match_enabled: false };
-  const fetchMock = mockRoutes(
-    baseRoutes({
-      "GET /api/emitters": () => ({ items: [EMITTER_CLIENT], total: 1 }),
-      "PATCH /api/emitters/emitter-3": () => disabled,
-    }),
-  );
-  vi.stubGlobal("fetch", fetchMock);
-
-  render(<Emitters />, { wrapper });
-  await waitFor(() =>
-    expect(screen.getByTestId("emitter-row-emitter-3")).toBeInTheDocument(),
-  );
-  fireEvent.click(
-    screen.getByRole("button", { name: "WiFi Client aa:bb:cc:dd:ee:ff" }),
-  );
-  const detail = await screen.findByTestId("emitter-detail-emitter-3");
-
-  fireEvent.click(
-    within(detail).getByRole("switch", { name: /rule enabled/i }),
-  );
-
-  await waitFor(() =>
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/emitters/emitter-3",
-      expect.objectContaining({ method: "PATCH" }),
-    ),
-  );
-  const patchCall = fetchMock.mock.calls.find(
-    ([url, init]) =>
-      String(url) === "/api/emitters/emitter-3" && init?.method === "PATCH",
-  );
-  const [, init] = patchCall as [RequestInfo | URL, RequestInit];
-  expect(JSON.parse(init.body as string)).toEqual({ match_enabled: false });
-});
-
-test("manual randomized override (in the expanded panel) PATCHes the full attributes object with randomized_mac flipped", async () => {
-  const flipped: Emitter = {
-    ...EMITTER_CLIENT,
-    attributes: { ...EMITTER_CLIENT.attributes, randomized_mac: false },
-  };
-  const fetchMock = mockRoutes(
-    baseRoutes({
-      "GET /api/emitters": () => ({ items: [EMITTER_CLIENT], total: 1 }),
-      "PATCH /api/emitters/emitter-3": () => flipped,
-    }),
-  );
-  vi.stubGlobal("fetch", fetchMock);
-
-  render(<Emitters />, { wrapper });
-  await waitFor(() =>
-    expect(screen.getByTestId("emitter-row-emitter-3")).toBeInTheDocument(),
-  );
-  fireEvent.click(
-    screen.getByRole("button", { name: "WiFi Client aa:bb:cc:dd:ee:ff" }),
-  );
-  const detail = await screen.findByTestId("emitter-detail-emitter-3");
-
-  fireEvent.click(
-    within(detail).getByRole("button", { name: /mark as not randomized/i }),
-  );
-
-  await waitFor(() =>
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/emitters/emitter-3",
-      expect.objectContaining({ method: "PATCH" }),
-    ),
-  );
-  const patchCall = fetchMock.mock.calls.find(
-    ([url, init]) =>
-      String(url) === "/api/emitters/emitter-3" && init?.method === "PATCH",
-  );
-  const [, init] = patchCall as [RequestInfo | URL, RequestInit];
-  expect(JSON.parse(init.body as string)).toEqual({
-    attributes: { src_mac: "aa:bb:cc:dd:ee:ff", randomized_mac: false },
+  const link = await screen.findByRole("link", {
+    name: "WiFi Client aa:bb:cc:dd:ee:ff",
   });
-});
-
-test('editing the rule and clicking "Save rule" POSTs /api/emitters/:id/rule with the match_criteria', async () => {
-  const fetchMock = mockRoutes(
-    baseRoutes({
-      "GET /api/emitters": () => ({ items: [EMITTER_CLIENT], total: 1 }),
-      "POST /api/emitters/emitter-3/rule": () => ({
-        emitter: EMITTER_CLIENT,
-        attached_count: 2,
-      }),
-    }),
-  );
-  vi.stubGlobal("fetch", fetchMock);
-
-  render(<Emitters />, { wrapper });
-  await waitFor(() =>
-    expect(screen.getByTestId("emitter-row-emitter-3")).toBeInTheDocument(),
-  );
-  fireEvent.click(
-    screen.getByRole("button", { name: "WiFi Client aa:bb:cc:dd:ee:ff" }),
-  );
-  const detail = await screen.findByTestId("emitter-detail-emitter-3");
-
-  // Rule editor renders seeded from the emitter's current rule.
-  fireEvent.click(
-    await within(detail).findByRole("button", { name: /save rule/i }),
-  );
-
-  await waitFor(() =>
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/emitters/emitter-3/rule",
-      expect.objectContaining({ method: "POST" }),
-    ),
-  );
-  const ruleCall = fetchMock.mock.calls.find(
-    ([url, init]) =>
-      String(url) === "/api/emitters/emitter-3/rule" && init?.method === "POST",
-  );
-  const [, init] = ruleCall as [RequestInfo | URL, RequestInit];
-  expect(JSON.parse(init.body as string)).toEqual({
-    match_criteria: {
-      match: "all",
-      conditions: [{ field: "src_mac", op: "eq", value: "aa:bb:cc:dd:ee:ff" }],
-    },
-  });
-
-  // Success feedback reflects the backend's re-attach count.
-  expect(
-    await within(detail).findByText(/attached 2 emissions/i),
-  ).toBeInTheDocument();
-});
-
-const LOCATED_EMISSION: Emission = {
-  id: "em-1",
-  data_source_id: "ds-1",
-  emitter_id: "emitter-3",
-  session_id: null,
-  observed_at: "2026-07-05T00:00:00Z",
-  signal_strength: -40,
-  lon: 2.5,
-  lat: 1.5,
-  kind: "wifi",
-  payload: {},
-};
-
-const UNLOCATED_EMISSION: Emission = {
-  ...LOCATED_EMISSION,
-  id: "em-2",
-  lon: null,
-  lat: null,
-};
-
-test("expanded detail renders a detection heatmap fed by located emissions for that emitter", async () => {
-  const fetchMock = mockRoutes(
-    baseRoutes({
-      "GET /api/emitters": () => ({ items: [EMITTER_CLIENT], total: 1 }),
-      "GET /api/emissions": () => ({
-        items: [LOCATED_EMISSION, UNLOCATED_EMISSION],
-        total: 2,
-      }),
-    }),
-  );
-  vi.stubGlobal("fetch", fetchMock);
-
-  render(<Emitters />, { wrapper });
-  await waitFor(() =>
-    expect(screen.getByTestId("emitter-row-emitter-3")).toBeInTheDocument(),
-  );
-  fireEvent.click(
-    screen.getByRole("button", { name: "WiFi Client aa:bb:cc:dd:ee:ff" }),
-  );
-
-  const detail = await screen.findByTestId("emitter-detail-emitter-3");
-  expect(within(detail).getByText("Detection heatmap")).toBeInTheDocument();
-  expect(
-    await within(detail).findByTestId("emissions-heatmap-container"),
-  ).toBeInTheDocument();
-});
-
-test("expanded detail shows the heatmap empty state when the emitter has no located emissions", async () => {
-  const fetchMock = mockRoutes(
-    baseRoutes({
-      "GET /api/emitters": () => ({ items: [EMITTER_CLIENT], total: 1 }),
-    }),
-  );
-  vi.stubGlobal("fetch", fetchMock);
-
-  render(<Emitters />, { wrapper });
-  await waitFor(() =>
-    expect(screen.getByTestId("emitter-row-emitter-3")).toBeInTheDocument(),
-  );
-  fireEvent.click(
-    screen.getByRole("button", { name: "WiFi Client aa:bb:cc:dd:ee:ff" }),
-  );
-
-  const detail = await screen.findByTestId("emitter-detail-emitter-3");
-  expect(
-    await within(detail).findByText("No located detections yet."),
-  ).toBeInTheDocument();
+  expect(link).toHaveAttribute("href", "/emitters/emitter-3");
 });
 
 // --- Phase 3: Associate control folds in "+ New entity…" ---

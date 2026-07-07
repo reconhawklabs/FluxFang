@@ -1,9 +1,11 @@
 // Task 9.5, redesigned per Phase 3 of the list-pages UX cleanup (see
 // `docs/superpowers/specs/2026-07-05-list-pages-ux-cleanup-design.md`,
 // "Emitters page" section): browse discovered emitters, search/filter them,
-// and manage each one's entity grouping — with compact one-row rows (an
-// expand toggle reveals the match rule, full attributes, and the detection
-// heatmap) instead of the old always-expanded multi-line layout.
+// and manage each one's entity grouping — with compact one-row rows. Each
+// row's name links to its own deep-linkable detail page
+// (`/emitters/:id`, `pages/EmitterDetailPage.tsx`), which now owns the match
+// rule editor, full attributes dump, and detection heatmap that used to live
+// in an inline expand-in-place dropdown here.
 //
 // Top controls: a full-width `SearchBar` (`q` -> `search`) plus an Entity
 // filter `<select>` (-> `entity_id`) alongside it. Both feed one
@@ -25,7 +27,8 @@
 // `useRowSelection`/`SelectionToolbar` (Phase 2) against
 // `bulkDeleteEmitters`/`clearEmitters`; `Pagination` (Phase 2) drives
 // `limit`/`offset`.
-import { Fragment, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { queryKeys } from "../api/queryKeys";
 import { createEntity, listEntities } from "../api/entities";
@@ -36,43 +39,19 @@ import {
   deleteEmitter,
   listEmitters,
   patchEmitter,
-  setEmitterRule,
 } from "../api/emitters";
 import type { Emitter, ListEmittersParams } from "../api/emitters";
-import { listEmissions } from "../api/emissions";
-import type { Emission } from "../api/emissions";
-import type { Rule } from "../types/rule";
-import EmissionsHeatmap from "../components/EmissionsHeatmap";
-import RuleBuilder from "../components/RuleBuilder";
-import type { HeatmapPoint } from "../components/mapData";
 import Pagination from "../components/Pagination";
 import SearchBar from "../components/SearchBar";
 import SelectionToolbar from "../components/SelectionToolbar";
 import { useRowSelection } from "../hooks/useRowSelection";
 import {
-  EMPTY_RULE,
   MacIdentityCell,
-  RULE_EDITOR_KIND,
   TypeBadge,
-  asRule,
-  formatAttributeValue,
   formatCompact,
-  formatTimestamp,
-  isRandomizedMac,
-  ruleConditions,
-  ruleMatchModeLabel,
 } from "../components/emitterDisplay";
 
 const DEFAULT_LIMIT = 50;
-const DETAIL_EMISSIONS_LIMIT = 20;
-// Task C (emitter auto-classification design doc): a separate, larger-limit
-// fetch backs the detection heatmap — the "Recent emissions" table only
-// needs its own last-20 window, but "everywhere this emitter has been
-// heard" wants a much wider sample, same 500 cap `MapView.tsx`'s overview
-// heatmap uses.
-const HEATMAP_EMISSIONS_LIMIT = 500;
-// [checkbox] Name, Type, MAC/Identity, First seen, Last seen, Entity, Actions.
-const TABLE_COLUMN_COUNT = 8;
 
 /** Sentinel `<select>` values for the folded "Associate…" control — never a
  * real entity id (those are UUIDs from the backend). */
@@ -86,282 +65,6 @@ const ALL_TYPES_VALUE = "";
 const selectClassName =
   "rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-100 focus:border-amber-500 focus:outline-none";
 
-interface EmitterDetailProps {
-  emitter: Emitter;
-  rowBusy: boolean;
-  onToggleMatchEnabled: () => void;
-  onToggleRandomized: () => void;
-}
-
-/** The expanded row's content (design doc's "Expand" section): the
- * emitter's full `attributes`, its match rule (with the enable/disable
- * toggle — moved here from the collapsed row), the manual randomized-MAC
- * override, and the detection heatmap/recent emissions
- * (`GET /api/emissions?emitter_id=:id`). Its own component (rather than
- * inline in the parent) so the recent-emissions/heatmap queries only ever
- * run while the row is actually expanded — they unmount (and the queries go
- * away) when the row collapses. */
-function EmitterDetail({
-  emitter,
-  rowBusy,
-  onToggleMatchEnabled,
-  onToggleRandomized,
-}: EmitterDetailProps) {
-  const queryClient = useQueryClient();
-  const params = useMemo(
-    () => ({ emitter_id: emitter.id, limit: DETAIL_EMISSIONS_LIMIT }),
-    [emitter.id],
-  );
-
-  // Local draft of the rule being edited, seeded from the emitter's current
-  // `match_criteria` (or an empty ALL rule when it has none). Fully
-  // controlled by `RuleBuilder` from here — only committed to the backend on
-  // "Save rule". Keyed by emitter id via the initializer; since only one row
-  // is expanded at a time this component unmounts/remounts per emitter, so
-  // the seed always reflects the row just opened.
-  const [draftRule, setDraftRule] = useState<Rule>(
-    () => asRule(emitter.match_criteria) ?? EMPTY_RULE,
-  );
-
-  // `POST /api/emitters/:id/rule` — replace the rule, then re-attach every
-  // already-stored matching emission (the returned `attached_count`).
-  // Invalidates `queryKeys.emitters` so this row (and its entity/rule
-  // columns) refetch, same convention as the parent's `patchMutation`.
-  const saveRuleMutation = useMutation({
-    mutationFn: (rule: Rule) => setEmitterRule(emitter.id, rule),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.emitters });
-    },
-  });
-
-  // Keyed off `queryKeys.emissions` (per the registry) so a live `emission`
-  // WS frame invalidating that key refetches this too, same convention as
-  // `Emissions.tsx`'s own filtered query.
-  const recentQuery = useQuery({
-    queryKey: [...queryKeys.emissions, "emitter-detail", emitter.id],
-    queryFn: () => {
-      const p = new URLSearchParams();
-      p.set("emitter_id", params.emitter_id);
-      p.set("limit", String(params.limit));
-      return listEmissions(p);
-    },
-  });
-
-  // Detection heatmap: "where this emitter has been heard" — a wider,
-  // separately-fetched sample than the "Recent emissions" table above,
-  // filtered client-side to only located rows (an emission with no GPS fix
-  // has null `lon`/`lat`).
-  const heatmapQuery = useQuery({
-    queryKey: [...queryKeys.emissions, "heatmap", emitter.id],
-    queryFn: () => {
-      const p = new URLSearchParams();
-      p.set("emitter_id", emitter.id);
-      p.set("limit", String(HEATMAP_EMISSIONS_LIMIT));
-      return listEmissions(p);
-    },
-  });
-
-  const heatmapPoints = useMemo<HeatmapPoint[]>(() => {
-    const items = heatmapQuery.data?.items ?? [];
-    return items
-      .filter(
-        (item): item is Emission & { lon: number; lat: number } =>
-          item.lon !== null && item.lat !== null,
-      )
-      .map((item) => ({ lon: item.lon, lat: item.lat }));
-  }, [heatmapQuery.data]);
-
-  const conditions = ruleConditions(emitter.match_criteria);
-  const items = recentQuery.data?.items ?? [];
-  const attributeEntries = Object.entries(emitter.attributes ?? {});
-
-  return (
-    <tr
-      data-testid={`emitter-detail-${emitter.id}`}
-      className="border-b border-slate-900 bg-slate-950/40"
-    >
-      <td colSpan={TABLE_COLUMN_COUNT} className="px-4 py-3">
-        <div className="space-y-4">
-          <div>
-            <h3 className="text-xs font-medium uppercase tracking-wide text-slate-500">
-              Attributes
-            </h3>
-            {attributeEntries.length === 0 ? (
-              <p className="mt-1 text-sm text-slate-500">
-                No attributes recorded.
-              </p>
-            ) : (
-              <dl className="mt-1 grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
-                {attributeEntries.map(([key, value]) => (
-                  <Fragment key={key}>
-                    <dt className="text-slate-500">{key}</dt>
-                    <dd className="font-mono text-slate-200">
-                      {formatAttributeValue(value)}
-                    </dd>
-                  </Fragment>
-                ))}
-              </dl>
-            )}
-            {emitter.emitter_type === "wifi_client" && (
-              <button
-                type="button"
-                disabled={rowBusy}
-                onClick={onToggleRandomized}
-                className="mt-2 text-xs text-slate-500 underline decoration-dotted hover:text-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {isRandomizedMac(emitter.attributes ?? {})
-                  ? "Mark as not randomized"
-                  : "Mark as randomized"}
-              </button>
-            )}
-          </div>
-
-          <div>
-            <h3 className="text-xs font-medium uppercase tracking-wide text-slate-500">
-              Match rule
-            </h3>
-            <label className="mt-1 flex items-center gap-1.5 text-xs text-slate-400">
-              <input
-                type="checkbox"
-                role="switch"
-                aria-label={`Rule enabled for ${emitter.name}`}
-                checked={emitter.match_enabled}
-                disabled={rowBusy}
-                onChange={onToggleMatchEnabled}
-                className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
-              />
-              {emitter.match_enabled ? "Enabled" : "Disabled"}
-            </label>
-            {!emitter.match_enabled && (
-              <p className="mt-1 text-xs text-amber-400">
-                Disabled — new matching emissions won&apos;t auto-attach.
-              </p>
-            )}
-            {conditions.length === 0 ? (
-              <p className="mt-1 text-sm text-slate-500">
-                No conditions — this emitter doesn&apos;t auto-attach new
-                emissions.
-              </p>
-            ) : (
-              <div className="mt-1 text-sm text-slate-300">
-                <span className="text-slate-500">
-                  Match {ruleMatchModeLabel(emitter.match_criteria)} of:
-                </span>
-                <ul className="mt-1 list-inside list-disc space-y-0.5 font-mono text-slate-200">
-                  {conditions.map((text, index) => (
-                    <li key={index}>{text}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            <div className="mt-3 space-y-2 border-t border-slate-800 pt-3">
-              <h4 className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                Edit rule
-              </h4>
-              <RuleBuilder
-                kind={RULE_EDITOR_KIND}
-                value={draftRule}
-                onChange={setDraftRule}
-              />
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  disabled={saveRuleMutation.isPending}
-                  onClick={() => saveRuleMutation.mutate(draftRule)}
-                  className="rounded border border-amber-600 bg-amber-500/10 px-3 py-1.5 text-sm text-amber-400 transition hover:border-amber-500 hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {saveRuleMutation.isPending ? "Saving…" : "Save rule"}
-                </button>
-                {saveRuleMutation.isSuccess && (
-                  <span className="text-xs text-slate-400">
-                    Saved — attached {saveRuleMutation.data.attached_count}{" "}
-                    emission
-                    {saveRuleMutation.data.attached_count === 1 ? "" : "s"}.
-                  </span>
-                )}
-                {saveRuleMutation.isError && (
-                  <span className="text-xs text-red-400">
-                    Failed to save rule.
-                  </span>
-                )}
-              </div>
-            </div>
-          </div>
-
-          <div>
-            <h3 className="text-xs font-medium uppercase tracking-wide text-slate-500">
-              Detection heatmap
-            </h3>
-            <p className="mt-1 text-xs text-slate-500">
-              Where this emitter has been heard.
-            </p>
-            <div className="mt-1">
-              <EmissionsHeatmap points={heatmapPoints} />
-            </div>
-          </div>
-
-          <div>
-            <h3 className="text-xs font-medium uppercase tracking-wide text-slate-500">
-              Recent emissions
-            </h3>
-            {recentQuery.isLoading && (
-              <p className="mt-1 text-sm text-slate-500">Loading emissions…</p>
-            )}
-            {recentQuery.isError && (
-              <p className="mt-1 text-sm text-red-400">
-                Failed to load recent emissions.
-              </p>
-            )}
-            {recentQuery.data && items.length === 0 && (
-              <p className="mt-1 text-sm text-slate-500">
-                No emissions recorded for this emitter yet.
-              </p>
-            )}
-            {items.length > 0 && (
-              <table className="mt-1 w-full border-collapse text-left text-xs">
-                <thead>
-                  <tr className="border-b border-slate-800 text-slate-500">
-                    <th className="py-1 pr-4 font-medium">Observed At</th>
-                    <th className="py-1 pr-4 font-medium">BSSID</th>
-                    <th className="py-1 pr-4 font-medium">SSID</th>
-                    <th className="py-1 pr-4 font-medium">RSSI</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {items.map((emission: Emission) => (
-                    <tr
-                      key={emission.id}
-                      data-testid={`emitter-detail-emission-${emission.id}`}
-                    >
-                      <td className="py-1 pr-4 text-slate-300">
-                        {formatTimestamp(emission.observed_at)}
-                      </td>
-                      <td className="py-1 pr-4 font-mono text-slate-300">
-                        {typeof emission.payload.bssid === "string"
-                          ? emission.payload.bssid
-                          : "—"}
-                      </td>
-                      <td className="py-1 pr-4 text-slate-300">
-                        {typeof emission.payload.ssid === "string"
-                          ? emission.payload.ssid
-                          : "—"}
-                      </td>
-                      <td className="py-1 pr-4 font-mono text-slate-300">
-                        {emission.signal_strength ?? "—"}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        </div>
-      </td>
-    </tr>
-  );
-}
-
 export default function Emitters() {
   const queryClient = useQueryClient();
   const [q, setQ] = useState("");
@@ -369,7 +72,6 @@ export default function Emitters() {
   const [emitterType, setEmitterType] = useState(ALL_TYPES_VALUE);
   const [limit, setLimit] = useState(DEFAULT_LIMIT);
   const [offset, setOffset] = useState(0);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const queryParams = useMemo<ListEmittersParams>(() => {
     const params: ListEmittersParams = { limit, offset };
@@ -543,36 +245,6 @@ export default function Emitters() {
     patchMutation.mutate({ id: emitter.id, body: { entity_id: value } });
   }
 
-  // The rule enable/disable toggle (moved into the expanded detail panel) —
-  // a plain `{ match_enabled }` PATCH, flipping whatever the emitter's
-  // current value is.
-  function handleToggleMatchEnabled(emitter: Emitter): void {
-    patchMutation.mutate({
-      id: emitter.id,
-      body: { match_enabled: !emitter.match_enabled },
-    });
-  }
-
-  // Manual randomized-MAC override (moved into the expanded detail panel) —
-  // since `PATCH .../attributes` is a full replace, not a merge (see
-  // `PatchEmitterInput`'s doc comment in `api/emitters.ts`), this reads the
-  // emitter's *already-loaded* `attributes` (no extra GET needed — it's the
-  // same object this row is rendering from `queryKeys.emitters`), spreads
-  // it, and flips just `randomized_mac` before sending the whole thing.
-  function handleToggleRandomized(emitter: Emitter): void {
-    const currentAttributes = emitter.attributes ?? {};
-    const currentlyRandomized = isRandomizedMac(currentAttributes);
-    patchMutation.mutate({
-      id: emitter.id,
-      body: {
-        attributes: {
-          ...currentAttributes,
-          randomized_mac: !currentlyRandomized,
-        },
-      },
-    });
-  }
-
   function handleDelete(emitterId: string): void {
     if (!window.confirm("Delete this emitter?")) return;
     deleteMutation.mutate(emitterId);
@@ -672,7 +344,6 @@ export default function Emitters() {
           </thead>
           <tbody>
             {emitters.map((emitter) => {
-              const isExpanded = expandedId === emitter.id;
               const entityName = emitter.entity_id
                 ? (entityNameById.get(emitter.entity_id) ?? "—")
                 : "—";
@@ -685,104 +356,86 @@ export default function Emitters() {
                   createAndAssociateMutation.variables?.emitterId ===
                     emitter.id);
 
-              function toggleExpanded(): void {
-                setExpandedId(isExpanded ? null : emitter.id);
-              }
-
               return (
-                <Fragment key={emitter.id}>
-                  <tr
-                    data-testid={`emitter-row-${emitter.id}`}
-                    className="border-b border-slate-900"
+                <tr
+                  key={emitter.id}
+                  data-testid={`emitter-row-${emitter.id}`}
+                  className="border-b border-slate-900"
+                >
+                  <td className="py-2 pr-2">
+                    <input
+                      type="checkbox"
+                      aria-label={`Select emitter ${emitter.id}`}
+                      checked={selection.selected.has(emitter.id)}
+                      onChange={() => selection.toggle(emitter.id)}
+                      className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
+                    />
+                  </td>
+                  <td className="py-2 pr-4 text-slate-200">
+                    <Link
+                      to={`/emitters/${emitter.id}`}
+                      className="text-slate-200 underline decoration-slate-600 decoration-dotted hover:text-amber-400"
+                    >
+                      {emitter.name}
+                    </Link>
+                  </td>
+                  <td className="py-2 pr-4">
+                    <TypeBadge emitter={emitter} />
+                  </td>
+                  <td className="py-2 pr-4">
+                    <MacIdentityCell emitter={emitter} />
+                  </td>
+                  <td className="py-2 pr-4 whitespace-nowrap text-slate-300">
+                    {formatCompact(emitter.first_seen_at)}
+                  </td>
+                  <td className="py-2 pr-4 whitespace-nowrap text-slate-300">
+                    {formatCompact(emitter.last_seen_at)}
+                  </td>
+                  <td
+                    data-testid={`emitter-entity-${emitter.id}`}
+                    className="py-2 pr-4 text-slate-300"
                   >
-                    <td className="py-2 pr-2">
-                      <input
-                        type="checkbox"
-                        aria-label={`Select emitter ${emitter.id}`}
-                        checked={selection.selected.has(emitter.id)}
-                        onChange={() => selection.toggle(emitter.id)}
-                        className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
-                      />
-                    </td>
-                    <td className="py-2 pr-4 text-slate-200">
+                    {entityName}
+                  </td>
+                  <td className="py-2 pr-2">
+                    <div className="flex items-center gap-1.5 whitespace-nowrap">
+                      <select
+                        aria-label={`Associate ${emitter.name} to an entity`}
+                        value=""
+                        disabled={rowBusy}
+                        onChange={(event) =>
+                          handleAssociateSelect(emitter, event.target.value)
+                        }
+                        className={selectClassName}
+                      >
+                        <option value="" disabled>
+                          Associate…
+                        </option>
+                        {emitter.entity_id && (
+                          <option value={DETACH_VALUE}>Detach</option>
+                        )}
+                        {entities.map((entity: Entity) => (
+                          <option key={entity.id} value={entity.id}>
+                            {entity.name}
+                          </option>
+                        ))}
+                        <option value={NEW_ENTITY_VALUE}>+ New entity…</option>
+                      </select>
+
                       <button
                         type="button"
-                        onClick={toggleExpanded}
-                        className="text-left text-slate-200 underline decoration-slate-600 decoration-dotted hover:text-amber-400"
+                        disabled={rowBusy}
+                        onClick={() => handleDelete(emitter.id)}
+                        className="rounded border border-slate-700 px-2 py-1 text-xs text-red-400 transition hover:border-red-500 disabled:cursor-not-allowed disabled:opacity-50"
                       >
-                        {emitter.name}
+                        {deleteMutation.isPending &&
+                        deleteMutation.variables === emitter.id
+                          ? "Deleting…"
+                          : "Delete"}
                       </button>
-                    </td>
-                    <td className="py-2 pr-4">
-                      <TypeBadge emitter={emitter} />
-                    </td>
-                    <td className="py-2 pr-4">
-                      <MacIdentityCell emitter={emitter} />
-                    </td>
-                    <td className="py-2 pr-4 whitespace-nowrap text-slate-300">
-                      {formatCompact(emitter.first_seen_at)}
-                    </td>
-                    <td className="py-2 pr-4 whitespace-nowrap text-slate-300">
-                      {formatCompact(emitter.last_seen_at)}
-                    </td>
-                    <td
-                      data-testid={`emitter-entity-${emitter.id}`}
-                      className="py-2 pr-4 text-slate-300"
-                    >
-                      {entityName}
-                    </td>
-                    <td className="py-2 pr-2">
-                      <div className="flex items-center gap-1.5 whitespace-nowrap">
-                        <select
-                          aria-label={`Associate ${emitter.name} to an entity`}
-                          value=""
-                          disabled={rowBusy}
-                          onChange={(event) =>
-                            handleAssociateSelect(emitter, event.target.value)
-                          }
-                          className={selectClassName}
-                        >
-                          <option value="" disabled>
-                            Associate…
-                          </option>
-                          {emitter.entity_id && (
-                            <option value={DETACH_VALUE}>Detach</option>
-                          )}
-                          {entities.map((entity: Entity) => (
-                            <option key={entity.id} value={entity.id}>
-                              {entity.name}
-                            </option>
-                          ))}
-                          <option value={NEW_ENTITY_VALUE}>
-                            + New entity…
-                          </option>
-                        </select>
-
-                        <button
-                          type="button"
-                          disabled={rowBusy}
-                          onClick={() => handleDelete(emitter.id)}
-                          className="rounded border border-slate-700 px-2 py-1 text-xs text-red-400 transition hover:border-red-500 disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                          {deleteMutation.isPending &&
-                          deleteMutation.variables === emitter.id
-                            ? "Deleting…"
-                            : "Delete"}
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                  {isExpanded && (
-                    <EmitterDetail
-                      emitter={emitter}
-                      rowBusy={rowBusy}
-                      onToggleMatchEnabled={() =>
-                        handleToggleMatchEnabled(emitter)
-                      }
-                      onToggleRandomized={() => handleToggleRandomized(emitter)}
-                    />
-                  )}
-                </Fragment>
+                    </div>
+                  </td>
+                </tr>
               );
             })}
           </tbody>

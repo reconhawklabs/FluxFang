@@ -7,22 +7,23 @@
 //   needsSetup   -> Setup (forced, any path)
 //   !authed      -> Login (forced, any path)
 //   else         -> AppShell + nested page routes
-import { Navigate, Route, Routes } from 'react-router-dom';
-import { useAuth } from './hooks/useAuth';
-import { useLiveEvents } from './hooks/useLiveEvents';
-import { api } from './api/client';
-import AppShell from './components/AppShell';
-import Setup from './pages/Setup';
-import Login from './pages/Login';
-import Dashboard from './pages/Dashboard';
-import DataSources from './pages/DataSources';
-import Emissions from './pages/Emissions';
-import Emitters from './pages/Emitters';
-import Entities from './pages/Entities';
-import Zones from './pages/Zones';
-import Alerts from './pages/Alerts';
-import Notifications from './pages/Notifications';
-import MapView from './pages/MapView';
+import { Navigate, Route, Routes } from "react-router-dom";
+import { useAuth } from "./hooks/useAuth";
+import { useLiveEvents } from "./hooks/useLiveEvents";
+import { api } from "./api/client";
+import AppShell from "./components/AppShell";
+import Setup from "./pages/Setup";
+import Login from "./pages/Login";
+import Dashboard from "./pages/Dashboard";
+import DataSources from "./pages/DataSources";
+import Emissions from "./pages/Emissions";
+import Emitters from "./pages/Emitters";
+import EmitterDetailPage from "./pages/EmitterDetailPage";
+import Entities from "./pages/Entities";
+import Zones from "./pages/Zones";
+import Alerts from "./pages/Alerts";
+import Notifications from "./pages/Notifications";
+import MapView from "./pages/MapView";
 
 export default function App() {
   const { needsSetup, authed, loading, refetch } = useAuth();
@@ -65,6 +66,7 @@ export default function App() {
         <Route path="data-sources" element={<DataSources />} />
         <Route path="emissions" element={<Emissions />} />
         <Route path="emitters" element={<Emitters />} />
+        <Route path="emitters/:id" element={<EmitterDetailPage />} />
         <Route path="entities" element={<Entities />} />
         <Route path="zones" element={<Zones />} />
         <Route path="map" element={<MapView />} />

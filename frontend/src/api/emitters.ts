@@ -164,6 +164,12 @@ export function patchEmitter(
   return patch<Emitter>(`/api/emitters/${id}`, body);
 }
 
+/** `GET /api/emitters/:id` — a single emitter by id (backend handler
+ * `get_emitter`), backing the emitter detail page. */
+export function getEmitter(id: string): Promise<Emitter> {
+  return get<Emitter>(`/api/emitters/${encodeURIComponent(id)}`);
+}
+
 /** `POST /api/emitters/:id/rule { match_criteria }` — replace an existing
  * emitter's match rule (the Emitters page's expanded-row rule editor). The
  * backend validates the rule, persists it, then re-attaches every already-
