@@ -47,7 +47,12 @@ fn wifi_catalog() -> Vec<FieldDef> {
         field(
             "frame_type",
             "Frame type",
-            FieldType::Enum(vec!["beacon".to_string(), "probe_request".to_string()]),
+            FieldType::Enum(vec![
+                "beacon".to_string(),
+                "probe_request".to_string(),
+                "association_request".to_string(),
+                "reassociation_request".to_string(),
+            ]),
         ),
         field("channel", "Channel", FieldType::Number),
         field("signal_strength", "Signal strength", FieldType::Number),
@@ -96,5 +101,19 @@ mod tests {
         assert!(channel.ops.contains(&Op::Gte));
         assert!(channel.ops.contains(&Op::Lte));
         assert!(!channel.ops.contains(&Op::Matches));
+    }
+
+    #[test]
+    fn wifi_catalog_frame_type_enum_includes_association_frames() {
+        let c = catalog_for("wifi");
+        let ft = c.iter().find(|f| f.key == "frame_type").unwrap();
+        match &ft.ty {
+            FieldType::Enum(values) => {
+                assert!(values.contains(&"beacon".to_string()));
+                assert!(values.contains(&"association_request".to_string()));
+                assert!(values.contains(&"reassociation_request".to_string()));
+            }
+            other => panic!("frame_type should be an Enum, got {other:?}"),
+        }
     }
 }
