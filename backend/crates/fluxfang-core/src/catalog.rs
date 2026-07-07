@@ -59,11 +59,35 @@ fn wifi_catalog() -> Vec<FieldDef> {
     ]
 }
 
+fn bluetooth_catalog() -> Vec<FieldDef> {
+    vec![
+        field("address", "Address", FieldType::Mac),
+        field("name", "Local name", FieldType::Text),
+        field("vendor", "Vendor", FieldType::Text),
+        field("device_type", "Device type", FieldType::Text),
+        field("service_uuid", "Service UUID", FieldType::Text),
+        field("company_id", "Company ID", FieldType::Number),
+        field("rssi", "RSSI", FieldType::Number),
+        field("tx_power", "TX power", FieldType::Number),
+        field(
+            "address_type",
+            "Address type",
+            FieldType::Enum(vec!["public".to_string(), "random".to_string()]),
+        ),
+        field(
+            "frame_type",
+            "Frame type",
+            FieldType::Enum(vec!["advertisement".to_string()]),
+        ),
+    ]
+}
+
 /// Return the field catalog for a data source `kind` (e.g. `"wifi"`).
 /// Unknown kinds return an empty catalog.
 pub fn catalog_for(kind: &str) -> Vec<FieldDef> {
     match kind {
         "wifi" => wifi_catalog(),
+        "bluetooth" => bluetooth_catalog(),
         _ => Vec::new(),
     }
 }
@@ -91,7 +115,16 @@ mod tests {
 
     #[test]
     fn unknown_kind_returns_empty_catalog() {
-        assert!(catalog_for("bluetooth").is_empty());
+        assert!(catalog_for("zigbee").is_empty());
+    }
+
+    #[test]
+    fn bluetooth_catalog_exposes_address_and_name() {
+        let c = catalog_for("bluetooth");
+        assert!(c
+            .iter()
+            .any(|f| f.key == "address" && f.ty == FieldType::Mac));
+        assert!(c.iter().any(|f| f.key == "name" && f.ty == FieldType::Text));
     }
 
     #[test]
