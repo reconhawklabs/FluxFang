@@ -357,15 +357,18 @@ async fn auto_create_emitter(ctx: &IngestCtx, data_source_id: Uuid, emission: &m
         return;
     };
 
-    let match_criteria = serde_json::to_value(Rule {
-        match_mode: MatchMode::All,
-        conditions: vec![Condition {
-            field: classification.identity_field.clone(),
-            op: Op::Eq,
-            value: serde_json::Value::String(classification.identity_value.clone()),
-        }],
-    })
-    .expect("Rule always serializes to JSON");
+    let match_criteria = match &classification.match_criteria {
+        Some(rule) => serde_json::to_value(rule).expect("Rule always serializes to JSON"),
+        None => serde_json::to_value(Rule {
+            match_mode: MatchMode::All,
+            conditions: vec![Condition {
+                field: classification.identity_field.clone(),
+                op: Op::Eq,
+                value: serde_json::Value::String(classification.identity_value.clone()),
+            }],
+        })
+        .expect("Rule always serializes to JSON"),
+    };
 
     let new_emitter = NewEmitter {
         name: classification.name.clone(),
@@ -488,6 +491,25 @@ mod tests {
         )
         .await
         .expect("seed wifi data_source with config")
+        .id
+    }
+
+    /// A bluetooth `scan`-mode data source with an explicit `config`
+    /// (Phase A4 bluetooth auto-create tests need
+    /// `{"auto_create_emitters": true}`) — mirrors
+    /// [`seed_wifi_source_with_config`].
+    async fn seed_bluetooth_source_with_config(pool: &PgPool, config: serde_json::Value) -> Uuid {
+        DataSourceRepo::insert(
+            pool,
+            NewDataSource {
+                kind: "bluetooth".to_string(),
+                mode: "scan".to_string(),
+                interface: Some("hci0".to_string()),
+                config,
+            },
+        )
+        .await
+        .expect("seed bluetooth data_source with config")
         .id
     }
 
@@ -1238,6 +1260,111 @@ mod tests {
         assert_eq!(
             emission.emitter_id, None,
             "no client emitter and auto-create off => unassigned, no enrichment, no panic"
+        );
+    }
+
+    #[tokio::test]
+    async fn bluetooth_advertisement_auto_creates_device_emitter() {
+        let pool = fresh_pool().await;
+        let ds = seed_bluetooth_source_with_config(
+            &pool,
+            serde_json::json!({"auto_create_emitters": true}),
+        )
+        .await;
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+
+        let (events_tx, _rx) = broadcast::channel(8);
+        let ctx = IngestCtx {
+            pool: pool.clone(),
+            sessions: Some(Arc::new(manager)),
+            events: events_tx,
+            secret_key: [0x11u8; 32],
+        };
+
+        let obs = RawObservation {
+            kind: "bluetooth".to_string(),
+            observed_at: base,
+            signal_strength: Some(-55),
+            payload: serde_json::json!({
+                "frame_type": "advertisement",
+                "address": "3c:15:c2:aa:bb:cc",
+                "address_type": "public",
+                "name": "Study Speaker",
+                "company_id": 76
+            }),
+        };
+        let emission = ingest(&ctx, ds, obs).await.unwrap();
+        let emitter_id = emission.emitter_id.expect("auto-created + attached");
+
+        let emitter = EmitterRepo::get(&pool, emitter_id).await.unwrap().unwrap();
+        assert_eq!(emitter.emitter_type.as_deref(), Some("bluetooth_device"));
+        assert_eq!(
+            emitter.name,
+            "BT Client \"Study Speaker\" (3c:15:c2:aa:bb:cc)"
+        );
+        assert_eq!(emitter.attributes["vendor"], "Apple, Inc.");
+    }
+
+    #[tokio::test]
+    async fn bluetooth_rotated_rpa_same_name_attaches_to_same_emitter() {
+        let pool = fresh_pool().await;
+        let ds = seed_bluetooth_source_with_config(
+            &pool,
+            serde_json::json!({"auto_create_emitters": true}),
+        )
+        .await;
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+
+        let (events_tx, _rx) = broadcast::channel(8);
+        let ctx = IngestCtx {
+            pool: pool.clone(),
+            sessions: Some(Arc::new(manager)),
+            events: events_tx,
+            secret_key: [0x11u8; 32],
+        };
+
+        let first = ingest(
+            &ctx,
+            ds,
+            RawObservation {
+                kind: "bluetooth".to_string(),
+                observed_at: base,
+                signal_strength: Some(-40),
+                payload: serde_json::json!({
+                    "frame_type": "advertisement",
+                    "address": "7a:11:11:11:11:11",
+                    "address_type": "random",
+                    "name": "Johns iPhone"
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+        let second = ingest(
+            &ctx,
+            ds,
+            RawObservation {
+                kind: "bluetooth".to_string(),
+                observed_at: base + ChronoDuration::seconds(10),
+                signal_strength: Some(-42),
+                payload: serde_json::json!({
+                    "frame_type": "advertisement",
+                    "address": "7c:22:22:22:22:22",  // rotated RPA
+                    "address_type": "random",
+                    "name": "Johns iPhone"           // same advertised name
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            first.emitter_id.unwrap(),
+            second.emitter_id.unwrap(),
+            "a rotated RPA advertising the same name must attach to the same emitter"
         );
     }
 }

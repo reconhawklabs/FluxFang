@@ -81,10 +81,24 @@ function ConfigSummary({ source }: { source: DataSource }) {
       </span>
     );
   }
+  if (source.kind === 'bluetooth') {
+    const activeScan = 'active_scan' in source.config && source.config.active_scan === true;
+    const autoCreate = 'auto_create_emitters' in source.config && source.config.auto_create_emitters === true;
+    return (
+      <>
+        <span className="font-mono text-slate-300">{source.interface}</span>
+        <span className="text-slate-500">
+          {' '}
+          ({activeScan ? 'active' : 'passive'}
+          {autoCreate ? ', auto' : ''})
+        </span>
+      </>
+    );
+  }
   return <span className="text-slate-500">—</span>;
 }
 
-type FormKind = 'wifi' | 'gps';
+type FormKind = 'wifi' | 'gps' | 'bluetooth';
 type FormWifiMode = 'monitor' | 'scan';
 type FormGpsMode = 'gpsd' | 'serial';
 
@@ -99,6 +113,12 @@ const WIFI_MODE_HELP: Record<FormWifiMode, string> = {
 
 const NO_WIFI_MESSAGE = 'No compatible WiFi card found.';
 const NO_SERIAL_MESSAGE = 'No compatible serial GPS device found.';
+const NO_BLUETOOTH_MESSAGE = 'No Bluetooth adapter found.';
+
+/** Bluetooth ships with a single mode for this spec — the dropdown still
+ * shows it (for a consistent Mode-select experience across kinds) but it's
+ * effectively static since there's only one `<option>`. */
+const BT_MODE_HELP = 'Passive BLE advertisement scanning via a host HCI adapter.';
 
 interface AddSourceFormProps {
   onCancel: () => void;
@@ -116,6 +136,10 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
   // captures both beacons and probe requests; scan only surfaces APs) —
   // either way the backend's ingest auto-create only fires when this is set.
   const [autoCreateEmitters, setAutoCreateEmitters] = useState(false);
+  // Bluetooth-only: opt-in active (scan-request) BLE scanning vs. the
+  // default passive advertisement listening. Defaults OFF, same rationale
+  // as `autoCreateEmitters` above.
+  const [btActiveScan, setBtActiveScan] = useState(false);
   const [gpsMode, setGpsMode] = useState<FormGpsMode>('gpsd');
   const [host, setHost] = useState('127.0.0.1');
   const [port, setPort] = useState('2947');
@@ -135,8 +159,10 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
   const devicesErrored = devicesQuery.isError;
   const wifiInterfaces = devicesQuery.data?.wifi_interfaces ?? [];
   const serialDevices = devicesQuery.data?.serial_devices ?? [];
+  const bluetoothInterfaces = devicesQuery.data?.bluetooth_interfaces ?? [];
   const wifiHasDevices = wifiInterfaces.length > 0;
   const serialHasDevices = serialDevices.length > 0;
+  const bluetoothHasDevices = bluetoothInterfaces.length > 0;
 
   function handleSubmit(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
@@ -147,6 +173,16 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
         mode: wifiMode,
         interface: iface,
         config: { auto_create_emitters: autoCreateEmitters },
+      });
+      return;
+    }
+
+    if (kind === 'bluetooth') {
+      onSubmit({
+        kind: 'bluetooth',
+        mode: 'scan',
+        interface: iface,
+        config: { auto_create_emitters: autoCreateEmitters, active_scan: btActiveScan },
       });
       return;
     }
@@ -168,6 +204,8 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
     // Require the selection to still be one of the currently-enumerated
     // interfaces — guards against a stale pick after a Refresh changes the list.
     canSubmit = !devicesLoading && !devicesErrored && wifiInterfaces.includes(iface);
+  } else if (kind === 'bluetooth') {
+    canSubmit = !devicesLoading && !devicesErrored && bluetoothInterfaces.includes(iface);
   } else if (gpsMode === 'serial') {
     canSubmit = !devicesLoading && !devicesErrored && serialDevices.includes(device);
   } else {
@@ -217,6 +255,7 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
           >
             <option value="wifi">Wifi</option>
             <option value="gps">GPS</option>
+            <option value="bluetooth">Bluetooth</option>
           </select>
         </div>
 
@@ -277,6 +316,79 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
               <p className="text-xs text-slate-500">
                 When enabled, each new access point or client device seen on this source is
                 auto-registered as an emitter with a visible, toggleable match rule.
+              </p>
+            </div>
+          </>
+        )}
+
+        {kind === 'bluetooth' && (
+          <>
+            <div className="space-y-1">
+              <label htmlFor="ds-bt-mode" className={labelClassName}>
+                Mode
+              </label>
+              <select id="ds-bt-mode" value="scan" disabled className={inputClassName}>
+                <option value="scan">Scanning</option>
+              </select>
+              <p className="text-xs text-slate-500">{BT_MODE_HELP}</p>
+            </div>
+
+            <div className="space-y-1">
+              <label htmlFor="ds-bt-interface" className={labelClassName}>
+                Adapter
+              </label>
+              {devicesLoading && <p className="text-sm text-slate-500">Loading adapters…</p>}
+              {!devicesLoading && !devicesErrored && bluetoothHasDevices && (
+                <select
+                  id="ds-bt-interface"
+                  value={iface}
+                  onChange={(event) => setIface(event.target.value)}
+                  className={`font-mono ${inputClassName}`}
+                >
+                  <option value="">Select an adapter…</option>
+                  {bluetoothInterfaces.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {!devicesLoading && !devicesErrored && !bluetoothHasDevices && (
+                <p className="text-sm text-amber-400">{NO_BLUETOOTH_MESSAGE}</p>
+              )}
+            </div>
+
+            <div className="space-y-1">
+              <label className="flex items-center gap-2 text-sm text-slate-200">
+                <input
+                  id="ds-bt-auto-create-emitters"
+                  type="checkbox"
+                  checked={autoCreateEmitters}
+                  onChange={(event) => setAutoCreateEmitters(event.target.checked)}
+                  className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
+                />
+                Automatically create emitters (by device address)
+              </label>
+              <p className="text-xs text-slate-500">
+                When enabled, each new Bluetooth device seen on this source is auto-registered as
+                an emitter with a visible, toggleable match rule.
+              </p>
+            </div>
+
+            <div className="space-y-1">
+              <label className="flex items-center gap-2 text-sm text-slate-200">
+                <input
+                  id="ds-bt-active-scan"
+                  type="checkbox"
+                  checked={btActiveScan}
+                  onChange={(event) => setBtActiveScan(event.target.checked)}
+                  className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
+                />
+                Enable Active Scanning
+              </label>
+              <p className="text-xs text-slate-500">
+                Passive scanning listens only for advertisements. Active scanning also
+                sends scan requests to probe devices for more data.
               </p>
             </div>
           </>

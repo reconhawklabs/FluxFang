@@ -187,7 +187,7 @@ async fn attach_emissions_matching_assigns_all_matching_wifi_emissions_regardles
     let non_matching = insert_unassigned_wifi(&pool, ds, session, "00:00:00:00:00:00").await;
 
     let rule = bssid_rule("aa:bb:cc:dd:ee:ff");
-    let affected = EmitterRepo::attach_emissions_matching(&pool, emitter.id, &rule)
+    let affected = EmitterRepo::attach_emissions_matching(&pool, emitter.id, &rule, "wifi")
         .await
         .unwrap();
     assert_eq!(
@@ -277,7 +277,7 @@ async fn attach_emissions_matching_returns_zero_when_nothing_matches() {
     insert_unassigned_wifi(&pool, ds, session, "00:00:00:00:00:00").await;
 
     let rule = bssid_rule("aa:bb:cc:dd:ee:ff");
-    let affected = EmitterRepo::attach_emissions_matching(&pool, emitter.id, &rule)
+    let affected = EmitterRepo::attach_emissions_matching(&pool, emitter.id, &rule, "wifi")
         .await
         .unwrap();
     assert_eq!(affected, 0);
@@ -307,7 +307,7 @@ async fn attach_emissions_matching_rejects_invalid_rule_instead_of_silently_skip
         }],
     };
 
-    let err = EmitterRepo::attach_emissions_matching(&pool, emitter.id, &invalid_rule)
+    let err = EmitterRepo::attach_emissions_matching(&pool, emitter.id, &invalid_rule, "wifi")
         .await
         .unwrap_err();
     assert!(
@@ -333,7 +333,9 @@ async fn count_matching_counts_all_matching_regardless_of_assignment_without_ass
     insert_unassigned_wifi(&pool, ds, session, "00:00:00:00:00:00").await;
 
     let rule = bssid_rule("aa:bb:cc:dd:ee:ff");
-    let count = EmitterRepo::count_matching(&pool, &rule).await.unwrap();
+    let count = EmitterRepo::count_matching(&pool, &rule, "wifi")
+        .await
+        .unwrap();
     assert_eq!(
         count, 2,
         "count must include already-assigned matching emissions"
@@ -361,8 +363,97 @@ async fn count_matching_rejects_invalid_rule() {
             value: serde_json::json!("x"),
         }],
     };
-    let err = EmitterRepo::count_matching(&pool, &rule).await.unwrap_err();
+    let err = EmitterRepo::count_matching(&pool, &rule, "wifi")
+        .await
+        .unwrap_err();
     assert!(matches!(err, EmitterRuleError::Rule(_)));
+}
+
+// ---------------------------------------------------------------------
+// Task 4: generalize attach_emissions_matching/count_matching/
+// create_with_entity backfill from hardcoded kind = 'wifi' to the
+// emitter's kind, so a bluetooth emitter rule validates/backfills against
+// the bluetooth catalog and bluetooth emissions instead.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn attach_emissions_matching_bluetooth_filters_by_kind_and_catalog() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+
+    // Two emissions with the same address field but different kinds.
+    let bt_emission_id = {
+        let e = EmissionRepo::insert(
+            &pool,
+            NewEmission {
+                kind: "bluetooth".to_string(),
+                ..NewEmission::wifi(
+                    ds,
+                    session,
+                    serde_json::json!({"address": "aa:bb:cc:dd:ee:ff"}),
+                )
+            },
+        )
+        .await
+        .unwrap();
+        e.id
+    };
+    // Same payload shape/value as the bluetooth emission above (an
+    // "address" field with the identical value) — only the `kind` filter
+    // distinguishes the two rows, so this genuinely exercises the `kind =
+    // $2` filter rather than merely benefiting from a catalog/field
+    // mismatch (see Task 4 review finding: the previous wifi row used a
+    // `bssid`/`channel` payload, which was excluded on shape alone).
+    let wifi_emission_id = {
+        let e = EmissionRepo::insert(
+            &pool,
+            NewEmission::wifi(
+                ds,
+                session,
+                serde_json::json!({"address": "aa:bb:cc:dd:ee:ff"}),
+            ),
+        )
+        .await
+        .unwrap();
+        e.id
+    };
+
+    let emitter = EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            emitter_type: Some("bluetooth_device".to_string()),
+            ..new_emitter("BT Device")
+        },
+    )
+    .await
+    .unwrap();
+    let emitter_id = emitter.id;
+
+    let rule: Rule = serde_json::from_str(
+        r#"{"match":"all","conditions":[{"field":"address","op":"eq","value":"aa:bb:cc:dd:ee:ff"}]}"#,
+    )
+    .unwrap();
+
+    let attached = EmitterRepo::attach_emissions_matching(&pool, emitter_id, &rule, "bluetooth")
+        .await
+        .unwrap();
+    assert_eq!(attached, 1, "only the bluetooth emission matches");
+
+    let emission = EmissionRepo::get(&pool, bt_emission_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(emission.emitter_id, Some(emitter_id));
+
+    let wifi_emission = EmissionRepo::get(&pool, wifi_emission_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        wifi_emission.emitter_id, None,
+        "the wifi emission with the same address value must not be attached — only kind differs"
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -672,6 +763,7 @@ async fn create_with_entity_reassigns_all_matching_emissions_regardless_of_prior
         None,
         match_criteria,
         Some(&rule),
+        "wifi",
     )
     .await
     .unwrap();

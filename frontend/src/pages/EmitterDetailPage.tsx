@@ -29,6 +29,7 @@ import {
   RULE_EDITOR_KIND,
   TypeBadge,
   asRule,
+  attributeText,
   formatAttributeValue,
   formatTimestamp,
   isRandomizedMac,
@@ -280,6 +281,22 @@ export default function EmitterDetailPage() {
         <dd>
           <MacIdentityCell emitter={emitter} />
         </dd>
+        {attributeText(emitter.attributes, "vendor") && (
+          <>
+            <dt className="text-slate-500">Vendor</dt>
+            <dd className="text-slate-300">
+              {attributeText(emitter.attributes, "vendor")}
+            </dd>
+          </>
+        )}
+        {attributeText(emitter.attributes, "device_type") && (
+          <>
+            <dt className="text-slate-500">Device type</dt>
+            <dd className="text-slate-300">
+              {attributeText(emitter.attributes, "device_type")}
+            </dd>
+          </>
+        )}
         <dt className="text-slate-500">First seen</dt>
         <dd className="text-slate-300">
           {formatTimestamp(emitter.first_seen_at)}

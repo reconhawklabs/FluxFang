@@ -1,0 +1,7 @@
+# Bluetooth SIG assigned Company Identifiers (seed subset).
+# Regenerate/expand with backend/scripts/fetch-bt-vendor-data.sh
+6	Microsoft
+76	Apple, Inc.
+117	Samsung Electronics Co. Ltd.
+224	Google
+89	Nordic Semiconductor ASA

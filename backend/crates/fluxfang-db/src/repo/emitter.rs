@@ -578,30 +578,33 @@ impl EmitterRepo {
             .await
     }
 
-    /// Backfill: (re)assign every `kind = 'wifi'` emission matching `rule` to
+    /// Backfill: (re)assign every `kind = <kind>` emission matching `rule` to
     /// `emitter_id` — regardless of whether it's currently unassigned or
     /// already belongs to a different emitter — then refresh the emitter's
     /// `first_seen_at`/`last_seen_at` from all emissions now assigned to it.
-    /// Returns the number of emissions (re)assigned. See module docs for the
-    /// SQL/bind approach and why this reassigns rather than skipping
-    /// already-assigned rows.
+    /// `rule` is validated/translated against `catalog_for(kind)` (Task 4:
+    /// `kind` is the data-source kind the emitter belongs to, e.g. `"wifi"`
+    /// or `"bluetooth"` — see `fluxfang_core::catalog_kind_for`). Returns the
+    /// number of emissions (re)assigned. See module docs for the SQL/bind
+    /// approach and why this reassigns rather than skipping already-assigned
+    /// rows.
     pub async fn attach_emissions_matching(
         pool: &PgPool,
         emitter_id: Uuid,
         rule: &Rule,
+        kind: &str,
     ) -> Result<u64, EmitterRuleError> {
-        let catalog = catalog_for("wifi");
-        // `$1` is the emitter id (bound below), so the translator's own
-        // placeholders continue from `$2`.
+        let catalog = catalog_for(kind);
+        // `$1` is the emitter id and `$2` is `kind` (both bound below), so
+        // the translator's own placeholders continue from `$3`.
         let (frag, binds) =
-            conditions_to_sql_checked(&rule.conditions, rule.match_mode, 2, &catalog)?;
+            conditions_to_sql_checked(&rule.conditions, rule.match_mode, 3, &catalog)?;
 
-        let update_sql =
-            format!("UPDATE emission SET emitter_id = $1 WHERE kind = 'wifi' AND {frag}");
+        let update_sql = format!("UPDATE emission SET emitter_id = $1 WHERE kind = $2 AND {frag}");
 
         let mut tx = pool.begin().await.map_err(EmitterRuleError::Sql)?;
 
-        let mut q = sqlx::query(&update_sql).bind(emitter_id);
+        let mut q = sqlx::query(&update_sql).bind(emitter_id).bind(kind);
         for v in &binds {
             let text = match v.clone() {
                 serde_json::Value::String(s) => s,
@@ -635,18 +638,22 @@ impl EmitterRepo {
         Ok(affected)
     }
 
-    /// Preview how many `kind = 'wifi'` emissions `rule` would match —
+    /// Preview how many `kind = <kind>` emissions `rule` would match —
     /// including ones already assigned to a different emitter, since
     /// [`Self::attach_emissions_matching`] would reclaim those too — without
     /// assigning anything. Same WHERE as `attach_emissions_matching`, minus
     /// the `UPDATE`.
-    pub async fn count_matching(pool: &PgPool, rule: &Rule) -> Result<i64, EmitterRuleError> {
-        let catalog = catalog_for("wifi");
+    pub async fn count_matching(
+        pool: &PgPool,
+        rule: &Rule,
+        kind: &str,
+    ) -> Result<i64, EmitterRuleError> {
+        let catalog = catalog_for(kind);
         let (frag, binds) =
-            conditions_to_sql_checked(&rule.conditions, rule.match_mode, 1, &catalog)?;
+            conditions_to_sql_checked(&rule.conditions, rule.match_mode, 2, &catalog)?;
 
-        let sql = format!("SELECT COUNT(*) FROM emission WHERE kind = 'wifi' AND {frag}");
-        let mut q = sqlx::query_as::<_, (i64,)>(&sql);
+        let sql = format!("SELECT COUNT(*) FROM emission WHERE kind = $1 AND {frag}");
+        let mut q = sqlx::query_as::<_, (i64,)>(&sql).bind(kind);
         for v in &binds {
             let text = match v.clone() {
                 serde_json::Value::String(s) => s,
@@ -689,6 +696,7 @@ impl EmitterRepo {
         emitter_type: Option<String>,
         match_criteria: serde_json::Value,
         rule: Option<&Rule>,
+        kind: &str,
     ) -> Result<EmitterWithEntity, EmitterRuleError> {
         let mut tx = pool.begin().await.map_err(EmitterRuleError::Sql)?;
 
@@ -718,17 +726,19 @@ impl EmitterRepo {
 
         let mut attached_count: u64 = 0;
         if let Some(rule) = rule {
-            let catalog = catalog_for("wifi");
+            let catalog = catalog_for(kind);
+            // `$1` is the emitter id and `$2` is `kind` (both bound below),
+            // so the translator's own placeholders continue from `$3`.
             let (frag, binds) =
-                conditions_to_sql_checked(&rule.conditions, rule.match_mode, 2, &catalog)?;
+                conditions_to_sql_checked(&rule.conditions, rule.match_mode, 3, &catalog)?;
 
             // No `emitter_id IS NULL` guard here — consistent with
             // `attach_emissions_matching`/`count_matching` (see module
-            // docs): reassign ALL matching `kind = 'wifi'` emissions to the
+            // docs): reassign ALL matching `kind = <kind>` emissions to the
             // freshly-created emitter, regardless of any prior assignment.
             let update_sql =
-                format!("UPDATE emission SET emitter_id = $1 WHERE kind = 'wifi' AND {frag}");
-            let mut q = sqlx::query(&update_sql).bind(emitter.id);
+                format!("UPDATE emission SET emitter_id = $1 WHERE kind = $2 AND {frag}");
+            let mut q = sqlx::query(&update_sql).bind(emitter.id).bind(kind);
             for v in &binds {
                 let text = match v.clone() {
                     serde_json::Value::String(s) => s,

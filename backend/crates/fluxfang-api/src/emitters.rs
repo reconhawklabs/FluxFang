@@ -98,7 +98,8 @@ use uuid::Uuid;
 
 use fluxfang_core::rule::{Condition, MatchMode, Op};
 use fluxfang_core::{
-    catalog_for, conditions_to_sql_checked, is_known_emitter_type, Rule, RuleSqlError,
+    catalog_for, catalog_kind_for, conditions_to_sql_checked, is_known_emitter_type, Rule,
+    RuleSqlError,
 };
 use fluxfang_db::models::{NewEmitter, NewEntity};
 use fluxfang_db::repo::emitter::{EmitterListFilter, EmitterRuleError, EmitterWithEntity};
@@ -129,12 +130,13 @@ pub fn protected_routes() -> Router<AppState> {
         .route("/api/emitters/:id/rule", post(set_rule))
 }
 
-/// Validate `rule.conditions` against the `"wifi"` catalog (this schema's
-/// only supported kind) with no DB access at all — see module docs for why
-/// this runs before any mutation rather than relying on the backfill call
-/// itself to reject a bad rule.
-fn validate_rule(rule: &Rule) -> Result<(), RuleSqlError> {
-    let catalog = catalog_for("wifi");
+/// Validate `rule.conditions` against `kind`'s catalog (Task 4: `kind` is
+/// the data-source kind the emitter belongs to, e.g. `"wifi"` or
+/// `"bluetooth"` — see `fluxfang_core::catalog_kind_for`) with no DB access
+/// at all — see module docs for why this runs before any mutation rather
+/// than relying on the backfill call itself to reject a bad rule.
+fn validate_rule(rule: &Rule, kind: &str) -> Result<(), RuleSqlError> {
+    let catalog = catalog_for(kind);
     conditions_to_sql_checked(&rule.conditions, rule.match_mode, 1, &catalog).map(|_| ())
 }
 
@@ -269,9 +271,10 @@ async fn create_emitter(
         ));
     }
     validate_emitter_type(&req.emitter_type)?;
+    let kind = catalog_kind_for(req.emitter_type.as_deref());
 
     let (match_criteria, rule) =
-        resolve_match_criteria(&state, req.match_criteria, req.from_emission_id).await?;
+        resolve_match_criteria(&state, req.match_criteria, req.from_emission_id, kind).await?;
 
     let new = NewEmitter {
         name: req.name,
@@ -284,7 +287,7 @@ async fn create_emitter(
     let created = EmitterRepo::insert(&state.pool, new).await?;
 
     let attached_count = if let Some(rule) = &rule {
-        EmitterRepo::attach_emissions_matching(&state.pool, created.id, rule).await?
+        EmitterRepo::attach_emissions_matching(&state.pool, created.id, rule, kind).await?
     } else {
         0
     };
@@ -314,10 +317,11 @@ async fn resolve_match_criteria(
     state: &AppState,
     match_criteria: Option<serde_json::Value>,
     from_emission_id: Option<Uuid>,
+    kind: &str,
 ) -> Result<(serde_json::Value, Option<Rule>), ApiError> {
     if let Some(raw) = match_criteria {
         let rule = parse_rule(&raw)?;
-        validate_rule(&rule).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        validate_rule(&rule, kind).map_err(|e| ApiError::BadRequest(e.to_string()))?;
         return Ok((raw, Some(rule)));
     }
 
@@ -350,7 +354,7 @@ async fn resolve_match_criteria(
                 value: serde_json::Value::String(bssid.to_string()),
             }],
         };
-        validate_rule(&rule).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        validate_rule(&rule, kind).map_err(|e| ApiError::BadRequest(e.to_string()))?;
         let json = serde_json::to_value(&rule).expect("Rule always serializes");
         return Ok((json, Some(rule)));
     }
@@ -478,15 +482,17 @@ async fn set_rule(
     Path(id): Path<Uuid>,
     Json(req): Json<SetRuleRequest>,
 ) -> Result<Json<EmitterAndCount>, ApiError> {
-    if EmitterRepo::get(&state.pool, id).await?.is_none() {
-        return Err(ApiError::NotFound);
-    }
+    let existing = EmitterRepo::get(&state.pool, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let kind = catalog_kind_for(existing.emitter_type.as_deref());
 
     let rule = parse_rule(&req.match_criteria)?;
-    validate_rule(&rule).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    validate_rule(&rule, kind).map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
     EmitterRepo::update_rule(&state.pool, id, &req.match_criteria).await?;
-    let attached_count = EmitterRepo::attach_emissions_matching(&state.pool, id, &rule).await?;
+    let attached_count =
+        EmitterRepo::attach_emissions_matching(&state.pool, id, &rule, kind).await?;
 
     let emitter = EmitterRepo::get(&state.pool, id)
         .await?
@@ -536,11 +542,12 @@ async fn create_with_entity(
     Json(req): Json<CreateWithEntityRequest>,
 ) -> Result<(StatusCode, Json<EmitterEntityAndCount>), ApiError> {
     validate_emitter_type(&req.emitter.emitter_type)?;
+    let kind = catalog_kind_for(req.emitter.emitter_type.as_deref());
 
     let (match_criteria, rule) = match req.emitter.match_criteria {
         Some(raw) => {
             let rule = parse_rule(&raw)?;
-            validate_rule(&rule).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+            validate_rule(&rule, kind).map_err(|e| ApiError::BadRequest(e.to_string()))?;
             (raw, Some(rule))
         }
         None => (serde_json::json!({}), None),
@@ -557,6 +564,7 @@ async fn create_with_entity(
         req.emitter.emitter_type,
         match_criteria,
         rule.as_ref(),
+        kind,
     )
     .await?;
 
@@ -579,6 +587,11 @@ async fn create_with_entity(
 #[derive(Debug, Deserialize)]
 struct PreviewQuery {
     rule: String,
+    /// Data-source kind to validate/preview `rule` against (e.g. `"wifi"` or
+    /// `"bluetooth"`). Defaults to `"wifi"` when omitted, preserving prior
+    /// behavior for existing callers that never sent it.
+    #[serde(default)]
+    kind: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -590,11 +603,12 @@ async fn preview_emitters(
     State(state): State<AppState>,
     Query(q): Query<PreviewQuery>,
 ) -> Result<Json<MatchCountDto>, ApiError> {
+    let kind = q.kind.as_deref().unwrap_or("wifi");
     let rule: Rule = serde_json::from_str(&q.rule)
         .map_err(|e| ApiError::BadRequest(format!("invalid rule: {e}")))?;
-    validate_rule(&rule).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    validate_rule(&rule, kind).map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
-    let match_count = EmitterRepo::count_matching(&state.pool, &rule).await?;
+    let match_count = EmitterRepo::count_matching(&state.pool, &rule, kind).await?;
     Ok(Json(MatchCountDto { match_count }))
 }
 

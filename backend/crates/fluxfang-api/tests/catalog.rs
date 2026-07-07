@@ -71,7 +71,7 @@ async fn catalog_for_unknown_kind_is_empty_array() {
     let app = test_app().await;
     let cookie = login(&app).await;
 
-    let resp = get_with_cookie(&app, "/api/catalog/bluetooth", &cookie).await;
+    let resp = get_with_cookie(&app, "/api/catalog/zigbee", &cookie).await;
     assert_status(&resp, StatusCode::OK);
     assert_eq!(body_json(resp).await, serde_json::json!([]));
 }

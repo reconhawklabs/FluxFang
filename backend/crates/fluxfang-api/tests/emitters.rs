@@ -171,6 +171,49 @@ async fn create_emitter_from_emission_id_prefills_default_rule_and_attaches() {
     );
 }
 
+/// Review finding (Task 4 follow-up): `from_emission_id` always derives a
+/// wifi `bssid eq` rule (see module docs on `resolve_match_criteria`), but
+/// the caller can independently ask for a non-wifi `emitter_type` (e.g.
+/// `bluetooth_device`, kind `"bluetooth"`). That combination must be
+/// rejected — the bssid rule is nonsensical against the bluetooth catalog —
+/// and, crucially, rejected *before* any emitter row is committed (i.e. no
+/// orphan `bluetooth_device` emitter carrying a `bssid` rule left behind).
+#[tokio::test]
+async fn create_emitter_from_emission_id_with_mismatched_emitter_type_is_bad_request_and_creates_nothing(
+) {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+    let ds = seed_data_source(&pool).await;
+    let session = seed_session(&pool).await;
+    let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+
+    let bssid = "dd:dd:dd:dd:dd:dd";
+    let seed_id = insert_wifi(&pool, ds, session, bssid, "Cafe", 6, base).await;
+
+    let before = get_with_cookie(&app, "/api/emitters", &cookie).await;
+    assert_status(&before, StatusCode::OK);
+    let before_total = body_json(before).await["total"].as_i64().unwrap();
+
+    let body = json!({
+        "name": "Mismatched Device",
+        "emitter_type": "bluetooth_device",
+        "from_emission_id": seed_id,
+    })
+    .to_string();
+
+    let resp = post_json_with_cookie(&app, "/api/emitters", &body, &cookie).await;
+    assert_status(&resp, StatusCode::BAD_REQUEST);
+
+    let after = get_with_cookie(&app, "/api/emitters", &cookie).await;
+    assert_status(&after, StatusCode::OK);
+    let after_total = body_json(after).await["total"].as_i64().unwrap();
+
+    assert_eq!(
+        after_total, before_total,
+        "no emitter row should be created when the derived rule is rejected"
+    );
+}
+
 /// `POST /api/emitters` with an `emitter_type` stores it, and the created
 /// (and re-fetched) emitter's `type_label`/`category` derive from it via
 /// `fluxfang_core::{emitter_type_label, emitter_category}` — the frontend's
