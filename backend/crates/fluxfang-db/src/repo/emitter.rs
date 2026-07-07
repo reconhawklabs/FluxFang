@@ -321,6 +321,30 @@ impl EmitterRepo {
             .await
     }
 
+    /// Shallow-merge `patch`'s top-level keys into a **wifi_client** emitter's
+    /// `attributes` (`attributes = attributes || patch`, latest-wins per key),
+    /// leaving every other key intact. A no-op for a missing id or any emitter
+    /// whose `emitter_type` isn't `wifi_client` — the type guard lives in the
+    /// SQL, so no prior load/round-trip is needed. Used by ingest to record a
+    /// client's latest connected AP from an association/reassociation frame
+    /// (see the wifi-association design doc); deliberately narrow, unlike the
+    /// wholesale [`Self::set_attributes`].
+    pub async fn merge_client_attributes(
+        pool: &PgPool,
+        id: Uuid,
+        patch: &serde_json::Value,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE emitter SET attributes = attributes || $2 \
+             WHERE id = $1 AND emitter_type = 'wifi_client'",
+        )
+        .bind(id)
+        .bind(patch)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn list(pool: &PgPool) -> Result<Vec<Emitter>, sqlx::Error> {
         let sql = format!("SELECT {EMITTER_COLUMNS} FROM emitter ORDER BY created_at ASC");
         sqlx::query_as::<_, Emitter>(&sql).fetch_all(pool).await

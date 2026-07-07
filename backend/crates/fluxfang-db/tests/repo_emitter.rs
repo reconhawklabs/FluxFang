@@ -559,6 +559,80 @@ async fn set_attributes_roundtrips_json() {
     assert_eq!(got.attributes, attrs);
 }
 
+#[tokio::test]
+async fn merge_client_attributes_merges_on_client_and_noops_on_other_types() {
+    let pool = fresh_pool().await;
+
+    let client = EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            name: "WiFi Client".to_string(),
+            type_: None,
+            entity_id: None,
+            match_criteria: serde_json::json!({}),
+            emitter_type: Some("wifi_client".to_string()),
+            attributes: serde_json::json!({
+                "src_mac": "3a:de:ad:be:ef:00",
+                "randomized_mac": true
+            }),
+            match_enabled: true,
+            identity_key: Some("wifi_client:3a:de:ad:be:ef:00".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+
+    EmitterRepo::merge_client_attributes(
+        &pool,
+        client.id,
+        &serde_json::json!({
+            "connected_bssid": "aa:bb:cc:dd:ee:ff",
+            "connected_ssid": "HomeNet"
+        }),
+    )
+    .await
+    .unwrap();
+
+    let got = EmitterRepo::get(&pool, client.id).await.unwrap().unwrap();
+    // Merged: new keys added, existing keys preserved.
+    assert_eq!(got.attributes["src_mac"], "3a:de:ad:be:ef:00");
+    assert_eq!(got.attributes["randomized_mac"], serde_json::json!(true));
+    assert_eq!(got.attributes["connected_bssid"], "aa:bb:cc:dd:ee:ff");
+    assert_eq!(got.attributes["connected_ssid"], "HomeNet");
+
+    // A wifi_access_point emitter is left untouched (SQL type guard).
+    let ap = EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            name: "AP".to_string(),
+            type_: None,
+            entity_id: None,
+            match_criteria: serde_json::json!({}),
+            emitter_type: Some("wifi_access_point".to_string()),
+            attributes: serde_json::json!({"bssid": "aa:bb:cc:dd:ee:ff"}),
+            match_enabled: true,
+            identity_key: Some("wifi_access_point:aa:bb:cc:dd:ee:ff".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+
+    EmitterRepo::merge_client_attributes(
+        &pool,
+        ap.id,
+        &serde_json::json!({"connected_bssid": "zz:zz:zz:zz:zz:zz"}),
+    )
+    .await
+    .unwrap();
+
+    let got_ap = EmitterRepo::get(&pool, ap.id).await.unwrap().unwrap();
+    assert_eq!(
+        got_ap.attributes,
+        serde_json::json!({"bssid": "aa:bb:cc:dd:ee:ff"})
+    );
+    assert!(got_ap.attributes.get("connected_bssid").is_none());
+}
+
 // ---------------------------------------------------------------------
 // Phase 1b: create_with_entity's backfill consistency fix (drop the
 // `emitter_id IS NULL` guard so it reassigns ALL matching emissions, same

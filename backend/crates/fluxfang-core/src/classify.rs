@@ -65,6 +65,9 @@ fn classify_wifi(payload: &Value) -> Option<Classification> {
     match payload.get("frame_type").and_then(Value::as_str) {
         Some("beacon") => classify_wifi_beacon(payload),
         Some("probe_request") => classify_wifi_probe_request(payload),
+        Some("association_request") | Some("reassociation_request") => {
+            classify_wifi_association(payload)
+        }
         _ => None,
     }
 }
@@ -114,6 +117,35 @@ fn classify_wifi_probe_request(payload: &Value) -> Option<Classification> {
         attributes: serde_json::json!({
             "src_mac": src_mac,
             "randomized_mac": randomized,
+        }),
+    })
+}
+
+/// Client association/reassociation request → `wifi_client`, identified by
+/// the client's source MAC — the same identity as a probe request, so an
+/// association collapses onto that client's existing emitter rather than
+/// making a second one. Seeds the client's latest connected AP
+/// (`connected_bssid`/`connected_ssid`) from the frame's `target_bssid`/
+/// `target_ssid` for the case where a client's *first-ever* emission is an
+/// association (ingest additionally merges these onto an already-existing
+/// client — see the wifi-association design doc). No `src_mac` → no stable
+/// identity → `None`.
+fn classify_wifi_association(payload: &Value) -> Option<Classification> {
+    let src_mac = non_empty_str(payload, "src_mac")?;
+    let randomized = is_randomized_mac(&src_mac);
+    let connected_bssid = non_empty_str(payload, "target_bssid");
+    let connected_ssid = non_empty_str(payload, "target_ssid");
+    Some(Classification {
+        emitter_type: "wifi_client".to_string(),
+        category: "wifi".to_string(),
+        identity_field: "src_mac".to_string(),
+        identity_value: src_mac.clone(),
+        name: format!("WiFi Client {src_mac}"),
+        attributes: serde_json::json!({
+            "src_mac": src_mac,
+            "randomized_mac": randomized,
+            "connected_bssid": connected_bssid,
+            "connected_ssid": connected_ssid,
         }),
     })
 }
@@ -299,6 +331,51 @@ mod tests {
     #[test]
     fn classify_wifi_probe_request_missing_src_mac_is_none() {
         let payload = serde_json::json!({"frame_type": "probe_request"});
+        assert!(classify("wifi", &payload).is_none());
+    }
+
+    // -- classify: association / reassociation ------------------------------
+
+    #[test]
+    fn classify_wifi_association_request_is_client_with_connected_ap() {
+        let payload = serde_json::json!({
+            "frame_type": "association_request",
+            "src_mac": "3a:de:ad:be:ef:00",
+            "target_bssid": "aa:bb:cc:dd:ee:ff",
+            "target_ssid": "HomeNet"
+        });
+        let c = classify("wifi", &payload).expect("association classifies");
+        assert_eq!(c.emitter_type, "wifi_client");
+        assert_eq!(c.category, "wifi");
+        assert_eq!(c.identity_field, "src_mac");
+        assert_eq!(c.identity_value, "3a:de:ad:be:ef:00");
+        assert_eq!(c.name, "WiFi Client 3a:de:ad:be:ef:00");
+        assert_eq!(c.attributes["src_mac"], "3a:de:ad:be:ef:00");
+        assert_eq!(c.attributes["randomized_mac"], serde_json::json!(true));
+        assert_eq!(c.attributes["connected_bssid"], "aa:bb:cc:dd:ee:ff");
+        assert_eq!(c.attributes["connected_ssid"], "HomeNet");
+        assert_eq!(c.identity_key(), "wifi_client:3a:de:ad:be:ef:00");
+    }
+
+    #[test]
+    fn classify_wifi_reassociation_request_also_client_null_ssid_when_absent() {
+        let payload = serde_json::json!({
+            "frame_type": "reassociation_request",
+            "src_mac": "00:11:22:33:44:55",
+            "target_bssid": "aa:bb:cc:dd:ee:ff"
+        });
+        let c = classify("wifi", &payload).unwrap();
+        assert_eq!(c.emitter_type, "wifi_client");
+        assert_eq!(c.attributes["connected_bssid"], "aa:bb:cc:dd:ee:ff");
+        assert_eq!(c.attributes["connected_ssid"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn classify_wifi_association_missing_src_mac_is_none() {
+        let payload = serde_json::json!({
+            "frame_type": "association_request",
+            "target_bssid": "aa:bb:cc:dd:ee:ff"
+        });
         assert!(classify("wifi", &payload).is_none());
     }
 
