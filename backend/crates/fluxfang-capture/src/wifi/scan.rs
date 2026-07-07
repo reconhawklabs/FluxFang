@@ -186,6 +186,8 @@ impl PartialBss {
             // below), so there's no client `src_mac` to report here.
             src_mac: None,
             ssid: self.ssid,
+            target_bssid: None,
+            target_ssid: None,
             // Scan results are built from what the adapter's firmware
             // heard from each AP (beacons and/or probe responses) while
             // scanning — there's no meaningful distinction to draw here
