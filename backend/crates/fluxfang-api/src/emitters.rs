@@ -113,7 +113,7 @@ use fluxfang_db::models::{NewEmitter, NewEntity};
 use fluxfang_db::repo::emitter::{EmitterListFilter, EmitterRuleError, EmitterWithEntity};
 use fluxfang_db::{EmissionRepo, EmitterRepo};
 
-use crate::dto::{EmitterDto, EmitterTypeDto, EntityDto};
+use crate::dto::{EmitterDto, EntityDto, InUseEmitterTypeDto};
 use crate::state::AppState;
 
 /// Default page size when `limit` is omitted — same default `emissions.rs`/
@@ -502,13 +502,13 @@ async fn clear_emitters(State(state): State<AppState>) -> Result<Json<DeletedCou
 /// whatever rows happen to be loaded" approach.
 async fn list_emitter_types_in_use(
     State(state): State<AppState>,
-) -> Result<Json<Vec<EmitterTypeDto>>, ApiError> {
+) -> Result<Json<Vec<InUseEmitterTypeDto>>, ApiError> {
     let mut keys = EmitterRepo::distinct_types_in_use(&state.pool).await?;
-    let mut types: Vec<EmitterTypeDto> = keys
+    let mut types: Vec<InUseEmitterTypeDto> = keys
         .drain(..)
         .map(|key| {
             let label = fluxfang_core::emitter_type_label(&key).to_string();
-            EmitterTypeDto { key, label }
+            InUseEmitterTypeDto { key, label }
         })
         .collect();
     types.sort_by(|a, b| a.label.cmp(&b.label));

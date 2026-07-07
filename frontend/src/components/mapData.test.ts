@@ -1,13 +1,11 @@
-// Task 9.7 TDD target (task brief): given fixture emissions with some
-// null-location rows, `emissionsToHeatmapGeoJSON` drops those and keeps only
-// the located ones; given a zone, `zoneToCircleFeature` produces a closed
-// polygon whose ring sits ~`radius_m` from the center. These two are the
-// pure data-shaping functions the brief calls out to unit-test instead of GL
-// rendering — see `mapData.ts`'s module doc comment.
+// Unit tests for the pure data-shaping helpers in `mapData.ts` — the GeoJSON
+// shapers (points/emitter-markers/entity-markers) and `zoneToCircleFeature`
+// (a closed polygon whose ring sits ~`radius_m` from the center). These are
+// tested here instead of GL rendering — see `mapData.ts`'s module doc comment
+// for why (jsdom has no WebGL context).
 import { expect, test } from 'vitest';
 import {
   emissionPointsToHeatmapGeoJSON,
-  emissionsToHeatmapGeoJSON,
   emitterMarkersFromEmissions,
   entitiesToMarkerFeatures,
   pointsToHeatmapGeoJSON,
@@ -32,37 +30,6 @@ function makeEmission(overrides: Partial<Emission>): Emission {
     ...overrides,
   };
 }
-
-test('emissionsToHeatmapGeoJSON keeps only located emissions, dropping null-location ones', () => {
-  const emissions: Emission[] = [
-    makeEmission({ id: 'em-1', lon: 2.5, lat: 1.5 }),
-    makeEmission({ id: 'em-2', lon: null, lat: null }),
-    makeEmission({ id: 'em-3', lon: 3.1, lat: -0.4 }),
-    makeEmission({ id: 'em-4', lon: 1.0, lat: null }),
-    makeEmission({ id: 'em-5', lon: null, lat: 4.0 }),
-  ];
-
-  const geojson = emissionsToHeatmapGeoJSON(emissions);
-
-  expect(geojson.type).toBe('FeatureCollection');
-  // Only em-1 and em-3 have both lon and lat set.
-  expect(geojson.features).toHaveLength(2);
-  const ids = geojson.features.map((f) => f.properties.id);
-  expect(ids).toEqual(['em-1', 'em-3']);
-  expect(geojson.features[0].geometry.coordinates).toEqual([2.5, 1.5]);
-  expect(geojson.features[0].geometry.type).toBe('Point');
-});
-
-test('emissionsToHeatmapGeoJSON on an all-located list keeps every feature', () => {
-  const emissions: Emission[] = [
-    makeEmission({ id: 'a', lon: 0, lat: 0 }),
-    makeEmission({ id: 'b', lon: 10, lat: 10 }),
-    makeEmission({ id: 'c', lon: -10, lat: -10 }),
-  ];
-
-  const geojson = emissionsToHeatmapGeoJSON(emissions);
-  expect(geojson.features).toHaveLength(emissions.length);
-});
 
 test('entitiesToMarkerFeatures places one point feature per marker at its last location', () => {
   const features = entitiesToMarkerFeatures([

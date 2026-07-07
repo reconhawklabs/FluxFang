@@ -549,6 +549,13 @@ export default function MapView({
     () => allPointsQueries.some((query) => query.data?.truncated === true),
     [allPointsQueries],
   );
+  // Total located points that MATCH the current scope across all selected
+  // sources (the server-reported `total`, not the capped `points.length`), so
+  // the truncation notice can report "showing X of N" rather than a bare cap.
+  const totalMatchedPoints = useMemo(
+    () => allPointsQueries.reduce((sum, query) => sum + (query.data?.total ?? 0), 0),
+    [allPointsQueries],
+  );
 
   // Emitters are fetched only to resolve emitter *names* for the Emitters
   // marker layer's labels (`emitterNames` below). Interim `{limit: 500}` cap
@@ -1009,7 +1016,8 @@ export default function MapView({
           Dashboard's embedded map needs it too, not just the `/map` route. */}
       {anyTruncated && (
         <p className="text-xs text-amber-400">
-          Showing up to 50,000 points; some older points are hidden.
+          Showing {heatmapPoints.length.toLocaleString()} of{' '}
+          {totalMatchedPoints.toLocaleString()} points; older points are hidden.
         </p>
       )}
 

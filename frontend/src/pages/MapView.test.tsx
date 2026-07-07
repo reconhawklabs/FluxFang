@@ -647,7 +647,9 @@ test('shows a truncation notice when the points endpoint reports "truncated"', a
 
   render(<MapView />, { wrapper });
 
+  // Reports the shown count and the server-matched total (1 of 60,000), not a
+  // bare cap — no silent truncation.
   expect(
-    await screen.findByText(/some older points are hidden/i),
+    await screen.findByText(/Showing 1 of 60,000 points; older points are hidden/i),
   ).toBeInTheDocument();
 });

@@ -11,53 +11,12 @@ import type { Feature, FeatureCollection, Point, Polygon } from 'geojson';
 import type { Emission } from '../api/emissions';
 import type { Zone } from '../api/zones';
 
-/** Properties carried by each heatmap point feature — enough to show in a
- * popup/tooltip later, without pulling the whole `Emission` (and its
- * kind-dependent `payload`) into the GL source. */
-export interface EmissionPointProperties {
-  id: string;
-  kind: string;
-  observed_at: string;
-  emitter_id: string | null;
-}
-
-/**
- * `emissions` -> a GeoJSON `FeatureCollection<Point>` for the heatmap layer.
- *
- * Only emissions with a non-null `lon`/`lat` (see `Emission`'s doc comment —
- * `None` when PostGIS has no location for that row) produce a feature;
- * others are silently dropped, so `result.features.length` always equals the
- * count of *located* emissions in the input, never `emissions.length`.
- */
-export function emissionsToHeatmapGeoJSON(
-  emissions: Emission[],
-): FeatureCollection<Point, EmissionPointProperties> {
-  const features: Feature<Point, EmissionPointProperties>[] = [];
-
-  for (const emission of emissions) {
-    if (emission.lon === null || emission.lat === null) continue;
-    features.push({
-      type: 'Feature',
-      geometry: { type: 'Point', coordinates: [emission.lon, emission.lat] },
-      properties: {
-        id: emission.id,
-        kind: emission.kind,
-        observed_at: emission.observed_at,
-        emitter_id: emission.emitter_id,
-      },
-    });
-  }
-
-  return { type: 'FeatureCollection', features };
-}
-
 /** A bare located point — what `EmissionsHeatmap.tsx` (Task C's reusable
  * per-emitter/per-entity detail heatmap) takes: its callers have already
  * filtered/derived located points out of their own source data (an
  * emitter's `GET /api/emissions?emitter_id=…` items, or an entity's already-
  * located `recent_detections`), so this shaper doesn't need — and shouldn't
- * assume — the full `Emission` shape `emissionsToHeatmapGeoJSON` above
- * works with. */
+ * assume — the full `Emission` shape. */
 export interface HeatmapPoint {
   lon: number;
   lat: number;
@@ -67,8 +26,8 @@ export interface HeatmapPoint {
  * `points` -> a GeoJSON `FeatureCollection<Point>` for a compact heatmap
  * layer. No filtering (every point is assumed already-located) and no
  * properties beyond the geometry — this is deliberately the minimal shape
- * `EmissionsHeatmap` needs, not a re-fit of `emissionsToHeatmapGeoJSON`'s
- * richer per-feature properties.
+ * `EmissionsHeatmap` needs, not a re-fit of a richer per-feature-properties
+ * shape.
  */
 export function pointsToHeatmapGeoJSON(points: HeatmapPoint[]): FeatureCollection<Point, Record<string, never>> {
   return {
@@ -85,8 +44,7 @@ export function pointsToHeatmapGeoJSON(points: HeatmapPoint[]): FeatureCollectio
  * `points` (raw `[lon, lat]` pairs, as returned by `GET /api/emissions/points`
  * — see `api/emissions.ts`'s `EmissionPoints.points`) -> a GeoJSON
  * `FeatureCollection<Point>` for the Map/Dashboard heatmap layer
- * (`MapView.tsx`), replacing the old `emissionsToHeatmapGeoJSON(emissionsItems)`
- * feed now that the heatmap is fed by the uncapped points endpoint instead of
+ * (`MapView.tsx`), which is fed by the uncapped points endpoint instead of
  * the 500-capped `GET /api/emissions` list.
  *
  * Deliberately distinct from `pointsToHeatmapGeoJSON` above — that one takes
@@ -159,7 +117,7 @@ export type EmitterMarker = EntityMarker;
  * placed at that emitter's most-recent (by `observed_at`) LOCATED emission.
  * Emissions with no location (`lon`/`lat` null) or no `emitter_id` (not yet
  * assigned to an emitter) are dropped — same located-only convention as
- * `emissionsToHeatmapGeoJSON`.
+ * the other heatmap shapers.
  *
  * `emitterNames` maps `emitter_id` -> display name (from `GET /api/emitters`,
  * the caller's own `listEmitters` fetch); an emitter id missing from it

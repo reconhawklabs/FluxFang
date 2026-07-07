@@ -235,7 +235,7 @@ impl EmitterDto {
 /// as opposed to the frontend deriving its options from whatever rows
 /// happen to be loaded.
 #[derive(Debug, Serialize)]
-pub struct EmitterTypeDto {
+pub struct InUseEmitterTypeDto {
     pub key: String,
     pub label: String,
 }
