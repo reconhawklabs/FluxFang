@@ -174,7 +174,12 @@ fn classify_bluetooth(payload: &Value) -> Option<Classification> {
         return None;
     }
     let address = non_empty_str(payload, "address")?;
-    let name = non_empty_str(payload, "name");
+    // Whitespace-only names (e.g. "   ") are treated as absent: only the
+    // shared `non_empty_str` empty-string filter is applied elsewhere, but
+    // bluetooth additionally needs the whitespace-only case collapsed to
+    // "no name" so it doesn't silently key an emitter's identity on
+    // whitespace (see `classify_bluetooth_empty_name_treated_as_unnamed`).
+    let name = non_empty_str(payload, "name").filter(|n| !n.trim().is_empty());
     let address_type = non_empty_str(payload, "address_type");
     let randomized = match address_type.as_deref() {
         Some("random") => true,
@@ -675,6 +680,22 @@ mod tests {
         });
         let c = classify("bluetooth", &payload).unwrap();
         assert_eq!(c.identity_field, "address");
+    }
+
+    #[test]
+    fn classify_bluetooth_whitespace_only_name_treated_as_unnamed() {
+        let payload = serde_json::json!({
+            "frame_type": "advertisement",
+            "address": "7a:11:22:33:44:55",
+            "address_type": "random",
+            "name": "   "
+        });
+        let c = classify("bluetooth", &payload).unwrap();
+        assert_eq!(c.identity_field, "address");
+        assert_eq!(c.identity_value, "7a:11:22:33:44:55");
+        assert_eq!(c.name, "BT Client (7a:11:22:33:44:55)");
+        assert!(c.attributes.get("name").is_none());
+        assert!(c.match_criteria.is_none());
     }
 
     #[test]
