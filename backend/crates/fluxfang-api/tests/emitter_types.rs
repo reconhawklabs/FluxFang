@@ -47,7 +47,7 @@ async fn emitter_types_for_unknown_kind_is_empty_array() {
     let app = test_app().await;
     let cookie = login(&app).await;
 
-    let resp = get_with_cookie(&app, "/api/emitter-types/bluetooth", &cookie).await;
+    let resp = get_with_cookie(&app, "/api/emitter-types/zigbee", &cookie).await;
     assert_status(&resp, StatusCode::OK);
     assert_eq!(body_json(resp).await, serde_json::json!([]));
 }
