@@ -698,3 +698,86 @@ async fn query_default_sort_is_observed_at_desc() {
     // Newest first (unchanged default).
     assert!(rows[0].observed_at >= rows[rows.len() - 1].observed_at);
 }
+
+// ---------------------------------------------------------------------
+// Task 5: EmissionRepo::points -- uncapped heatmap points (build_where
+// refactor shared with `query`).
+// ---------------------------------------------------------------------
+
+/// Insert a wifi emission with a location set (lon/lat), mirroring
+/// `insert_with_location_roundtrips_lon_lat`'s pattern.
+async fn insert_wifi_located(
+    pool: &PgPool,
+    ds: Uuid,
+    session: Uuid,
+    bssid: &str,
+    lon: f64,
+    lat: f64,
+) -> Emission {
+    let mut new = NewEmission::wifi(ds, session, wifi_payload(bssid, 1));
+    new.location = Some((lon, lat));
+    EmissionRepo::insert(pool, new).await.unwrap()
+}
+
+#[tokio::test]
+async fn points_returns_all_located_emissions_past_the_old_500_cap() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+
+    for i in 0..600 {
+        insert_wifi_located(
+            &pool,
+            ds,
+            session,
+            &format!(
+                "aa:aa:aa:{:02x}:{:02x}:{:02x}",
+                i / 256,
+                (i / 16) % 16,
+                i % 16
+            ),
+            -122.4 + (i as f64) * 0.0001,
+            37.7,
+        )
+        .await;
+    }
+    // A handful of emissions with no location set, which must be excluded.
+    for i in 0..5 {
+        insert_wifi(&pool, ds, session, &format!("bb:bb:bb:bb:bb:{i:02x}"), 1).await;
+    }
+
+    let (points, total) = EmissionRepo::points(&pool, EmissionFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(total, 600, "null-location rows excluded");
+    assert_eq!(
+        points.len(),
+        600,
+        "no 500 cap -- all located points returned"
+    );
+    for p in &points {
+        assert!(p[0].is_finite() && p[1].is_finite());
+    }
+}
+
+#[tokio::test]
+async fn points_respects_data_source_filter() {
+    let pool = fresh_pool().await;
+    let ds_a = seed_wifi_source(&pool).await;
+    let ds_b = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+
+    insert_wifi_located(&pool, ds_a, session, "aa:aa:aa:aa:aa:01", -122.4, 37.7).await;
+    insert_wifi_located(&pool, ds_a, session, "aa:aa:aa:aa:aa:02", -122.5, 37.8).await;
+    insert_wifi_located(&pool, ds_a, session, "aa:aa:aa:aa:aa:03", -122.6, 37.9).await;
+    insert_wifi_located(&pool, ds_b, session, "bb:bb:bb:bb:bb:01", -74.0, 40.7).await;
+    insert_wifi_located(&pool, ds_b, session, "bb:bb:bb:bb:bb:02", -74.1, 40.8).await;
+
+    let filter = EmissionFilter {
+        data_source_id: Some(ds_a),
+        ..EmissionFilter::default()
+    };
+    let (points, total) = EmissionRepo::points(&pool, filter).await.unwrap();
+    assert_eq!(total, 3);
+    assert_eq!(points.len(), 3);
+}

@@ -51,6 +51,28 @@ export function listEmissions(params: URLSearchParams): Promise<EmissionsPage> {
   return get<EmissionsPage>(`/api/emissions${qs.length > 0 ? `?${qs}` : ''}`);
 }
 
+/** `GET /api/emissions/points`'s response envelope (`fluxfang-api::emissions`'s
+ * `EmissionPointsDto`) — coordinates only, uncapped (up to the server's
+ * `MAX_POINTS` safety cap) unlike `listEmissions`'s page-sized `items`. This
+ * is the Dashboard/Map heatmap's source, so older points beyond the
+ * paginated list's default page aren't silently dropped. */
+export interface EmissionPoints {
+  points: [number, number][];
+  total: number;
+  truncated: boolean;
+}
+
+/**
+ * `GET /api/emissions/points?<params>`. Same query-param passthrough as
+ * `listEmissions` (reuses the backend's `parse_filter`), but any
+ * `limit`/`offset` in `params` is ignored server-side — `EmissionRepo::points`
+ * paginates by its own `MAX_POINTS` cap instead of the caller's page size.
+ */
+export function listEmissionPoints(params: URLSearchParams): Promise<EmissionPoints> {
+  const qs = params.toString();
+  return get<EmissionPoints>(`/api/emissions/points${qs.length > 0 ? `?${qs}` : ''}`);
+}
+
 /** Shared response shape for both endpoints below (`fluxfang-api::emissions`'s
  * `DeletedCountDto`). */
 export interface DeletedCount {
