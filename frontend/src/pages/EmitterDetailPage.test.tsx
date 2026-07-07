@@ -1,6 +1,12 @@
 import type { ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import {
+  render,
+  screen,
+  waitFor,
+  fireEvent,
+  within,
+} from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, expect, test, vi } from "vitest";
 import EmitterDetailPage from "./EmitterDetailPage";
@@ -106,11 +112,11 @@ test("renders the emitter's name, identity and last-known coords", async () => {
   expect(
     await screen.findByRole("heading", { name: /kitchen ap/i }),
   ).toBeInTheDocument();
-  // The MAC renders in more than one place (Identity cell, Attributes dump,
-  // Recent-emissions BSSID column, since this fixture reuses the same value
-  // in `attributes.bssid` and `emission.payload.bssid`) — assert it appears
-  // at least once rather than pinning down a single element.
-  expect(screen.getAllByText("aa:bb:cc:dd:ee:ff").length).toBeGreaterThan(0);
+  const summary = screen.getByText("Identity").closest("dl");
+  expect(summary).not.toBeNull();
+  expect(
+    within(summary as HTMLElement).getByText("aa:bb:cc:dd:ee:ff"),
+  ).toBeInTheDocument();
   expect(screen.getByText(/39\.5/)).toBeInTheDocument(); // last-known lat
 });
 
