@@ -36,7 +36,7 @@ import {
 } from "../components/emitterDisplay";
 
 const EMISSIONS_LIMIT = 500;
-const RECENT_SHOWN = 20;
+const RECENT_SHOWN = 10;
 const NEW_ENTITY_VALUE = "__new_entity__";
 const DETACH_VALUE = "__detach__";
 
@@ -358,7 +358,9 @@ export default function EmitterDetailPage() {
         <p className="text-xs text-slate-500">
           Where this emitter has been heard.
         </p>
-        <EmissionsHeatmap points={heatmapPoints} />
+        {/* Larger than the default compact embed: this is the emitter's
+            primary spatial view, so give it a full-width, tall canvas. */}
+        <EmissionsHeatmap points={heatmapPoints} height="460px" />
       </section>
 
       {/* Recent emissions */}
