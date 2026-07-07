@@ -21,7 +21,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import maplibregl from "maplibre-gl";
 import MapView from "./MapView";
 import { jsonResponse } from "../test-utils/fetchMocks";
-import type { Emission, EmissionsPage } from "../api/emissions";
+import type { Emission, EmissionPoints, EmissionsPage } from "../api/emissions";
 import type { Entity, EntityDetail } from "../api/entities";
 import type { Zone } from "../api/zones";
 import type { DataSource } from "../api/dataSources";
@@ -216,6 +216,17 @@ const EMISSIONS_PAGE: EmissionsPage = {
   total: 2,
 };
 
+/** Empty by default — `baseRoutes` registers this so every existing test
+ * (none of which care about the heatmap points endpoint) doesn't hit
+ * `mockRoutes`'s "no route registered" rejection now that `MapView`
+ * unconditionally fetches it for the heatmap (Task 8). The dedicated test
+ * below overrides this with a >500-point payload. */
+const EMISSION_POINTS_EMPTY: EmissionPoints = {
+  points: [],
+  total: 0,
+  truncated: false,
+};
+
 const ENTITY_1: Entity = {
   id: "entity-1",
   name: "Bob",
@@ -276,6 +287,7 @@ function baseRoutes(
   return {
     "GET /api/data-sources": () => [DATA_SOURCE_1],
     "GET /api/emissions": () => EMISSIONS_PAGE,
+    "GET /api/emissions/points": () => EMISSION_POINTS_EMPTY,
     "GET /api/emitters": () => ({ items: [] as Emitter[], total: 0 }),
     "GET /api/entities": () => ({ items: [ENTITY_1], total: 1 }),
     "GET /api/entities/entity-1": () => ENTITY_1_DETAIL,
@@ -549,6 +561,7 @@ test("clicking an emitter marker opens a popup with its details", async () => {
     first_seen_at: "2026-07-05T00:00:00Z",
     last_seen_at: "2026-07-05T01:00:00Z",
     created_at: "2026-07-05T00:00:00Z",
+    emission_count: 0,
   };
   const fetchMock = mockRoutes(
     baseRoutes({ "GET /api/emitters": () => ({ items: [emitter], total: 1 }) }),
@@ -579,4 +592,62 @@ test("clicking an emitter marker opens a popup with its details", async () => {
     expect(popup.html).toContain("WiFi Access Point");
     expect(popup.html).toContain("aa:bb:cc:dd:ee:ff");
   });
+});
+
+test("feeds the heatmap from the points endpoint (not the 500-capped list)", async () => {
+  // 601 points — more than the old `GET /api/emissions?limit=500` cap could
+  // ever return, so a heatmap fed from the capped list would top out at 500
+  // features while one fed from `GET /api/emissions/points` shows all 601.
+  const manyPoints: [number, number][] = Array.from({ length: 601 }, (_, i) => [
+    -122 + i * 0.001,
+    37 + i * 0.001,
+  ]);
+  const pointsResponse: EmissionPoints = {
+    points: manyPoints,
+    total: 601,
+    truncated: false,
+  };
+  const fetchMock = mockRoutes(
+    baseRoutes({ "GET /api/emissions/points": () => pointsResponse }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<MapView />, { wrapper });
+  await screen.findByTestId("maplibre-container");
+
+  await waitFor(() => {
+    const call = fetchMock.mock.calls.find(([url]) => {
+      const parsed = new URL(String(url), "http://localhost");
+      return parsed.pathname === "/api/emissions/points";
+    });
+    expect(call).toBeDefined();
+  });
+
+  await waitFor(() => {
+    const setData = latestFakeMap().getSource("emissions-heatmap-source")
+      .setData as ReturnType<typeof vi.fn>;
+    const lastCall = setData.mock.calls.at(-1);
+    expect(lastCall).toBeDefined();
+    const geojson = lastCall?.[0] as { features: unknown[] };
+    expect(geojson.features).toHaveLength(601);
+  });
+});
+
+test('shows a truncation notice when the points endpoint reports "truncated"', async () => {
+  const fetchMock = mockRoutes(
+    baseRoutes({
+      "GET /api/emissions/points": () => ({
+        points: [[2.5, 1.5]],
+        total: 60_000,
+        truncated: true,
+      }),
+    }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<MapView />, { wrapper });
+
+  expect(
+    await screen.findByText(/some older points are hidden/i),
+  ).toBeInTheDocument();
 });

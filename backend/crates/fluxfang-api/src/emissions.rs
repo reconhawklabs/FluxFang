@@ -134,6 +134,7 @@ const MAX_IN_ELEMENTS: usize = 1000;
 pub fn protected_routes() -> Router<AppState> {
     Router::new()
         .route("/api/emissions", get(list_emissions))
+        .route("/api/emissions/points", get(list_emission_points))
         .route("/api/emissions/bulk-delete", post(bulk_delete_emissions))
         .route("/api/emissions/clear", post(clear_emissions))
 }
@@ -153,6 +154,33 @@ async fn list_emissions(
     Ok(Json(EmissionsPageDto {
         items: rows.iter().map(EmissionDto::from).collect(),
         total,
+    }))
+}
+
+/// `GET /api/emissions/points`'s response envelope (Task 5): only
+/// coordinates, uncapped (up to `EmissionRepo::MAX_POINTS`) unlike
+/// `list_emissions`'s page-sized `items` — the Dashboard/Map heatmap's
+/// source, so it isn't silently missing points older than the newest page.
+#[derive(Debug, Serialize)]
+struct EmissionPointsDto {
+    points: Vec<[f64; 2]>,
+    total: i64,
+    truncated: bool,
+}
+
+/// Reuses `parse_filter` (its `limit`/`offset` are simply ignored by
+/// `EmissionRepo::points`, which paginates by `MAX_POINTS` instead).
+async fn list_emission_points(
+    State(state): State<AppState>,
+    RawQuery(raw): RawQuery,
+) -> Result<Json<EmissionPointsDto>, ApiError> {
+    let filter = parse_filter(raw.as_deref().unwrap_or(""))?;
+    let (points, total) = EmissionRepo::points(&state.pool, filter).await?;
+    let truncated = total > points.len() as i64;
+    Ok(Json(EmissionPointsDto {
+        points,
+        total,
+        truncated,
     }))
 }
 
@@ -201,6 +229,8 @@ fn parse_filter(raw: &str) -> Result<EmissionFilter, ApiError> {
     let mut cond_raw: Vec<String> = Vec::new();
     let mut emitter_type = None;
     let mut emitter_category = None;
+    let mut sort = None;
+    let mut dir = None;
 
     for (key, value) in form_urlencoded::parse(raw.as_bytes()) {
         match key.as_ref() {
@@ -219,6 +249,8 @@ fn parse_filter(raw: &str) -> Result<EmissionFilter, ApiError> {
             "cond" => cond_raw.push(value.into_owned()),
             "emitter_type" => emitter_type = Some(value.into_owned()),
             "emitter_category" => emitter_category = Some(value.into_owned()),
+            "sort" => sort = Some(value.into_owned()),
+            "dir" => dir = Some(value.into_owned()),
             _ => {}
         }
     }
@@ -251,6 +283,8 @@ fn parse_filter(raw: &str) -> Result<EmissionFilter, ApiError> {
         emitter_category,
         limit,
         offset,
+        sort,
+        dir,
     })
 }
 

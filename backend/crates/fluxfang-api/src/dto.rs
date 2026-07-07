@@ -179,6 +179,11 @@ pub struct EmitterDto {
     /// Grouping key for map/UI category layers (e.g. `"wifi"`), derived on
     /// read from `emitter_type`. `None` for a plain, unclassified emitter.
     pub category: Option<String>,
+    /// Correlated count of `emission` rows currently assigned to this
+    /// emitter, from `EmitterRepo::query`'s subquery (see
+    /// [`Self::from_parts`]). `0` when built via [`From<&Emitter>`] — a
+    /// freshly-created/looked-up single emitter has no count context.
+    pub emission_count: i64,
 }
 
 impl From<&Emitter> for EmitterDto {
@@ -208,8 +213,31 @@ impl From<&Emitter> for EmitterDto {
             match_enabled: e.match_enabled,
             type_label,
             category,
+            emission_count: 0,
         }
     }
+}
+
+impl EmitterDto {
+    /// Build a list DTO carrying the correlated emission count from
+    /// `EmitterRepo::query`.
+    pub fn from_parts(e: &Emitter, emission_count: i64) -> Self {
+        EmitterDto {
+            emission_count,
+            ..EmitterDto::from(e)
+        }
+    }
+}
+
+/// One entry in `GET /api/emitters/types`' response (Task 4): a machine
+/// `emitter_type` key that actually has at least one emitter, plus its
+/// human-readable label — the stable Type-filter dropdown's backend source,
+/// as opposed to the frontend deriving its options from whatever rows
+/// happen to be loaded.
+#[derive(Debug, Serialize)]
+pub struct EmitterTypeDto {
+    pub key: String,
+    pub label: String,
 }
 
 /// One row in `GET /api/entities`/`POST /api/entities`/`PATCH

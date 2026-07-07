@@ -1,8 +1,16 @@
 //! `GET/POST/PATCH/DELETE /api/emitters[/:id]`, `POST
-//! /api/emitters/:id/rule`, `POST /api/emitters/with-entity`, and `GET
-//! /api/emitters/preview` (Task 6.4). PROTECTED — mounted in
-//! `lib.rs::app`'s protected router group, behind `require_auth`, same as
-//! every other non-setup/login route.
+//! /api/emitters/:id/rule`, `POST /api/emitters/with-entity`, `GET
+//! /api/emitters/preview`, and `GET /api/emitters/types` (Task 6.4).
+//! PROTECTED — mounted in `lib.rs::app`'s protected router group, behind
+//! `require_auth`, same as every other non-setup/login route.
+//!
+//! ## Task 4: `GET /api/emitters/types`
+//!
+//! Returns `[{key, label}]` for every `emitter_type` that actually has at
+//! least one emitter (via `EmitterRepo::distinct_types_in_use`), sorted by
+//! label — the Emitters page's Type-filter dropdown's stable backend
+//! source, replacing the previous "derive options from whatever rows
+//! happen to be loaded" approach. See [`list_emitter_types_in_use`].
 //!
 //! ## Response shape
 //!
@@ -105,7 +113,7 @@ use fluxfang_db::models::{NewEmitter, NewEntity};
 use fluxfang_db::repo::emitter::{EmitterListFilter, EmitterRuleError, EmitterWithEntity};
 use fluxfang_db::{EmissionRepo, EmitterRepo};
 
-use crate::dto::{EmitterDto, EntityDto};
+use crate::dto::{EmitterDto, EmitterTypeDto, EntityDto};
 use crate::state::AppState;
 
 /// Default page size when `limit` is omitted — same default `emissions.rs`/
@@ -118,6 +126,7 @@ pub fn protected_routes() -> Router<AppState> {
     Router::new()
         .route("/api/emitters", get(list_emitters).post(create_emitter))
         .route("/api/emitters/preview", get(preview_emitters))
+        .route("/api/emitters/types", get(list_emitter_types_in_use))
         .route("/api/emitters/with-entity", post(create_with_entity))
         .route("/api/emitters/bulk-delete", post(bulk_delete_emitters))
         .route("/api/emitters/clear", post(clear_emitters))
@@ -198,6 +207,15 @@ struct ListEmittersQuery {
     limit: Option<i64>,
     #[serde(default)]
     offset: Option<i64>,
+    /// Sort key, allow-listed against `EMITTER_SORTS` (`name`, `identity`,
+    /// `first_seen`, `last_seen`, `emissions`); an unrecognized/absent value
+    /// falls back to `last_seen`. See `EmitterRepo::query`'s doc comment.
+    #[serde(default)]
+    sort: Option<String>,
+    /// Sort direction (`"asc"`/`"desc"`, case-insensitive); anything else
+    /// falls back to the default direction (`desc`).
+    #[serde(default)]
+    dir: Option<String>,
 }
 
 /// `GET /api/emitters`' response — response-shape change from a bare
@@ -219,10 +237,15 @@ async fn list_emitters(
         emitter_type: q.emitter_type,
         limit: q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT),
         offset: q.offset.unwrap_or(0).max(0),
+        sort: q.sort,
+        dir: q.dir,
     };
     let (rows, total) = EmitterRepo::query(&state.pool, filter).await?;
     Ok(Json(EmittersPageDto {
-        items: rows.iter().map(EmitterDto::from).collect(),
+        items: rows
+            .iter()
+            .map(|(e, count)| EmitterDto::from_parts(e, *count))
+            .collect(),
         total,
     }))
 }
@@ -470,6 +493,26 @@ async fn bulk_delete_emitters(
 async fn clear_emitters(State(state): State<AppState>) -> Result<Json<DeletedCountDto>, ApiError> {
     let deleted = EmitterRepo::delete_all(&state.pool).await?;
     Ok(Json(DeletedCountDto { deleted }))
+}
+
+/// `GET /api/emitters/types` (Task 4): the distinct `emitter_type` values
+/// that actually have at least one emitter, each with its human-readable
+/// label, sorted by label — the Emitters page's Type-filter dropdown's
+/// stable backend source, replacing the previous "derive options from
+/// whatever rows happen to be loaded" approach.
+async fn list_emitter_types_in_use(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<EmitterTypeDto>>, ApiError> {
+    let mut keys = EmitterRepo::distinct_types_in_use(&state.pool).await?;
+    let mut types: Vec<EmitterTypeDto> = keys
+        .drain(..)
+        .map(|key| {
+            let label = fluxfang_core::emitter_type_label(&key).to_string();
+            EmitterTypeDto { key, label }
+        })
+        .collect();
+    types.sort_by(|a, b| a.label.cmp(&b.label));
+    Ok(Json(types))
 }
 
 #[derive(Debug, Deserialize)]

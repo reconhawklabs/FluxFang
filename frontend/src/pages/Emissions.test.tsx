@@ -7,6 +7,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 import Emissions from "./Emissions";
 import { jsonResponse } from "../test-utils/fetchMocks";
@@ -137,6 +138,7 @@ const EMITTER_1: Emitter = {
   first_seen_at: null,
   last_seen_at: null,
   created_at: "2026-07-01T00:00:00Z",
+  emission_count: 0,
 };
 
 const WIFI_EMITTER_TYPES = [
@@ -203,6 +205,37 @@ test("renders emission rows (bssid/channel/rssi) and the total from a mocked res
   expect(screen.getByTestId("emissions-total")).toHaveTextContent(
     "2 emissions",
   );
+});
+
+test("sorts by RSSI when the header is clicked", async () => {
+  let lastEmissionsUrl: URL | null = null;
+  const fetchMock = mockRoutes(
+    baseRoutes({
+      "GET /api/emissions": (url) => {
+        lastEmissionsUrl = url;
+        return { items: [EMISSION_1, EMISSION_2], total: 2 };
+      },
+    }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<Emissions />, { wrapper });
+  await waitFor(() =>
+    expect(screen.getByTestId("emission-row-e1")).toBeInTheDocument(),
+  );
+
+  // Observed At starts as the active (default desc) sort.
+  expect(
+    screen.getByRole("columnheader", { name: /Observed At/ }),
+  ).toHaveAttribute("aria-sort", "descending");
+
+  // First click on an inactive column -> ascending.
+  await userEvent.click(screen.getByRole("button", { name: /RSSI/ }));
+
+  await waitFor(() => {
+    expect(lastEmissionsUrl?.searchParams.get("sort")).toBe("rssi");
+    expect(lastEmissionsUrl?.searchParams.get("dir")).toBe("asc");
+  });
 });
 
 test("the data-source dropdown is populated from listDataSources (gps sources excluded); selecting one adds data_source_id to the query", async () => {

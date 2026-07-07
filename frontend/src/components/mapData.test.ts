@@ -6,6 +6,7 @@
 // rendering — see `mapData.ts`'s module doc comment.
 import { expect, test } from 'vitest';
 import {
+  emissionPointsToHeatmapGeoJSON,
   emissionsToHeatmapGeoJSON,
   emitterMarkersFromEmissions,
   entitiesToMarkerFeatures,
@@ -94,6 +95,23 @@ test('pointsToHeatmapGeoJSON turns bare {lon,lat} points into one Point feature 
 test('pointsToHeatmapGeoJSON on an empty list yields an empty FeatureCollection', () => {
   const geojson = pointsToHeatmapGeoJSON([]);
   expect(geojson).toEqual({ type: 'FeatureCollection', features: [] });
+});
+
+test('emissionPointsToHeatmapGeoJSON maps raw [lon,lat] pairs to GeoJSON point features', () => {
+  const fc = emissionPointsToHeatmapGeoJSON([
+    [-122.4, 37.7],
+    [-122.5, 37.8],
+  ]);
+
+  expect(fc.type).toBe('FeatureCollection');
+  expect(fc.features).toHaveLength(2);
+  expect(fc.features[0].geometry).toEqual({ type: 'Point', coordinates: [-122.4, 37.7] });
+  expect(fc.features[1].geometry).toEqual({ type: 'Point', coordinates: [-122.5, 37.8] });
+});
+
+test('emissionPointsToHeatmapGeoJSON on an empty list yields an empty FeatureCollection', () => {
+  const fc = emissionPointsToHeatmapGeoJSON([]);
+  expect(fc).toEqual({ type: 'FeatureCollection', features: [] });
 });
 
 test('emitterMarkersFromEmissions groups located emissions by emitter_id and keeps only the latest per emitter', () => {

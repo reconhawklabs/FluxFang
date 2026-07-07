@@ -63,6 +63,7 @@ use sqlx::{PgPool, Postgres};
 use uuid::Uuid;
 
 use crate::models::{Emission, NewEmission};
+use crate::resolve_order_by;
 
 pub struct EmissionRepo;
 
@@ -71,6 +72,12 @@ pub struct EmissionRepo;
 const EMISSION_COLUMNS: &str = "id, created_at, data_source_id, emitter_id, session_id, \
      observed_at, signal_strength, kind, payload, \
      ST_X(location::geometry) AS lon, ST_Y(location::geometry) AS lat";
+
+/// Allow-listed sort keys for the emissions list -> SQL ordering expressions.
+/// Only real columns (cheap/indexed); JSONB payload keys and the emitter join
+/// are intentionally excluded.
+const EMISSION_SORTS: &[(&str, &str)] =
+    &[("observed_at", "observed_at"), ("rssi", "signal_strength")];
 
 /// Filter/paginate criteria for [`EmissionRepo::query`]. Build with
 /// `EmissionFilter { data_source_id: Some(id), ..Default::default() }` —
@@ -107,6 +114,10 @@ pub struct EmissionFilter {
     pub emitter_category: Option<String>,
     pub limit: i64,
     pub offset: i64,
+    /// Public sort key (see `EMISSION_SORTS`); unknown/None -> default.
+    pub sort: Option<String>,
+    /// `"asc"`/`"desc"`; other/None -> default direction.
+    pub dir: Option<String>,
 }
 
 impl Default for EmissionFilter {
@@ -127,6 +138,8 @@ impl Default for EmissionFilter {
             emitter_category: None,
             limit: 50,
             offset: 0,
+            sort: None,
+            dir: None,
         }
     }
 }
@@ -188,6 +201,152 @@ fn bind_one<'q, O>(
         BindVal::Text(s) => q.bind(s),
     }
 }
+
+/// Build the shared `WHERE` body + ordered bind list for an
+/// [`EmissionFilter`]. Returns `(where_sql, binds)`; the caller appends its
+/// own `ORDER BY`/`LIMIT`/extra clauses and replays `binds` in order. Shared
+/// by [`EmissionRepo::query`] and [`EmissionRepo::points`] so the filter
+/// semantics (and their bind-order bugs, or lack thereof) can't drift
+/// between the two.
+fn build_where(filter: &EmissionFilter) -> Result<(String, Vec<BindVal>), EmissionQueryError> {
+    let mut clauses: Vec<String> = vec!["TRUE".to_string()];
+    let mut binds: Vec<BindVal> = Vec::new();
+    let mut next_bind = 1usize;
+
+    if let Some(id) = filter.data_source_id {
+        clauses.push(format!("data_source_id = ${next_bind}"));
+        binds.push(BindVal::Uuid(id));
+        next_bind += 1;
+    }
+    if let Some(id) = filter.session_id {
+        clauses.push(format!("session_id = ${next_bind}"));
+        binds.push(BindVal::Uuid(id));
+        next_bind += 1;
+    }
+    if let Some(id) = filter.emitter_id {
+        clauses.push(format!("emitter_id = ${next_bind}"));
+        binds.push(BindVal::Uuid(id));
+        next_bind += 1;
+    }
+    if filter.unassigned {
+        clauses.push("emitter_id IS NULL".to_string());
+    }
+    if let Some(t) = filter.time_from {
+        clauses.push(format!("observed_at >= ${next_bind}"));
+        binds.push(BindVal::Time(t));
+        next_bind += 1;
+    }
+    if let Some(t) = filter.time_to {
+        clauses.push(format!("observed_at <= ${next_bind}"));
+        binds.push(BindVal::Time(t));
+        next_bind += 1;
+    }
+    if let Some((min_lon, min_lat, max_lon, max_lat)) = filter.bbox {
+        clauses.push(format!(
+            "ST_Intersects(location::geometry, ST_MakeEnvelope(${}, ${}, ${}, ${}, 4326))",
+            next_bind,
+            next_bind + 1,
+            next_bind + 2,
+            next_bind + 3
+        ));
+        binds.push(BindVal::F64(min_lon));
+        binds.push(BindVal::F64(min_lat));
+        binds.push(BindVal::F64(max_lon));
+        binds.push(BindVal::F64(max_lat));
+        next_bind += 4;
+    }
+    if let Some(ref kind) = filter.kind {
+        clauses.push(format!("kind = ${next_bind}"));
+        binds.push(BindVal::Text(kind.clone()));
+        next_bind += 1;
+    }
+    if let Some(ref text) = filter.text {
+        clauses.push(format!("payload::text ILIKE ${next_bind}"));
+        binds.push(BindVal::Text(format!("%{text}%")));
+        next_bind += 1;
+    }
+    if let Some(ref emitter_type) = filter.emitter_type {
+        // Subquery join (see module docs): `emitter_type` lives on
+        // `emitter`, not `emission`. A NULL `emitter_id` can never
+        // appear in an `IN (SELECT ...)` result set, so this
+        // automatically excludes unassigned emissions once this
+        // filter is set, as intended.
+        clauses.push(format!(
+            "emitter_id IN (SELECT id FROM emitter WHERE emitter_type = ${next_bind})"
+        ));
+        binds.push(BindVal::Text(emitter_type.clone()));
+        next_bind += 1;
+    }
+    if let Some(ref category) = filter.emitter_category {
+        // Prefix match on the `<category>_<subtype>` naming convention
+        // (e.g. `wifi` -> `wifi_access_point`/`wifi_client`) rather
+        // than a Rust-side enumeration of every `emitter_type` in that
+        // category: this stays correct as new subtypes are added to
+        // the classification registry with no code change here. The
+        // category value is bound as a plain parameter (concatenated
+        // to `'_%'` in SQL, not in the Rust format string), so this
+        // is not susceptible to SQL injection; a category value that
+        // itself contains `%`/`_` wildcard characters only affects
+        // match precision; it's not a security concern since it's the
+        // same trust boundary as every other filter this endpoint
+        // accepts from an authenticated caller.
+        clauses.push(format!(
+            "emitter_id IN (SELECT id FROM emitter WHERE emitter_type LIKE ${next_bind} || '_%')"
+        ));
+        binds.push(BindVal::Text(category.clone()));
+        next_bind += 1;
+    }
+    if !filter.field_conditions.is_empty() {
+        // Scoping decision (see module docs): use the filter's `kind`
+        // if given, else default to "wifi" — the only kind the schema
+        // currently allows.
+        let kind_for_catalog = filter.kind.as_deref().unwrap_or("wifi");
+        let catalog = catalog_for(kind_for_catalog);
+        let (frag, cond_binds) = conditions_to_sql_checked(
+            &filter.field_conditions,
+            filter.match_mode,
+            next_bind,
+            &catalog,
+        )?;
+        next_bind += cond_binds.len();
+        clauses.push(frag);
+
+        // `conditions_to_sql_checked` returns one text-coerced
+        // `Value::String` bind per condition (N per `Op::In`'s N array
+        // elements), in the same order the SQL fragment's `$n`
+        // placeholders expect. Every bind is appended here as plain
+        // text, uniformly, with no per-condition op inspection: the
+        // `Gte`/`Lte` SQL arms now cast *both* sides to `numeric`
+        // (`(payload->>'field')::numeric >= $n::numeric`, see
+        // fluxfang_core::rule_sql), so a text bind works there too --
+        // there is no need to (and, critically, no reliable way to)
+        // re-derive which binds are "numeric" from `field_conditions`
+        // after the fact. (A prior version of this code re-walked
+        // `field_conditions` guessing Gte/Lte -> numeric bind by
+        // op/field-shape; that walk could desync from the translator's
+        // actual bind count whenever a condition's op didn't match its
+        // field's type, since `condition_clause` silently drops such a
+        // condition to a bindless `FALSE` while the re-walk still
+        // counted it as consuming a bind. `conditions_to_sql_checked`
+        // now rejects that mismatch outright (`RuleSqlError::InvalidOp`),
+        // so every condition that reaches here is guaranteed to
+        // contribute exactly the binds it appears to.)
+        for v in cond_binds {
+            let text = match v {
+                serde_json::Value::String(s) => s,
+                other => other.to_string(),
+            };
+            binds.push(BindVal::Text(text));
+        }
+    }
+
+    Ok((clauses.join(" AND "), binds))
+}
+
+/// Server-side safety cap for the heatmap points endpoint. High enough to
+/// cover any realistic survey (~16 bytes/point => under ~1.5 MB JSON);
+/// beyond it the response is marked truncated rather than silently dropped.
+pub const MAX_POINTS: i64 = 50_000;
 
 impl EmissionRepo {
     pub async fn insert(pool: &PgPool, new: NewEmission) -> Result<Emission, sqlx::Error> {
@@ -261,138 +420,7 @@ impl EmissionRepo {
         pool: &PgPool,
         filter: EmissionFilter,
     ) -> Result<(Vec<Emission>, i64), EmissionQueryError> {
-        let mut clauses: Vec<String> = vec!["TRUE".to_string()];
-        let mut binds: Vec<BindVal> = Vec::new();
-        let mut next_bind = 1usize;
-
-        if let Some(id) = filter.data_source_id {
-            clauses.push(format!("data_source_id = ${next_bind}"));
-            binds.push(BindVal::Uuid(id));
-            next_bind += 1;
-        }
-        if let Some(id) = filter.session_id {
-            clauses.push(format!("session_id = ${next_bind}"));
-            binds.push(BindVal::Uuid(id));
-            next_bind += 1;
-        }
-        if let Some(id) = filter.emitter_id {
-            clauses.push(format!("emitter_id = ${next_bind}"));
-            binds.push(BindVal::Uuid(id));
-            next_bind += 1;
-        }
-        if filter.unassigned {
-            clauses.push("emitter_id IS NULL".to_string());
-        }
-        if let Some(t) = filter.time_from {
-            clauses.push(format!("observed_at >= ${next_bind}"));
-            binds.push(BindVal::Time(t));
-            next_bind += 1;
-        }
-        if let Some(t) = filter.time_to {
-            clauses.push(format!("observed_at <= ${next_bind}"));
-            binds.push(BindVal::Time(t));
-            next_bind += 1;
-        }
-        if let Some((min_lon, min_lat, max_lon, max_lat)) = filter.bbox {
-            clauses.push(format!(
-                "ST_Intersects(location::geometry, ST_MakeEnvelope(${}, ${}, ${}, ${}, 4326))",
-                next_bind,
-                next_bind + 1,
-                next_bind + 2,
-                next_bind + 3
-            ));
-            binds.push(BindVal::F64(min_lon));
-            binds.push(BindVal::F64(min_lat));
-            binds.push(BindVal::F64(max_lon));
-            binds.push(BindVal::F64(max_lat));
-            next_bind += 4;
-        }
-        if let Some(ref kind) = filter.kind {
-            clauses.push(format!("kind = ${next_bind}"));
-            binds.push(BindVal::Text(kind.clone()));
-            next_bind += 1;
-        }
-        if let Some(ref text) = filter.text {
-            clauses.push(format!("payload::text ILIKE ${next_bind}"));
-            binds.push(BindVal::Text(format!("%{text}%")));
-            next_bind += 1;
-        }
-        if let Some(ref emitter_type) = filter.emitter_type {
-            // Subquery join (see module docs): `emitter_type` lives on
-            // `emitter`, not `emission`. A NULL `emitter_id` can never
-            // appear in an `IN (SELECT ...)` result set, so this
-            // automatically excludes unassigned emissions once this
-            // filter is set, as intended.
-            clauses.push(format!(
-                "emitter_id IN (SELECT id FROM emitter WHERE emitter_type = ${next_bind})"
-            ));
-            binds.push(BindVal::Text(emitter_type.clone()));
-            next_bind += 1;
-        }
-        if let Some(ref category) = filter.emitter_category {
-            // Prefix match on the `<category>_<subtype>` naming convention
-            // (e.g. `wifi` -> `wifi_access_point`/`wifi_client`) rather
-            // than a Rust-side enumeration of every `emitter_type` in that
-            // category: this stays correct as new subtypes are added to
-            // the classification registry with no code change here. The
-            // category value is bound as a plain parameter (concatenated
-            // to `'_%'` in SQL, not in the Rust format string), so this
-            // is not susceptible to SQL injection; a category value that
-            // itself contains `%`/`_` wildcard characters only affects
-            // match precision; it's not a security concern since it's the
-            // same trust boundary as every other filter this endpoint
-            // accepts from an authenticated caller.
-            clauses.push(format!(
-                "emitter_id IN (SELECT id FROM emitter WHERE emitter_type LIKE ${next_bind} || '_%')"
-            ));
-            binds.push(BindVal::Text(category.clone()));
-            next_bind += 1;
-        }
-        if !filter.field_conditions.is_empty() {
-            // Scoping decision (see module docs): use the filter's `kind`
-            // if given, else default to "wifi" — the only kind the schema
-            // currently allows.
-            let kind_for_catalog = filter.kind.as_deref().unwrap_or("wifi");
-            let catalog = catalog_for(kind_for_catalog);
-            let (frag, cond_binds) = conditions_to_sql_checked(
-                &filter.field_conditions,
-                filter.match_mode,
-                next_bind,
-                &catalog,
-            )?;
-            next_bind += cond_binds.len();
-            clauses.push(frag);
-
-            // `conditions_to_sql_checked` returns one text-coerced
-            // `Value::String` bind per condition (N per `Op::In`'s N array
-            // elements), in the same order the SQL fragment's `$n`
-            // placeholders expect. Every bind is appended here as plain
-            // text, uniformly, with no per-condition op inspection: the
-            // `Gte`/`Lte` SQL arms now cast *both* sides to `numeric`
-            // (`(payload->>'field')::numeric >= $n::numeric`, see
-            // fluxfang_core::rule_sql), so a text bind works there too --
-            // there is no need to (and, critically, no reliable way to)
-            // re-derive which binds are "numeric" from `field_conditions`
-            // after the fact. (A prior version of this code re-walked
-            // `field_conditions` guessing Gte/Lte -> numeric bind by
-            // op/field-shape; that walk could desync from the translator's
-            // actual bind count whenever a condition's op didn't match its
-            // field's type, since `condition_clause` silently drops such a
-            // condition to a bindless `FALSE` while the re-walk still
-            // counted it as consuming a bind. `conditions_to_sql_checked`
-            // now rejects that mismatch outright (`RuleSqlError::InvalidOp`),
-            // so every condition that reaches here is guaranteed to
-            // contribute exactly the binds it appears to.)
-            for v in cond_binds {
-                let text = match v {
-                    serde_json::Value::String(s) => s,
-                    other => other.to_string(),
-                };
-                binds.push(BindVal::Text(text));
-            }
-        }
-
-        let where_sql = clauses.join(" AND ");
+        let (where_sql, binds) = build_where(&filter)?;
 
         let count_sql = format!("SELECT COUNT(*) FROM emission WHERE {where_sql}");
         let mut count_q = sqlx::query_as::<_, (i64,)>(&count_sql);
@@ -404,11 +432,18 @@ impl EmissionRepo {
             .await
             .map_err(EmissionQueryError::Sql)?;
 
-        let limit_idx = next_bind;
-        let offset_idx = next_bind + 1;
+        let order_by = resolve_order_by(
+            filter.sort.as_deref(),
+            filter.dir.as_deref(),
+            EMISSION_SORTS,
+            "observed_at",
+            "DESC",
+        );
+        let limit_idx = binds.len() + 1;
+        let offset_idx = binds.len() + 2;
         let data_sql = format!(
             "SELECT {EMISSION_COLUMNS} FROM emission WHERE {where_sql} \
-             ORDER BY observed_at DESC LIMIT ${limit_idx} OFFSET ${offset_idx}"
+             ORDER BY {order_by} LIMIT ${limit_idx} OFFSET ${offset_idx}"
         );
         let mut data_q = sqlx::query_as::<_, Emission>(&data_sql);
         for b in &binds {
@@ -422,6 +457,49 @@ impl EmissionRepo {
             .map_err(EmissionQueryError::Sql)?;
 
         Ok((rows, total))
+    }
+
+    /// Located emission coordinates matching `filter` (ignoring its
+    /// `limit`/`offset`), capped at [`MAX_POINTS`], plus the total matched
+    /// located-row count (so the caller can report truncation). Only rows
+    /// with a non-null `location` are returned — the heatmap source for the
+    /// Dashboard/Map, deliberately uncapped (up to `MAX_POINTS`) unlike
+    /// `query`'s page-sized `limit`, since a heatmap silently missing older
+    /// points because they scrolled past `query`'s default page is worse
+    /// than one big response.
+    pub async fn points(
+        pool: &PgPool,
+        filter: EmissionFilter,
+    ) -> Result<(Vec<[f64; 2]>, i64), EmissionQueryError> {
+        let (where_sql, binds) = build_where(&filter)?;
+        let where_located = format!("({where_sql}) AND location IS NOT NULL");
+
+        let count_sql = format!("SELECT COUNT(*) FROM emission WHERE {where_located}");
+        let mut count_q = sqlx::query_as::<_, (i64,)>(&count_sql);
+        for b in &binds {
+            count_q = bind_one(count_q, b);
+        }
+        let (total,) = count_q
+            .fetch_one(pool)
+            .await
+            .map_err(EmissionQueryError::Sql)?;
+
+        // MAX_POINTS is a compile-time constant integer, safe to interpolate.
+        let data_sql = format!(
+            "SELECT ST_X(location::geometry) AS lon, ST_Y(location::geometry) AS lat \
+             FROM emission WHERE {where_located} \
+             ORDER BY observed_at DESC LIMIT {MAX_POINTS}"
+        );
+        let mut data_q = sqlx::query_as::<_, (f64, f64)>(&data_sql);
+        for b in &binds {
+            data_q = bind_one(data_q, b);
+        }
+        let rows = data_q
+            .fetch_all(pool)
+            .await
+            .map_err(EmissionQueryError::Sql)?;
+        let points = rows.into_iter().map(|(lon, lat)| [lon, lat]).collect();
+        Ok((points, total))
     }
 
     /// Recent, geolocated (`location IS NOT NULL`) emissions across a *set*

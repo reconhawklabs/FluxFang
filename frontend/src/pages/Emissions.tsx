@@ -50,6 +50,7 @@ import Pagination from "../components/Pagination";
 import RuleBuilder from "../components/RuleBuilder";
 import SearchBar from "../components/SearchBar";
 import SelectionToolbar from "../components/SelectionToolbar";
+import { SortableTh, type SortDir } from "../components/SortableTh";
 import StackedFilterBuilder from "../components/StackedFilterBuilder";
 import { conditionsToQueryParams } from "../components/filterState";
 import { useRowSelection } from "../hooks/useRowSelection";
@@ -326,6 +327,8 @@ export default function Emissions() {
   const [conditions, setConditions] = useState<Condition[]>([]);
   const [limit, setLimit] = useState<number>(DEFAULT_LIMIT);
   const [offset, setOffset] = useState(0);
+  const [sortKey, setSortKey] = useState<string>("observed_at");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [assignTarget, setAssignTarget] = useState<AssignTarget | null>(null);
   const [assignedMessage, setAssignedMessage] = useState<string | null>(null);
 
@@ -336,8 +339,10 @@ export default function Emissions() {
     if (dataSourceId.length > 0) params.set("data_source_id", dataSourceId);
     params.set("limit", String(limit));
     params.set("offset", String(offset));
+    params.set("sort", sortKey);
+    params.set("dir", sortDir);
     return params;
-  }, [conditions, q, dataSourceId, limit, offset]);
+  }, [conditions, q, dataSourceId, limit, offset, sortKey, sortDir]);
 
   const emissionsQuery = useQuery({
     queryKey: [...queryKeys.emissions, queryParams.toString()],
@@ -399,6 +404,16 @@ export default function Emissions() {
     setLimit(nextLimit);
     setOffset(nextOffset);
     selection.clear();
+  }
+
+  function handleSort(key: string): void {
+    if (sortKey === key) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir("asc");
+    }
+    resetToFirstPage();
   }
 
   // List order's first selected row — deterministic regardless of click
@@ -531,12 +546,24 @@ export default function Emissions() {
                   className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
                 />
               </th>
-              <th className="py-2 pr-4 font-medium">Observed At</th>
+              <SortableTh
+                label="Observed At"
+                sortKey="observed_at"
+                activeKey={sortKey}
+                activeDir={sortDir}
+                onSort={handleSort}
+              />
               <th className="py-2 pr-4 font-medium">BSSID</th>
               <th className="py-2 pr-4 font-medium">Src MAC</th>
               <th className="py-2 pr-4 font-medium">SSID/Name</th>
               <th className="py-2 pr-4 font-medium">Channel/Frequency</th>
-              <th className="py-2 pr-4 font-medium">RSSI</th>
+              <SortableTh
+                label="RSSI"
+                sortKey="rssi"
+                activeKey={sortKey}
+                activeDir={sortDir}
+                onSort={handleSort}
+              />
               <th className="py-2 pr-4 font-medium">Emitter</th>
               <th className="py-2 pr-2 font-medium" />
             </tr>

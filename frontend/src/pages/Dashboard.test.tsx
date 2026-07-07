@@ -140,6 +140,7 @@ const EMITTER_1: Emitter = {
   match_enabled: true,
   type_label: "wifi-ap",
   category: null,
+  emission_count: 0,
 };
 
 const ENTITY_1: Entity = {

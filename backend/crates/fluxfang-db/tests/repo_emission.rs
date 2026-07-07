@@ -614,3 +614,170 @@ async fn delete_all_on_empty_table_returns_zero() {
     let deleted = EmissionRepo::delete_all(&pool).await.unwrap();
     assert_eq!(deleted, 0);
 }
+
+// ---------------------------------------------------------------------
+// Task 2: allow-listed `sort`/`dir` (observed_at/rssi) via resolve_order_by.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn query_sorts_by_signal_strength_asc_and_desc() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+
+    let e_hi = EmissionRepo::insert(
+        &pool,
+        NewEmission {
+            signal_strength: Some(-30),
+            ..NewEmission::wifi(ds, session, wifi_payload("aa:aa:aa:aa:aa:aa", 1))
+        },
+    )
+    .await
+    .unwrap();
+    let e_lo = EmissionRepo::insert(
+        &pool,
+        NewEmission {
+            signal_strength: Some(-70),
+            ..NewEmission::wifi(ds, session, wifi_payload("bb:bb:bb:bb:bb:bb", 1))
+        },
+    )
+    .await
+    .unwrap();
+    let e_mid = EmissionRepo::insert(
+        &pool,
+        NewEmission {
+            signal_strength: Some(-50),
+            ..NewEmission::wifi(ds, session, wifi_payload("cc:cc:cc:cc:cc:cc", 1))
+        },
+    )
+    .await
+    .unwrap();
+    let _ = (&e_hi, &e_lo, &e_mid);
+
+    let asc = EmissionFilter {
+        sort: Some("rssi".to_string()),
+        dir: Some("asc".to_string()),
+        ..Default::default()
+    };
+    let (rows, _total) = EmissionRepo::query(&pool, asc).await.unwrap();
+    let strengths: Vec<Option<i32>> = rows.iter().map(|e| e.signal_strength).collect();
+    // Ascending by signal_strength: -70, -50, -30.
+    assert_eq!(strengths, vec![Some(-70), Some(-50), Some(-30)]);
+
+    let desc = EmissionFilter {
+        sort: Some("rssi".to_string()),
+        dir: Some("desc".to_string()),
+        ..Default::default()
+    };
+    let (rows, _total) = EmissionRepo::query(&pool, desc).await.unwrap();
+    let strengths: Vec<Option<i32>> = rows.iter().map(|e| e.signal_strength).collect();
+    assert_eq!(strengths, vec![Some(-30), Some(-50), Some(-70)]);
+}
+
+#[tokio::test]
+async fn query_default_sort_is_observed_at_desc() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+
+    let now = Utc::now();
+    let t1 = NewEmission {
+        observed_at: now - Duration::hours(2),
+        ..NewEmission::wifi(ds, session, wifi_payload("aa:aa:aa:aa:aa:aa", 1))
+    };
+    let t2 = NewEmission {
+        observed_at: now,
+        ..NewEmission::wifi(ds, session, wifi_payload("bb:bb:bb:bb:bb:bb", 1))
+    };
+    EmissionRepo::insert(&pool, t1).await.unwrap();
+    EmissionRepo::insert(&pool, t2).await.unwrap();
+
+    let (rows, _total) = EmissionRepo::query(&pool, EmissionFilter::default())
+        .await
+        .unwrap();
+    // Newest first (unchanged default).
+    assert!(rows[0].observed_at >= rows[rows.len() - 1].observed_at);
+}
+
+// ---------------------------------------------------------------------
+// Task 5: EmissionRepo::points -- uncapped heatmap points (build_where
+// refactor shared with `query`).
+// ---------------------------------------------------------------------
+
+/// Insert a wifi emission with a location set (lon/lat), mirroring
+/// `insert_with_location_roundtrips_lon_lat`'s pattern.
+async fn insert_wifi_located(
+    pool: &PgPool,
+    ds: Uuid,
+    session: Uuid,
+    bssid: &str,
+    lon: f64,
+    lat: f64,
+) -> Emission {
+    let mut new = NewEmission::wifi(ds, session, wifi_payload(bssid, 1));
+    new.location = Some((lon, lat));
+    EmissionRepo::insert(pool, new).await.unwrap()
+}
+
+#[tokio::test]
+async fn points_returns_all_located_emissions_past_the_old_500_cap() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+
+    for i in 0..600 {
+        insert_wifi_located(
+            &pool,
+            ds,
+            session,
+            &format!(
+                "aa:aa:aa:{:02x}:{:02x}:{:02x}",
+                i / 256,
+                (i / 16) % 16,
+                i % 16
+            ),
+            -122.4 + (i as f64) * 0.0001,
+            37.7,
+        )
+        .await;
+    }
+    // A handful of emissions with no location set, which must be excluded.
+    for i in 0..5 {
+        insert_wifi(&pool, ds, session, &format!("bb:bb:bb:bb:bb:{i:02x}"), 1).await;
+    }
+
+    let (points, total) = EmissionRepo::points(&pool, EmissionFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(total, 600, "null-location rows excluded");
+    assert_eq!(
+        points.len(),
+        600,
+        "no 500 cap -- all located points returned"
+    );
+    for p in &points {
+        assert!(p[0].is_finite() && p[1].is_finite());
+    }
+}
+
+#[tokio::test]
+async fn points_respects_data_source_filter() {
+    let pool = fresh_pool().await;
+    let ds_a = seed_wifi_source(&pool).await;
+    let ds_b = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+
+    insert_wifi_located(&pool, ds_a, session, "aa:aa:aa:aa:aa:01", -122.4, 37.7).await;
+    insert_wifi_located(&pool, ds_a, session, "aa:aa:aa:aa:aa:02", -122.5, 37.8).await;
+    insert_wifi_located(&pool, ds_a, session, "aa:aa:aa:aa:aa:03", -122.6, 37.9).await;
+    insert_wifi_located(&pool, ds_b, session, "bb:bb:bb:bb:bb:01", -74.0, 40.7).await;
+    insert_wifi_located(&pool, ds_b, session, "bb:bb:bb:bb:bb:02", -74.1, 40.8).await;
+
+    let filter = EmissionFilter {
+        data_source_id: Some(ds_a),
+        ..EmissionFilter::default()
+    };
+    let (points, total) = EmissionRepo::points(&pool, filter).await.unwrap();
+    assert_eq!(total, 3);
+    assert_eq!(points.len(), 3);
+}

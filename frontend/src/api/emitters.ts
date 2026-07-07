@@ -47,6 +47,9 @@ export interface Emitter {
   first_seen_at: string | null;
   last_seen_at: string | null;
   created_at: string;
+  /** Count of emissions currently attached to this emitter — backs the
+   * Emitters page's "Emissions" column. */
+  emission_count: number;
 }
 
 /** `POST /api/emitters` body — mirrors the backend's `CreateEmitterRequest`.
@@ -128,6 +131,8 @@ export interface ListEmittersParams {
   emitter_type?: string;
   limit?: number;
   offset?: number;
+  sort?: string;
+  dir?: "asc" | "desc";
 }
 
 /** `GET /api/emitters`'s response envelope — mirrors the backend's
@@ -135,6 +140,15 @@ export interface ListEmittersParams {
 export interface EmittersPage {
   items: Emitter[];
   total: number;
+}
+
+/** `GET /api/emitters/types` — the distinct `emitter_type` values that
+ * actually have at least one emitter, each with its machine `key` and
+ * human-readable `label`, sorted by label. Backs the Emitters page's
+ * Type-filter dropdown with a stable option set, instead of deriving
+ * options from whatever rows happen to be currently loaded/paginated. */
+export function listEmitterTypesInUse(): Promise<EmitterType[]> {
+  return get<EmitterType[]>("/api/emitters/types");
 }
 
 export function listEmitters(
@@ -147,6 +161,8 @@ export function listEmitters(
     query.set("emitter_type", params.emitter_type);
   if (params.limit !== undefined) query.set("limit", String(params.limit));
   if (params.offset !== undefined) query.set("offset", String(params.offset));
+  if (params.sort !== undefined) query.set("sort", params.sort);
+  if (params.dir !== undefined) query.set("dir", params.dir);
   const qs = query.toString();
   return get<EmittersPage>(`/api/emitters${qs.length > 0 ? `?${qs}` : ""}`);
 }
