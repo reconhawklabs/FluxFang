@@ -13,7 +13,7 @@ use fluxfang_api::capture::MockCapturerFactory;
 use fluxfang_capture::{GpsFix, RawObservation};
 use fluxfang_db::models::NewDataSource;
 use fluxfang_db::repo::emission::EmissionFilter;
-use fluxfang_db::{DataSourceRepo, EmissionRepo, LocationRepo, SessionRepo};
+use fluxfang_db::{DataSourceRepo, EmissionRepo, EmitterRepo, LocationRepo, SessionRepo};
 
 mod common;
 use common::{
@@ -116,6 +116,102 @@ async fn wifi_data_source_start_flows_mock_emission_through_ingest_then_stop() {
     assert!(
         found,
         "expected exactly one emission for this data source with the mock's bssid"
+    );
+
+    // Stop: status flips back to stopped.
+    let resp = post_with_cookie(&app, &format!("/api/data-sources/{id}/stop"), &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let stopped = body_json(resp).await;
+    assert_eq!(stopped["status"], "stopped", "body: {stopped}");
+}
+
+/// (a2) Task 6: starting a `bluetooth`/`scan` data source through the same
+/// `CaptureSupervisor`/mock-factory path routes its `BuiltCapture::Bluetooth`
+/// through `start_wifi` (the generic capturer + inert-gps-session path) —
+/// the mock's replayed advertisement flows through `ingest` into an emission
+/// *and*, with `auto_create_emitters: true`, auto-creates the
+/// `bluetooth_device` emitter Task 3's ingest path builds for it.
+#[tokio::test]
+async fn bluetooth_data_source_start_flows_mock_emission_through_ingest_then_stop() {
+    let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+    // Build the factory with one bluetooth advertisement to replay.
+    let factory = Arc::new(MockCapturerFactory::with_wifi_observations(vec![
+        RawObservation {
+            kind: "bluetooth".to_string(),
+            observed_at: base,
+            signal_strength: Some(-50),
+            payload: json!({
+                "frame_type": "advertisement",
+                "address": "3c:15:c2:aa:bb:cc",
+                "address_type": "public",
+                "name": "Study Speaker",
+                "company_id": 76
+            }),
+        },
+    ]));
+    let (app, pool) = test_app_with_factory(factory).await;
+    let cookie = login(&app).await;
+
+    // Create: starts out stopped.
+    let resp = post_json_with_cookie(
+        &app,
+        "/api/data-sources",
+        r#"{"kind":"bluetooth","mode":"scan","interface":"hci0","config":{"auto_create_emitters":true}}"#,
+        &cookie,
+    )
+    .await;
+    assert_status(&resp, StatusCode::CREATED);
+    let created = body_json(resp).await;
+    assert_eq!(created["status"], "stopped");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // Start: status flips to running.
+    let resp = post_with_cookie(&app, &format!("/api/data-sources/{id}/start"), &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let started = body_json(resp).await;
+    assert_eq!(started["status"], "running", "body: {started}");
+
+    // The MockCapturer emits asynchronously (a spawned task, a few ms
+    // apart) -- poll until the resulting emission lands and is queryable.
+    let data_source_id: uuid::Uuid = id.parse().unwrap();
+    let found = wait_until(Duration::from_secs(5), || {
+        let pool = pool.clone();
+        async move {
+            let (rows, total) = EmissionRepo::query(
+                &pool,
+                EmissionFilter {
+                    data_source_id: Some(data_source_id),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("query should succeed");
+            total == 1 && rows[0].kind == "bluetooth" && rows[0].emitter_id.is_some()
+        }
+    })
+    .await;
+    assert!(
+        found,
+        "expected exactly one bluetooth emission for this data source, attached to an emitter"
+    );
+
+    let (rows, _total) = EmissionRepo::query(
+        &pool,
+        EmissionFilter {
+            data_source_id: Some(data_source_id),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("query should succeed");
+    let emitter_id = rows[0].emitter_id.expect("auto-created + attached");
+    let emitter = EmitterRepo::get(&pool, emitter_id)
+        .await
+        .expect("query should succeed")
+        .expect("emitter should exist");
+    assert_eq!(
+        emitter.name, "BT Client \"Study Speaker\" (3c:15:c2:aa:bb:cc)",
+        "auto-created emitter should be named per Task 3's bluetooth naming convention"
     );
 
     // Stop: status flips back to stopped.

@@ -5,20 +5,25 @@
 //! group, behind `require_auth`, same as every other non-setup/login route.
 //!
 //! The handler is a thin wrapper around
-//! `fluxfang_capture::enumerate::{list_wifi_interfaces, list_serial_devices}`
-//! — see that module's docs for the `/sys/class/net` + `iw dev` fallback
-//! wifi-detection strategy and the `/dev/serial/by-id` + `/dev/ttyUSB*`/
-//! `/dev/ttyACM*` serial-detection strategy. Both enumeration functions are
-//! documented as never panicking and returning an empty `Vec` when nothing
-//! is found (missing `/sys`, missing `iw` binary, no serial devices, ...),
-//! so this handler always returns `200` — a hardware-less host (e.g. this
-//! very CI/dev container) legitimately gets back
-//! `{"wifi_interfaces":[],"serial_devices":[]}` rather than an error.
+//! `fluxfang_capture::enumerate::{list_wifi_interfaces, list_serial_devices,
+//! list_bluetooth_adapters}` — see that module's docs for the
+//! `/sys/class/net` + `iw dev` fallback wifi-detection strategy, the
+//! `/dev/serial/by-id` + `/dev/ttyUSB*`/`/dev/ttyACM*` serial-detection
+//! strategy, and the bluetooth adapter enumeration strategy. All three
+//! enumeration functions are documented as never panicking and returning an
+//! empty `Vec` when nothing is found (missing `/sys`, missing `iw` binary,
+//! no serial devices, no bluetooth adapters, ...), so this handler always
+//! returns `200` — a hardware-less host (e.g. this very CI/dev container)
+//! legitimately gets back
+//! `{"wifi_interfaces":[],"serial_devices":[],"bluetooth_interfaces":[]}`
+//! rather than an error.
 
 use axum::routing::get;
 use axum::{Json, Router};
 
-use fluxfang_capture::enumerate::{list_serial_devices, list_wifi_interfaces};
+use fluxfang_capture::enumerate::{
+    list_bluetooth_adapters, list_serial_devices, list_wifi_interfaces,
+};
 
 use crate::dto::CaptureDevicesDto;
 use crate::state::AppState;
@@ -31,5 +36,6 @@ async fn capture_devices() -> Json<CaptureDevicesDto> {
     Json(CaptureDevicesDto {
         wifi_interfaces: list_wifi_interfaces(),
         serial_devices: list_serial_devices(),
+        bluetooth_interfaces: list_bluetooth_adapters(),
     })
 }

@@ -105,6 +105,7 @@ const WIFI_ONLY_SESSION_GAP: Duration = Duration::from_secs(60 * 60 * 24 * 365 *
 pub enum BuiltCapture {
     Wifi(Box<dyn Capturer>),
     Gps(Box<dyn GpsSource + Send>),
+    Bluetooth(Box<dyn Capturer>),
 }
 
 /// Builds the capture backend for a `data_source` row. The seam that lets
@@ -177,6 +178,20 @@ impl CapturerFactory for RealCapturerFactory {
                 }
                 other => Err(anyhow!("unsupported gps mode '{other}'")),
             },
+            "bluetooth" => {
+                let interface = source
+                    .interface
+                    .clone()
+                    .ok_or_else(|| anyhow!("bluetooth data source is missing its interface"))?;
+                let active_scan = source
+                    .config
+                    .get("active_scan")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                Ok(BuiltCapture::Bluetooth(Box::new(
+                    fluxfang_capture::bluetooth::BluetoothScanCapturer::new(interface, active_scan),
+                )))
+            }
             other => Err(anyhow!("unsupported data source kind '{other}'")),
         }
     }
@@ -318,6 +333,15 @@ impl CapturerFactory for MockCapturerFactory {
                     gps = gps.looping(true);
                 }
                 Ok(BuiltCapture::Gps(Box::new(gps)))
+            }
+            "bluetooth" => {
+                let observations = self
+                    .wifi_observations
+                    .lock()
+                    .expect("mutex poisoned")
+                    .clone();
+                let capturer = MockCapturer::new(observations, Duration::from_millis(5));
+                Ok(BuiltCapture::Bluetooth(Box::new(capturer)))
             }
             other => Err(anyhow!("MockCapturerFactory: unsupported kind '{other}'")),
         }
@@ -761,6 +785,7 @@ impl CaptureSupervisor {
 
         let handle = match built {
             BuiltCapture::Wifi(capturer) => self.start_wifi(data_source_id, capturer).await,
+            BuiltCapture::Bluetooth(capturer) => self.start_wifi(data_source_id, capturer).await,
             BuiltCapture::Gps(gps) => self.start_gps(gps).await,
         };
 
