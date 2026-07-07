@@ -38,6 +38,10 @@ services:
       FLUXFANG_SECRET_KEY: ${FLUXFANG_SECRET_KEY}
       WIFI_DEVICE: ${WIFI_DEVICE:-}
       GPS_DEVICE: ${GPS_DEVICE:-}
+      # Bluetooth Scanning mode talks to org.bluez over the host's *system*
+      # D-Bus (see the volume mount below). Point zbus at the mounted socket
+      # explicitly so it never falls back to a non-existent in-container bus.
+      DBUS_SYSTEM_BUS_ADDRESS: unix:path=/run/dbus/system_bus_socket
     # --- Hardware passthrough ---
     # WiFi adapter: NOT listed under `devices:` below. A wifi NIC is a network
     # interface, not a /dev character device -- with `network_mode: host` +
@@ -56,6 +60,15 @@ services:
     # through a real serial device.
     devices:
       - "${GPS_DEVICE:-/dev/null}:${GPS_DEVICE:-/dev/null}"
+    # Bluetooth adapter: an HCI radio is reached over the host's system D-Bus
+    # (org.bluez), not a /dev node. `network_mode: host` + `privileged` already
+    # let the container see the adapter under /sys/class/bluetooth; this mount
+    # gives it the host's *system* bus socket so the BlueZ Scanning capturer's
+    # `zbus::Connection::system()` can drive discovery. Requires bluetoothd
+    # running on the HOST with the adapter powered (`bluetoothctl power on`).
+    # Harmless when no Bluetooth data source is configured.
+    volumes:
+      - "/run/dbus/system_bus_socket:/run/dbus/system_bus_socket"
     depends_on:
       db:
         condition: service_healthy
