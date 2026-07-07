@@ -426,8 +426,19 @@ pub(crate) fn validate_data_source(
                 "unknown gps mode '{other}'; expected 'gpsd' or 'serial'"
             )),
         },
+        "bluetooth" => {
+            if mode != "scan" {
+                return Err(format!(
+                    "bluetooth data sources must use mode 'scan', got '{mode}'"
+                ));
+            }
+            match interface {
+                Some(i) if !i.trim().is_empty() => Ok(()),
+                _ => Err("bluetooth data sources require a non-empty interface".to_string()),
+            }
+        }
         other => Err(format!(
-            "unknown data source kind '{other}'; expected 'wifi' or 'gps'"
+            "unknown data source kind '{other}'; expected 'wifi', 'gps', or 'bluetooth'"
         )),
     }
 }
@@ -878,5 +889,46 @@ impl CaptureSupervisor {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod validate_data_source_tests {
+    use super::validate_data_source;
+    use serde_json::json;
+
+    #[test]
+    fn bluetooth_scan_with_interface_is_ok() {
+        assert!(validate_data_source("bluetooth", "scan", Some("hci0"), &json!({})).is_ok());
+        // active_scan / auto_create_emitters are optional booleans; their
+        // absence or presence never fails validation.
+        assert!(validate_data_source(
+            "bluetooth",
+            "scan",
+            Some("hci0"),
+            &json!({"auto_create_emitters": true, "active_scan": true})
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn bluetooth_rejects_non_scan_mode() {
+        let err = validate_data_source("bluetooth", "sniff", Some("hci0"), &json!({})).unwrap_err();
+        assert!(err.contains("scan"), "message should mention scan: {err}");
+    }
+
+    #[test]
+    fn bluetooth_rejects_empty_interface() {
+        assert!(validate_data_source("bluetooth", "scan", None, &json!({})).is_err());
+        assert!(validate_data_source("bluetooth", "scan", Some("   "), &json!({})).is_err());
+    }
+
+    #[test]
+    fn unknown_kind_message_lists_bluetooth() {
+        let err = validate_data_source("zigbee", "scan", Some("x"), &json!({})).unwrap_err();
+        assert!(
+            err.contains("bluetooth"),
+            "message should list bluetooth: {err}"
+        );
     }
 }
