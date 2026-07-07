@@ -131,7 +131,9 @@ export function TypeBadge({ emitter }: { emitter: Emitter }) {
 export function MacIdentityCell({ emitter }: { emitter: Emitter }) {
   const attributes = emitter.attributes ?? {};
   const mac =
-    attributeText(attributes, "bssid") ?? attributeText(attributes, "src_mac");
+    attributeText(attributes, "bssid") ??
+    attributeText(attributes, "src_mac") ??
+    attributeText(attributes, "address");
 
   if (!mac) return <span className="text-slate-500">—</span>;
 

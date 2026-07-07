@@ -55,6 +55,25 @@ const EMITTER: Emitter = {
   last_seen_at: "2026-07-06T01:00:00Z",
 } as unknown as Emitter;
 
+const BLUETOOTH_EMITTER: Emitter = {
+  id: "bt-1",
+  name: "Someone's Phone",
+  type: "Bluetooth Device",
+  type_label: "Bluetooth Device",
+  emitter_type: "bluetooth_device",
+  entity_id: null,
+  match_enabled: true,
+  match_criteria: { match: "all", conditions: [] },
+  attributes: {
+    address: "3c:15:c2:aa:bb:cc",
+    vendor: "Apple, Inc.",
+    device_type: "Phone",
+    randomized_mac: false,
+  },
+  first_seen_at: "2026-07-06T00:00:00Z",
+  last_seen_at: "2026-07-06T01:00:00Z",
+} as unknown as Emitter;
+
 const CLIENT_EMITTER: Emitter = {
   id: "client-1",
   name: "Phone",
@@ -258,4 +277,50 @@ test("wifi client shows connected APs, linking only when the AP emitter exists",
   expect(
     screen.queryByRole("link", { name: "11:22:33:44:55:66" }),
   ).not.toBeInTheDocument();
+});
+
+test("shows vendor and device type for a bluetooth emitter", async () => {
+  vi.stubGlobal(
+    "fetch",
+    mockRoutes({
+      "GET /api/emitters/emitter-1": () => BLUETOOTH_EMITTER,
+      "GET /api/entities": () => ({ items: [], total: 0 }),
+      "GET /api/emissions": () => ({ items: [], total: 0 }),
+    }),
+  );
+  renderPage();
+
+  expect(
+    await screen.findByRole("heading", { name: /someone's phone/i }),
+  ).toBeInTheDocument();
+  // Scope to the summary <dl> — the Attributes section below also dumps
+  // these raw key/value pairs (lowercase keys), so unscoped queries would
+  // match twice.
+  const summary = screen.getByText("Identity").closest("dl");
+  expect(summary).not.toBeNull();
+  const withinSummary = within(summary as HTMLElement);
+  expect(withinSummary.getByText("Vendor")).toBeInTheDocument();
+  expect(withinSummary.getByText("Apple, Inc.")).toBeInTheDocument();
+  expect(withinSummary.getByText("Device type")).toBeInTheDocument();
+  expect(withinSummary.getByText("Phone")).toBeInTheDocument();
+  // Identity cell falls back to the bluetooth `address` attribute.
+  expect(withinSummary.getByText("3c:15:c2:aa:bb:cc")).toBeInTheDocument();
+});
+
+test("omits vendor/device type lines when absent", async () => {
+  vi.stubGlobal(
+    "fetch",
+    mockRoutes({
+      "GET /api/emitters/emitter-1": () => EMITTER,
+      "GET /api/entities": () => ({ items: [], total: 0 }),
+      "GET /api/emissions": () => ({ items: [], total: 0 }),
+    }),
+  );
+  renderPage();
+
+  expect(
+    await screen.findByRole("heading", { name: /kitchen ap/i }),
+  ).toBeInTheDocument();
+  expect(screen.queryByText("Vendor")).not.toBeInTheDocument();
+  expect(screen.queryByText("Device type")).not.toBeInTheDocument();
 });
