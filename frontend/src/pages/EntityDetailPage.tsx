@@ -117,7 +117,21 @@ export default function EntityDetailPage() {
   if (detailQuery.isLoading) {
     return <p className="text-sm text-slate-500">Loading entity…</p>;
   }
-  if (detailQuery.isError || !detail) {
+  if (detailQuery.isError) {
+    const notFound =
+      detailQuery.error instanceof ApiError && detailQuery.error.status === 404;
+    return (
+      <div className="space-y-3">
+        <Link to="/entities" className="text-sm text-amber-400 hover:underline">
+          ← Entities
+        </Link>
+        <p className="text-sm text-red-400">
+          {notFound ? "Entity not found." : "Failed to load entity."}
+        </p>
+      </div>
+    );
+  }
+  if (!detail) {
     return (
       <div className="space-y-3">
         <Link to="/entities" className="text-sm text-amber-400 hover:underline">

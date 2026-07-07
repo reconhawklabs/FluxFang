@@ -6,6 +6,7 @@
 import { Fragment, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ApiError } from "../api/client";
 import { queryKeys } from "../api/queryKeys";
 import { createEntity, listEntities } from "../api/entities";
 import type { Entity } from "../api/entities";
@@ -160,7 +161,22 @@ export default function EmitterDetailPage() {
   if (emitterQuery.isLoading) {
     return <p className="text-sm text-slate-500">Loading emitter…</p>;
   }
-  if (emitterQuery.isError || !emitter) {
+  if (emitterQuery.isError) {
+    const notFound =
+      emitterQuery.error instanceof ApiError &&
+      emitterQuery.error.status === 404;
+    return (
+      <div className="space-y-3">
+        <Link to="/emitters" className="text-sm text-amber-400 hover:underline">
+          ← Emitters
+        </Link>
+        <p className="text-sm text-red-400">
+          {notFound ? "Emitter not found." : "Failed to load emitter."}
+        </p>
+      </div>
+    );
+  }
+  if (!emitter) {
     return (
       <div className="space-y-3">
         <Link to="/emitters" className="text-sm text-amber-400 hover:underline">

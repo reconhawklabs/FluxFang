@@ -108,3 +108,22 @@ test("renders the entity name, last-seen and associated emitters", async () => {
   ).toBeInTheDocument();
   expect(screen.getByText(/phone wi-fi/i)).toBeInTheDocument();
 });
+
+test("shows not-found on a 404", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((input: RequestInfo | URL) => {
+      const raw = typeof input === "string" ? input : input.toString();
+      const url = new URL(raw, "http://localhost");
+      if (url.pathname === "/api/entities/entity-1") {
+        return Promise.resolve(jsonResponse({ message: "not found" }, 404));
+      }
+      if (url.pathname === "/api/alert-rules") {
+        return Promise.resolve(jsonResponse([]));
+      }
+      return Promise.reject(new Error(`no route for ${url.pathname}`));
+    }),
+  );
+  renderPage();
+  expect(await screen.findByText(/entity not found/i)).toBeInTheDocument();
+});

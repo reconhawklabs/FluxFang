@@ -120,6 +120,28 @@ test("renders the emitter's name, identity and last-known coords", async () => {
   expect(screen.getByText(/39\.5/)).toBeInTheDocument(); // last-known lat
 });
 
+test("shows not-found on a 404", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((input: RequestInfo | URL) => {
+      const raw = typeof input === "string" ? input : input.toString();
+      const url = new URL(raw, "http://localhost");
+      if (url.pathname === "/api/emitters/emitter-1") {
+        return Promise.resolve(jsonResponse({ message: "not found" }, 404));
+      }
+      if (url.pathname === "/api/entities") {
+        return Promise.resolve(jsonResponse({ items: [], total: 0 }));
+      }
+      if (url.pathname === "/api/emissions") {
+        return Promise.resolve(jsonResponse({ items: [], total: 0 }));
+      }
+      return Promise.reject(new Error(`no route for ${url.pathname}`));
+    }),
+  );
+  renderPage();
+  expect(await screen.findByText(/emitter not found/i)).toBeInTheDocument();
+});
+
 test("saving a rule POSTs to /rule", async () => {
   const fetchMock = mockRoutes({
     "GET /api/emitters/emitter-1": () => EMITTER,
