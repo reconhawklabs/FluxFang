@@ -20,6 +20,7 @@ import Emissions from "./pages/Emissions";
 import Emitters from "./pages/Emitters";
 import EmitterDetailPage from "./pages/EmitterDetailPage";
 import Entities from "./pages/Entities";
+import EntityDetailPage from "./pages/EntityDetailPage";
 import Zones from "./pages/Zones";
 import Alerts from "./pages/Alerts";
 import Notifications from "./pages/Notifications";
@@ -68,6 +69,7 @@ export default function App() {
         <Route path="emitters" element={<Emitters />} />
         <Route path="emitters/:id" element={<EmitterDetailPage />} />
         <Route path="entities" element={<Entities />} />
+        <Route path="entities/:id" element={<EntityDetailPage />} />
         <Route path="zones" element={<Zones />} />
         <Route path="map" element={<MapView />} />
         <Route path="alerts" element={<Alerts />} />
