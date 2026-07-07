@@ -93,7 +93,10 @@ export default function EmitterDetailPage() {
 
   const saveRuleMutation = useMutation({
     mutationFn: (rule: Rule) => setEmitterRule(id, rule),
-    onSuccess: invalidateEmitter,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.emitters });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.emissions });
+    },
   });
 
   const patchMutation = useMutation({

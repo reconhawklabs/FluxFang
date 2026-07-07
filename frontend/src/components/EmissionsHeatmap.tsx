@@ -1,6 +1,6 @@
 // Task C (emitter auto-classification design doc, "Map (reframed, scoped
 // heatmaps)"): a small, embeddable MapLibre heatmap — reused by both
-// `Emitters.tsx`'s `EmitterDetail` ("where this emitter has been heard") and
+// `EmitterDetailPage.tsx` ("where this emitter has been heard") and
 // `Entities.tsx`'s `EntityDetail` ("where this entity's emitters have been
 // heard"), rather than each rebuilding its own scoped map.
 //
@@ -18,16 +18,20 @@
 // brand-new emitter/entity with no located detections yet) than on the
 // overview page, so skipping the map entirely avoids an oddly-blank
 // zoomed-out globe.
-import { useEffect, useRef, useState } from 'react';
-import maplibregl from 'maplibre-gl';
-import type { GeoJSONSource, LngLatBoundsLike, Map as MapLibreMap } from 'maplibre-gl';
-import 'maplibre-gl/dist/maplibre-gl.css';
-import { OSM_RASTER_STYLE } from './osmRasterStyle';
-import { pointsToHeatmapGeoJSON } from './mapData';
-import type { HeatmapPoint } from './mapData';
+import { useEffect, useRef, useState } from "react";
+import maplibregl from "maplibre-gl";
+import type {
+  GeoJSONSource,
+  LngLatBoundsLike,
+  Map as MapLibreMap,
+} from "maplibre-gl";
+import "maplibre-gl/dist/maplibre-gl.css";
+import { OSM_RASTER_STYLE } from "./osmRasterStyle";
+import { pointsToHeatmapGeoJSON } from "./mapData";
+import type { HeatmapPoint } from "./mapData";
 
-const SOURCE_ID = 'emissions-heatmap-compact-source';
-const LAYER_ID = 'emissions-heatmap-compact-layer';
+const SOURCE_ID = "emissions-heatmap-compact-source";
+const LAYER_ID = "emissions-heatmap-compact-layer";
 
 export interface EmissionsHeatmapProps {
   points: HeatmapPoint[];
@@ -58,7 +62,11 @@ function boundsFor(points: HeatmapPoint[]): LngLatBoundsLike | null {
   ];
 }
 
-export default function EmissionsHeatmap({ points, height = '260px', className = '' }: EmissionsHeatmapProps) {
+export default function EmissionsHeatmap({
+  points,
+  height = "260px",
+  className = "",
+}: EmissionsHeatmapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const [styleLoaded, setStyleLoaded] = useState(false);
@@ -79,22 +87,26 @@ export default function EmissionsHeatmap({ points, height = '260px', className =
       zoom: 12,
     });
     mapRef.current = map;
-    map.addControl(new maplibregl.NavigationControl(), 'top-right');
-    map.on('load', () => {
-      map.addSource(SOURCE_ID, { type: 'geojson', data: pointsToHeatmapGeoJSON(points) });
+    map.addControl(new maplibregl.NavigationControl(), "top-right");
+    map.on("load", () => {
+      map.addSource(SOURCE_ID, {
+        type: "geojson",
+        data: pointsToHeatmapGeoJSON(points),
+      });
       map.addLayer({
         id: LAYER_ID,
-        type: 'heatmap',
+        type: "heatmap",
         source: SOURCE_ID,
         paint: {
-          'heatmap-weight': 1,
-          'heatmap-intensity': 1,
-          'heatmap-radius': 20,
-          'heatmap-opacity': 0.75,
+          "heatmap-weight": 1,
+          "heatmap-intensity": 1,
+          "heatmap-radius": 20,
+          "heatmap-opacity": 0.75,
         },
       });
       const bounds = boundsFor(points);
-      if (bounds) map.fitBounds(bounds, { padding: 40, maxZoom: 16, duration: 0 });
+      if (bounds)
+        map.fitBounds(bounds, { padding: 40, maxZoom: 16, duration: 0 });
       setStyleLoaded(true);
     });
 
@@ -115,7 +127,8 @@ export default function EmissionsHeatmap({ points, height = '260px', className =
     const source = map.getSource<GeoJSONSource>(SOURCE_ID);
     source?.setData(pointsToHeatmapGeoJSON(points));
     const bounds = boundsFor(points);
-    if (bounds) map.fitBounds(bounds, { padding: 40, maxZoom: 16, duration: 0 });
+    if (bounds)
+      map.fitBounds(bounds, { padding: 40, maxZoom: 16, duration: 0 });
   }, [styleLoaded, points]);
 
   if (!hasPoints) {

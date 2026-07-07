@@ -1,28 +1,33 @@
-import { useState } from 'react';
-import type { FormEvent } from 'react';
-import type { CreateZoneInput, Zone } from '../api/zones';
+import { useState } from "react";
+import type { FormEvent } from "react";
+import type { CreateZoneInput, Zone } from "../api/zones";
 
 const inputClassName =
-  'w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 focus:border-amber-500 focus:outline-none';
-const labelClassName = 'block text-xs font-medium uppercase tracking-wide text-slate-500';
+  "w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 focus:border-amber-500 focus:outline-none";
+const labelClassName =
+  "block text-xs font-medium uppercase tracking-wide text-slate-500";
 const cancelButtonClassName =
-  'rounded border border-slate-700 px-3 py-1.5 text-sm text-slate-300 transition hover:border-slate-500 hover:text-slate-100';
+  "rounded border border-slate-700 px-3 py-1.5 text-sm text-slate-300 transition hover:border-slate-500 hover:text-slate-100";
 const submitButtonClassName =
-  'rounded bg-amber-500 px-3 py-1.5 text-sm font-semibold text-slate-950 transition hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50';
+  "rounded bg-amber-500 px-3 py-1.5 text-sm font-semibold text-slate-950 transition hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50";
 
 /** Same lon/lat/radius ranges as the backend's `validate_zone` (see
  * `fluxfang-api::zones`'s module doc comment) — kept client-side so an
  * out-of-range value never leaves the browser as a request. Returns the
  * first violation's message, or `null` when the form is valid. */
-function validateZoneForm(lat: number, lon: number, radiusM: number): string | null {
+function validateZoneForm(
+  lat: number,
+  lon: number,
+  radiusM: number,
+): string | null {
   if (Number.isNaN(lat) || lat < -90 || lat > 90) {
-    return `Latitude must be between -90 and 90, got ${Number.isNaN(lat) ? 'nothing' : lat}.`;
+    return `Latitude must be between -90 and 90, got ${Number.isNaN(lat) ? "nothing" : lat}.`;
   }
   if (Number.isNaN(lon) || lon < -180 || lon > 180) {
-    return `Longitude must be between -180 and 180, got ${Number.isNaN(lon) ? 'nothing' : lon}.`;
+    return `Longitude must be between -180 and 180, got ${Number.isNaN(lon) ? "nothing" : lon}.`;
   }
   if (Number.isNaN(radiusM) || radiusM <= 0) {
-    return `Radius must be greater than 0, got ${Number.isNaN(radiusM) ? 'nothing' : radiusM}.`;
+    return `Radius must be greater than 0, got ${Number.isNaN(radiusM) ? "nothing" : radiusM}.`;
   }
   return null;
 }
@@ -36,13 +41,13 @@ interface ZoneFormValues {
 }
 
 function initialFormValues(zone: Zone | null): ZoneFormValues {
-  if (!zone) return { name: '', lat: '', lon: '', radiusM: '', notes: '' };
+  if (!zone) return { name: "", lat: "", lon: "", radiusM: "", notes: "" };
   return {
     name: zone.name,
     lat: String(zone.lat),
     lon: String(zone.lon),
     radiusM: String(zone.radius_m),
-    notes: zone.notes ?? '',
+    notes: zone.notes ?? "",
   };
 }
 
@@ -61,9 +66,17 @@ interface ZoneFormProps {
  * full form rather than a partial patch). Client-side validation
  * (`validateZoneForm`) runs before either mutation fires, so an
  * out-of-range lat/lon/radius never reaches `fetch`. */
-export function ZoneForm({ zone, onCancel, onSubmit, submitting, submitErrorMessage }: ZoneFormProps) {
+export function ZoneForm({
+  zone,
+  onCancel,
+  onSubmit,
+  submitting,
+  submitErrorMessage,
+}: ZoneFormProps) {
   const isEditing = zone !== null;
-  const [values, setValues] = useState<ZoneFormValues>(() => initialFormValues(zone));
+  const [values, setValues] = useState<ZoneFormValues>(() =>
+    initialFormValues(zone),
+  );
   const [validationError, setValidationError] = useState<string | null>(null);
 
   function handleSubmit(event: FormEvent<HTMLFormElement>): void {
@@ -96,7 +109,9 @@ export function ZoneForm({ zone, onCancel, onSubmit, submitting, submitErrorMess
         onSubmit={handleSubmit}
         className="max-h-[90vh] w-full max-w-md space-y-4 overflow-y-auto rounded-lg border border-slate-800 bg-slate-900 p-6 shadow-xl"
       >
-        <h2 className="text-lg font-semibold text-slate-100">{isEditing ? 'Edit Zone' : 'Add Zone'}</h2>
+        <h2 className="text-lg font-semibold text-slate-100">
+          {isEditing ? "Edit Zone" : "Add Zone"}
+        </h2>
 
         <div className="space-y-1">
           <label htmlFor="zone-name" className={labelClassName}>
@@ -108,7 +123,9 @@ export function ZoneForm({ zone, onCancel, onSubmit, submitting, submitErrorMess
             required
             autoFocus
             value={values.name}
-            onChange={(event) => setValues((prev) => ({ ...prev, name: event.target.value }))}
+            onChange={(event) =>
+              setValues((prev) => ({ ...prev, name: event.target.value }))
+            }
             className={inputClassName}
           />
         </div>
@@ -124,7 +141,9 @@ export function ZoneForm({ zone, onCancel, onSubmit, submitting, submitErrorMess
               step="any"
               required
               value={values.lat}
-              onChange={(event) => setValues((prev) => ({ ...prev, lat: event.target.value }))}
+              onChange={(event) =>
+                setValues((prev) => ({ ...prev, lat: event.target.value }))
+              }
               className={inputClassName}
             />
           </div>
@@ -138,7 +157,9 @@ export function ZoneForm({ zone, onCancel, onSubmit, submitting, submitErrorMess
               step="any"
               required
               value={values.lon}
-              onChange={(event) => setValues((prev) => ({ ...prev, lon: event.target.value }))}
+              onChange={(event) =>
+                setValues((prev) => ({ ...prev, lon: event.target.value }))
+              }
               className={inputClassName}
             />
           </div>
@@ -154,7 +175,9 @@ export function ZoneForm({ zone, onCancel, onSubmit, submitting, submitErrorMess
             step="any"
             required
             value={values.radiusM}
-            onChange={(event) => setValues((prev) => ({ ...prev, radiusM: event.target.value }))}
+            onChange={(event) =>
+              setValues((prev) => ({ ...prev, radiusM: event.target.value }))
+            }
             className={inputClassName}
           />
         </div>
@@ -166,7 +189,9 @@ export function ZoneForm({ zone, onCancel, onSubmit, submitting, submitErrorMess
           <textarea
             id="zone-notes"
             value={values.notes}
-            onChange={(event) => setValues((prev) => ({ ...prev, notes: event.target.value }))}
+            onChange={(event) =>
+              setValues((prev) => ({ ...prev, notes: event.target.value }))
+            }
             className={`${inputClassName} min-h-[4rem]`}
           />
         </div>
@@ -178,11 +203,25 @@ export function ZoneForm({ zone, onCancel, onSubmit, submitting, submitErrorMess
         )}
 
         <div className="flex justify-end gap-2 pt-2">
-          <button type="button" onClick={onCancel} className={cancelButtonClassName}>
+          <button
+            type="button"
+            onClick={onCancel}
+            className={cancelButtonClassName}
+          >
             Cancel
           </button>
-          <button type="submit" disabled={submitting} className={submitButtonClassName}>
-            {submitting ? (isEditing ? 'Saving…' : 'Adding…') : isEditing ? 'Save' : 'Add'}
+          <button
+            type="submit"
+            disabled={submitting}
+            className={submitButtonClassName}
+          >
+            {submitting
+              ? isEditing
+                ? "Saving…"
+                : "Adding…"
+              : isEditing
+                ? "Save"
+                : "Add"}
           </button>
         </div>
       </form>
