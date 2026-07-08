@@ -400,7 +400,7 @@ export default function EmitterDetailPage() {
       {/* Latest TPMS reading (tpms_sensor emitters only) */}
       {emitter.emitter_type === "tpms_sensor" && latestTpms && (
         <section className="space-y-2">
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
+          <h2 className={sectionTitleClassName}>
             Latest TPMS reading
           </h2>
           <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
