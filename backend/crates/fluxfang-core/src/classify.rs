@@ -64,6 +64,7 @@ pub fn classify(kind: &str, payload: &Value) -> Option<Classification> {
     match kind {
         "wifi" => classify_wifi(payload),
         "bluetooth" => classify_bluetooth(payload),
+        "tpms" => classify_tpms(payload),
         _ => None,
     }
 }
@@ -285,6 +286,28 @@ fn bluetooth_device_type(payload: &Value) -> Option<&'static str> {
     None
 }
 
+/// A TPMS sensor report → `tpms_sensor`, identified by the sensor `id`. One
+/// tire = one emitter. The payload's `id` is already normalized to a string
+/// by `fluxfang_capture::rtl::parse`; no `id` → no stable identity → `None`.
+/// Uses the default single-condition match rule (`id == <id>`), so a second
+/// report from the same sensor auto-attaches to this emitter.
+fn classify_tpms(payload: &Value) -> Option<Classification> {
+    let id = non_empty_str(payload, "id")?;
+    let model = payload.get("model").and_then(Value::as_str);
+    Some(Classification {
+        emitter_type: "tpms_sensor".to_string(),
+        category: "tpms".to_string(),
+        identity_field: "id".to_string(),
+        identity_value: id.clone(),
+        name: format!("TPMS_{id}"),
+        attributes: serde_json::json!({
+            "model": model,
+            "sensor_id": id,
+        }),
+        match_criteria: None,
+    })
+}
+
 /// Human-readable label for an emitter type key, for UI display (e.g. the
 /// Emitters page's `type_label`). The return type is `&'static str`, so an
 /// unrecognized key can't be passed through by reference — it maps to the
@@ -294,6 +317,7 @@ pub fn emitter_type_label(type_key: &str) -> &'static str {
         "wifi_access_point" => "WiFi Access Point",
         "wifi_client" => "WiFi Client",
         "bluetooth_device" => "Bluetooth Device",
+        "tpms_sensor" => "TPMS Sensor",
         _ => "Unknown",
     }
 }
@@ -304,6 +328,7 @@ pub fn emitter_category(type_key: &str) -> &'static str {
     match type_key {
         "wifi_access_point" | "wifi_client" => "wifi",
         "bluetooth_device" => "bluetooth",
+        "tpms_sensor" => "tpms",
         _ => "other",
     }
 }
@@ -316,6 +341,7 @@ pub fn emitter_category(type_key: &str) -> &'static str {
 pub fn catalog_kind_for(emitter_type: Option<&str>) -> &'static str {
     match emitter_type.map(emitter_category) {
         Some("bluetooth") => "bluetooth",
+        Some("tpms") => "tpms",
         _ => "wifi",
     }
 }
@@ -358,6 +384,10 @@ pub fn emitter_types_for_kind(kind: &str) -> Vec<EmitterTypeInfo> {
             key: "bluetooth_device",
             label: "Bluetooth Device",
         }],
+        "tpms" => vec![EmitterTypeInfo {
+            key: "tpms_sensor",
+            label: "TPMS Sensor",
+        }],
         _ => Vec::new(),
     }
 }
@@ -369,7 +399,7 @@ pub fn emitter_types_for_kind(kind: &str) -> Vec<EmitterTypeInfo> {
 pub fn is_known_emitter_type(type_key: &str) -> bool {
     matches!(
         type_key,
-        "wifi_access_point" | "wifi_client" | "bluetooth_device"
+        "wifi_access_point" | "wifi_client" | "bluetooth_device" | "tpms_sensor"
     )
 }
 
@@ -739,5 +769,62 @@ mod tests {
         });
         let c = classify("bluetooth", &payload).unwrap();
         assert_eq!(c.attributes["device_type"], "Phone");
+    }
+
+    // -- classify: tpms -----------------------------------------------------
+
+    #[test]
+    fn classify_tpms_sensor_identity_name_and_attributes() {
+        let payload = serde_json::json!({
+            "id": "d8af50f2",
+            "type": "TPMS",
+            "model": "Toyota",
+            "status": 128,
+            "pressure_PSI": 31.0,
+            "rssi": 1.0,
+            "snr": 17.1
+        });
+        let c = classify("tpms", &payload).expect("tpms payload classifies");
+        assert_eq!(c.emitter_type, "tpms_sensor");
+        assert_eq!(c.category, "tpms");
+        assert_eq!(c.identity_field, "id");
+        assert_eq!(c.identity_value, "d8af50f2");
+        assert_eq!(c.name, "TPMS_d8af50f2");
+        assert_eq!(c.identity_key(), "tpms_sensor:d8af50f2");
+        assert_eq!(
+            c.attributes,
+            serde_json::json!({"model": "Toyota", "sensor_id": "d8af50f2"})
+        );
+        // Default single-condition rule (id == <id>) — no override needed.
+        assert!(c.match_criteria.is_none());
+    }
+
+    #[test]
+    fn classify_tpms_missing_id_is_none() {
+        let payload = serde_json::json!({"type": "TPMS", "model": "Toyota"});
+        assert!(classify("tpms", &payload).is_none());
+    }
+
+    #[test]
+    fn classify_tpms_missing_model_uses_null_attribute() {
+        let payload = serde_json::json!({"id": "ab12", "type": "TPMS"});
+        let c = classify("tpms", &payload).unwrap();
+        assert_eq!(c.attributes["model"], serde_json::Value::Null);
+        assert_eq!(c.name, "TPMS_ab12");
+    }
+
+    #[test]
+    fn tpms_sensor_registered_in_type_registries() {
+        assert_eq!(emitter_type_label("tpms_sensor"), "TPMS Sensor");
+        assert_eq!(emitter_category("tpms_sensor"), "tpms");
+        assert_eq!(catalog_kind_for(Some("tpms_sensor")), "tpms");
+        assert!(is_known_emitter_type("tpms_sensor"));
+        assert_eq!(
+            emitter_types_for_kind("tpms"),
+            vec![EmitterTypeInfo {
+                key: "tpms_sensor",
+                label: "TPMS Sensor"
+            }]
+        );
     }
 }
