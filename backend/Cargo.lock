@@ -779,6 +779,7 @@ dependencies = [
  "aes-gcm",
  "argon2",
  "base64",
+ "chrono",
  "rand_core 0.6.4",
  "regex",
  "serde",
