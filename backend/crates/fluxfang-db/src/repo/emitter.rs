@@ -168,7 +168,7 @@ impl Default for EmitterListFilter {
 /// `match_enabled`/`identity_key`; sqlx's `FromRow` derive maps by column
 /// name, not position, so appending them here is enough for every query
 /// built from this constant to pick them up.
-const EMITTER_COLUMNS: &str = "id, created_at, name, type, entity_id, match_criteria, \
+pub(crate) const EMITTER_COLUMNS: &str = "id, created_at, name, type, entity_id, match_criteria, \
      first_seen_at, last_seen_at, emitter_type, attributes, match_enabled, identity_key";
 
 /// Allow-listed emitter sort keys -> SQL ordering expressions. `identity`
