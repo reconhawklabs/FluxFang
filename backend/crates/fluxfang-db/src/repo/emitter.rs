@@ -593,17 +593,31 @@ impl EmitterRepo {
     /// TPMS-sensor emitters that have at least one emission from a data
     /// source with `config.auto_correlate_tpms = true` — the candidate set
     /// for the correlation engine (Spec B). `config` values are bound
-    /// through Postgres's own JSONB parsing (`ds.config->>'auto_correlate_tpms'`
-    /// cast to `boolean`), not string-interpolated, so this is not
-    /// susceptible to SQL injection; no caller input flows into this query
-    /// at all.
+    /// through Postgres's own JSONB parsing (`ds.config->'auto_correlate_tpms'`
+    /// compared to the `jsonb` literal `true`), not string-interpolated, so
+    /// this is not susceptible to SQL injection; no caller input flows into
+    /// this query at all.
+    ///
+    /// Deliberately a `jsonb` equality comparison, not `(ds.config->>
+    /// 'auto_correlate_tpms')::boolean IS TRUE`: `validate_data_source`
+    /// doesn't constrain this field's shape, so a data source's `config` can
+    /// hold any JSON value here (a string like `"enabled"`, a number, an
+    /// array, ...). A `::boolean` cast raises a Postgres runtime error for
+    /// any value that isn't cast-able, which — because this query backs the
+    /// periodic correlation pass — would make ONE misconfigured data source
+    /// error out the whole query and silently disable correlation for every
+    /// eligible emitter. `->` (not `->>`) keeps the value as `jsonb` so it
+    /// can be compared against the `jsonb` literal `'true'::jsonb` without
+    /// ever attempting a cast: an absent key is `NULL` (excluded by `=`,
+    /// same as `IS TRUE` would exclude it), and `false`/strings/numbers/
+    /// arrays are simply "not equal" rather than an error.
     pub async fn list_auto_correlate_tpms(pool: &PgPool) -> Result<Vec<Emitter>, sqlx::Error> {
         let sql = format!(
             "SELECT DISTINCT {cols} FROM emitter e \
              JOIN emission em ON em.emitter_id = e.id \
              JOIN data_source ds ON ds.id = em.data_source_id \
              WHERE e.emitter_type = 'tpms_sensor' \
-               AND (ds.config->>'auto_correlate_tpms')::boolean IS TRUE",
+               AND ds.config->'auto_correlate_tpms' = 'true'::jsonb",
             cols = EMITTER_COLUMNS
                 .split(',')
                 .map(|c| format!("e.{}", c.trim()))

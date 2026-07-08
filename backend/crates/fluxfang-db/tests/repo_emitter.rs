@@ -1402,9 +1402,15 @@ async fn delete_all_nulls_emitter_id_on_survivors_emissions() {
 /// Task 7: `list_auto_correlate_tpms` returns exactly the `tpms_sensor`
 /// emitters that have an emission from a data source with
 /// `config.auto_correlate_tpms = true`, excluding: a `tpms_sensor` emitter
-/// whose only data source has `auto_correlate_tpms` unset/false, and a
+/// whose only data source has `auto_correlate_tpms` unset/false, a
 /// non-`tpms_sensor` emitter (`wifi_access_point`) even from an
-/// auto-correlate source.
+/// auto-correlate source, and — the robustness fix under test — a
+/// `tpms_sensor` emitter whose only data source has a non-boolean
+/// `auto_correlate_tpms` (e.g. the JSON string `"enabled"`). Before the fix,
+/// that last data source's `(config->>'auto_correlate_tpms')::boolean` cast
+/// raised a Postgres runtime error, failing the *entire* query — not just
+/// excluding that one emitter — so this test also pins down that the call
+/// still returns `Ok` in its presence.
 #[tokio::test]
 async fn list_auto_correlate_tpms_filters_by_type_and_data_source_config() {
     let pool = fresh_pool().await;
@@ -1428,6 +1434,20 @@ async fn list_auto_correlate_tpms_filters_by_type_and_data_source_config() {
             mode: "tpms".to_string(),
             interface: None,
             config: serde_json::json!({}),
+        },
+    )
+    .await
+    .unwrap();
+    // Malformed: `auto_correlate_tpms` is a non-boolean JSON value. Reachable
+    // via the API since `validate_data_source` doesn't constrain this
+    // field's shape — must not blow up the whole query.
+    let malformed_ds = DataSourceRepo::insert(
+        &pool,
+        NewDataSource {
+            kind: "rtl_sdr".to_string(),
+            mode: "tpms".to_string(),
+            interface: None,
+            config: serde_json::json!({"auto_correlate_tpms": "enabled"}),
         },
     )
     .await
@@ -1504,7 +1524,38 @@ async fn list_auto_correlate_tpms_filters_by_type_and_data_source_config() {
         .await
         .unwrap();
 
-    let candidates = EmitterRepo::list_auto_correlate_tpms(&pool).await.unwrap();
+    // Not eligible: tpms_sensor emitter whose only emission is from the
+    // malformed-config data source. Must not error the whole query.
+    let malformed = EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            name: "TPMS malformed".to_string(),
+            emitter_type: Some("tpms_sensor".to_string()),
+            identity_key: Some("tpms_sensor:malformed".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    EmissionRepo::insert(
+        &pool,
+        NewEmission {
+            data_source_id: Some(malformed_ds.id),
+            emitter_id: Some(malformed.id),
+            session_id: session,
+            observed_at: Utc::now(),
+            signal_strength: None,
+            location: None,
+            kind: "tpms".to_string(),
+            payload: serde_json::json!({}),
+        },
+    )
+    .await
+    .unwrap();
+
+    let candidates = EmitterRepo::list_auto_correlate_tpms(&pool)
+        .await
+        .expect("a non-boolean auto_correlate_tpms config must not error the query");
     let ids: Vec<Uuid> = candidates.iter().map(|e| e.id).collect();
     assert_eq!(
         ids,
@@ -1513,4 +1564,8 @@ async fn list_auto_correlate_tpms_filters_by_type_and_data_source_config() {
     );
     assert!(!ids.contains(&non_auto.id));
     assert!(!ids.contains(&wifi_emitter.id));
+    assert!(
+        !ids.contains(&malformed.id),
+        "emitter behind a non-boolean auto_correlate_tpms config must be excluded, not erroring"
+    );
 }
