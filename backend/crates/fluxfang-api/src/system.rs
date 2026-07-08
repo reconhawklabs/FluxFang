@@ -22,7 +22,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 
 use fluxfang_capture::enumerate::{
-    list_bluetooth_adapters, list_serial_devices, list_wifi_interfaces,
+    list_bluetooth_adapters, list_rtl_sdr_devices, list_serial_devices, list_wifi_interfaces,
 };
 
 use crate::dto::CaptureDevicesDto;
@@ -37,5 +37,6 @@ async fn capture_devices() -> Json<CaptureDevicesDto> {
         wifi_interfaces: list_wifi_interfaces(),
         serial_devices: list_serial_devices(),
         bluetooth_interfaces: list_bluetooth_adapters(),
+        rtl_sdr_devices: list_rtl_sdr_devices(),
     })
 }

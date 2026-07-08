@@ -305,6 +305,7 @@ pub struct CaptureDevicesDto {
     pub wifi_interfaces: Vec<String>,
     pub serial_devices: Vec<String>,
     pub bluetooth_interfaces: Vec<String>,
+    pub rtl_sdr_devices: Vec<fluxfang_capture::enumerate::RtlSdrDevice>,
 }
 
 /// `GET /api/gps/status` response (Phase 5): what the Dashboard's GPS block
