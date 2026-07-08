@@ -5,9 +5,9 @@ mod common;
 use chrono::{Duration, TimeZone, Utc};
 use common::{fresh_pool, seed_session, seed_wifi_source};
 use fluxfang_core::{Condition, MatchMode, Op, Rule};
-use fluxfang_db::models::{NewEmission, NewEmitter, NewEntity};
+use fluxfang_db::models::{NewDataSource, NewEmission, NewEmitter, NewEntity};
 use fluxfang_db::repo::emitter::{EmitterListFilter, EmitterRuleError};
-use fluxfang_db::{EmissionRepo, EmitterRepo, EntityRepo};
+use fluxfang_db::{DataSourceRepo, EmissionRepo, EmitterRepo, EntityRepo};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -1397,4 +1397,120 @@ async fn delete_all_nulls_emitter_id_on_survivors_emissions() {
         .unwrap()
         .unwrap();
     assert_eq!(emission.emitter_id, None);
+}
+
+/// Task 7: `list_auto_correlate_tpms` returns exactly the `tpms_sensor`
+/// emitters that have an emission from a data source with
+/// `config.auto_correlate_tpms = true`, excluding: a `tpms_sensor` emitter
+/// whose only data source has `auto_correlate_tpms` unset/false, and a
+/// non-`tpms_sensor` emitter (`wifi_access_point`) even from an
+/// auto-correlate source.
+#[tokio::test]
+async fn list_auto_correlate_tpms_filters_by_type_and_data_source_config() {
+    let pool = fresh_pool().await;
+    let session = seed_session(&pool).await;
+
+    let auto_ds = DataSourceRepo::insert(
+        &pool,
+        NewDataSource {
+            kind: "rtl_sdr".to_string(),
+            mode: "tpms".to_string(),
+            interface: None,
+            config: serde_json::json!({"auto_correlate_tpms": true}),
+        },
+    )
+    .await
+    .unwrap();
+    let plain_ds = DataSourceRepo::insert(
+        &pool,
+        NewDataSource {
+            kind: "rtl_sdr".to_string(),
+            mode: "tpms".to_string(),
+            interface: None,
+            config: serde_json::json!({}),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Eligible: tpms_sensor emitter with an emission from the auto-correlate source.
+    let eligible = EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            name: "TPMS eligible".to_string(),
+            emitter_type: Some("tpms_sensor".to_string()),
+            identity_key: Some("tpms_sensor:eligible".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let e1 = EmissionRepo::insert(
+        &pool,
+        NewEmission {
+            data_source_id: Some(auto_ds.id),
+            emitter_id: Some(eligible.id),
+            session_id: session,
+            observed_at: Utc::now(),
+            signal_strength: None,
+            location: None,
+            kind: "tpms".to_string(),
+            payload: serde_json::json!({}),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(e1.emitter_id.is_some());
+
+    // Not eligible: tpms_sensor emitter, but its only emission is from a
+    // data source without auto_correlate_tpms set.
+    let non_auto = EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            name: "TPMS non-auto".to_string(),
+            emitter_type: Some("tpms_sensor".to_string()),
+            identity_key: Some("tpms_sensor:non_auto".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    EmissionRepo::insert(
+        &pool,
+        NewEmission {
+            data_source_id: Some(plain_ds.id),
+            emitter_id: Some(non_auto.id),
+            session_id: session,
+            observed_at: Utc::now(),
+            signal_strength: None,
+            location: None,
+            kind: "tpms".to_string(),
+            payload: serde_json::json!({}),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Not eligible: a wifi_access_point emitter (wrong type) even though its
+    // emission is from the auto-correlate source.
+    let wifi_emitter = EmitterRepo::insert(&pool, new_emitter("AP")).await.unwrap();
+    let wifi_emission = EmissionRepo::insert(
+        &pool,
+        NewEmission::wifi(auto_ds.id, session, serde_json::json!({"bssid": "x"})),
+    )
+    .await
+    .unwrap();
+    EmissionRepo::set_emitter(&pool, wifi_emission.id, wifi_emitter.id)
+        .await
+        .unwrap();
+
+    let candidates = EmitterRepo::list_auto_correlate_tpms(&pool).await.unwrap();
+    let ids: Vec<Uuid> = candidates.iter().map(|e| e.id).collect();
+    assert_eq!(
+        ids,
+        vec![eligible.id],
+        "only the eligible tpms_sensor emitter should be returned"
+    );
+    assert!(!ids.contains(&non_auto.id));
+    assert!(!ids.contains(&wifi_emitter.id));
 }

@@ -39,6 +39,24 @@ async fn main() {
         startup.capture.resume_running().await;
     });
 
+    // Periodic TPMS correlation pass (Spec B). Runs every minute; a pass is a
+    // no-op unless some tpms_sensor emitter belongs to an auto-correlate data
+    // source. Errors are logged, never fatal.
+    let corr_pool = state.pool.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            ticker.tick().await;
+            match fluxfang_api::correlate::run_correlation_pass(&corr_pool, chrono::Utc::now())
+                .await
+            {
+                Ok(n) if n > 0 => eprintln!("TPMS correlation: added {n} association(s)"),
+                Ok(_) => {}
+                Err(err) => eprintln!("TPMS correlation pass failed: {err:#}"),
+            }
+        }
+    });
+
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
     axum::serve(listener, fluxfang_api::app(state))
         .await

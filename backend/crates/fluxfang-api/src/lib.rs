@@ -44,6 +44,7 @@ pub mod alert_rules;
 pub mod auth_routes;
 pub mod capture;
 pub mod catalog_routes;
+pub mod correlate;
 pub mod data_sources;
 pub mod dto;
 pub mod emissions;

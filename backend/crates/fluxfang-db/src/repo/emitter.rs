@@ -590,6 +590,29 @@ impl EmitterRepo {
         Ok(rows.into_iter().map(|(t,)| t).collect())
     }
 
+    /// TPMS-sensor emitters that have at least one emission from a data
+    /// source with `config.auto_correlate_tpms = true` — the candidate set
+    /// for the correlation engine (Spec B). `config` values are bound
+    /// through Postgres's own JSONB parsing (`ds.config->>'auto_correlate_tpms'`
+    /// cast to `boolean`), not string-interpolated, so this is not
+    /// susceptible to SQL injection; no caller input flows into this query
+    /// at all.
+    pub async fn list_auto_correlate_tpms(pool: &PgPool) -> Result<Vec<Emitter>, sqlx::Error> {
+        let sql = format!(
+            "SELECT DISTINCT {cols} FROM emitter e \
+             JOIN emission em ON em.emitter_id = e.id \
+             JOIN data_source ds ON ds.id = em.data_source_id \
+             WHERE e.emitter_type = 'tpms_sensor' \
+               AND (ds.config->>'auto_correlate_tpms')::boolean IS TRUE",
+            cols = EMITTER_COLUMNS
+                .split(',')
+                .map(|c| format!("e.{}", c.trim()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        sqlx::query_as::<_, Emitter>(&sql).fetch_all(pool).await
+    }
+
     /// Delete every `emitter` row, returning how many were removed. Phase
     /// 1c's "Clear All Emitters" action — an unconditional `DELETE`, no
     /// `WHERE` clause, no confirmation of its own (the caller/UI gates this
