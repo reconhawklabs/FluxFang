@@ -192,6 +192,25 @@ impl CapturerFactory for RealCapturerFactory {
                     fluxfang_capture::bluetooth::BluetoothScanCapturer::new(interface, active_scan),
                 )))
             }
+            "rtl_sdr" => {
+                let frequency = source
+                    .config
+                    .get("frequency")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("rtl_sdr data source missing 'frequency'"))?
+                    .to_string();
+                let device_serial = source
+                    .config
+                    .get("device_serial")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                // Reuse BuiltCapture::Wifi: it's an emitting source that
+                // routes through start_wifi (the GPS-less capture path), same
+                // as Bluetooth.
+                Ok(BuiltCapture::Wifi(Box::new(
+                    fluxfang_capture::rtl::TpmsCapturer::new(frequency, device_serial),
+                )))
+            }
             other => Err(anyhow!("unsupported data source kind '{other}'")),
         }
     }
@@ -343,6 +362,15 @@ impl CapturerFactory for MockCapturerFactory {
                 let capturer = MockCapturer::new(observations, Duration::from_millis(5));
                 Ok(BuiltCapture::Bluetooth(Box::new(capturer)))
             }
+            "rtl_sdr" => {
+                let observations = self
+                    .wifi_observations
+                    .lock()
+                    .expect("mutex poisoned")
+                    .clone();
+                let capturer = MockCapturer::new(observations, Duration::from_millis(5));
+                Ok(BuiltCapture::Wifi(Box::new(capturer)))
+            }
             other => Err(anyhow!("MockCapturerFactory: unsupported kind '{other}'")),
         }
     }
@@ -461,8 +489,34 @@ pub(crate) fn validate_data_source(
                 _ => Err("bluetooth data sources require a non-empty interface".to_string()),
             }
         }
+        "rtl_sdr" => {
+            if mode != "tpms" {
+                return Err(format!(
+                    "rtl_sdr data sources must use mode 'tpms', got '{mode}'"
+                ));
+            }
+            let freq_ok = config
+                .get("frequency")
+                .and_then(Value::as_str)
+                .is_some_and(|f| f == "315M" || f == "433.92M");
+            if !freq_ok {
+                return Err(
+                    "rtl_sdr tpms config requires a 'frequency' of '315M' or '433.92M'".to_string(),
+                );
+            }
+            if let Some(serial) = config.get("device_serial") {
+                let serial_ok = serial.as_str().is_some_and(|s| !s.trim().is_empty());
+                if !serial_ok {
+                    return Err(
+                        "rtl_sdr 'device_serial' must be a non-empty string when provided"
+                            .to_string(),
+                    );
+                }
+            }
+            Ok(())
+        }
         other => Err(format!(
-            "unknown data source kind '{other}'; expected 'wifi', 'gps', or 'bluetooth'"
+            "unknown data source kind '{other}'; expected 'wifi', 'gps', 'bluetooth', or 'rtl_sdr'"
         )),
     }
 }
@@ -969,5 +1023,46 @@ mod validate_data_source_tests {
             err.contains("bluetooth"),
             "message should list bluetooth: {err}"
         );
+    }
+
+    #[test]
+    fn rtl_sdr_tpms_with_frequency_is_ok() {
+        assert!(validate_data_source(
+            "rtl_sdr",
+            "tpms",
+            None,
+            &json!({"frequency": "315M", "device_serial": "67475624"})
+        )
+        .is_ok());
+        // device_serial optional (single-device fallback); auto flags ignored.
+        assert!(validate_data_source(
+            "rtl_sdr",
+            "tpms",
+            None,
+            &json!({"frequency": "433.92M", "auto_create_emitters": true, "auto_correlate_tpms": true})
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn rtl_sdr_rejects_bad_frequency_and_mode() {
+        let bad_freq = validate_data_source("rtl_sdr", "tpms", None, &json!({"frequency": "868M"}))
+            .unwrap_err();
+        assert!(bad_freq.contains("frequency"), "got: {bad_freq}");
+        let bad_mode = validate_data_source("rtl_sdr", "adsb", None, &json!({"frequency": "315M"}))
+            .unwrap_err();
+        assert!(bad_mode.contains("tpms"), "got: {bad_mode}");
+    }
+
+    #[test]
+    fn rtl_sdr_rejects_blank_device_serial_when_present() {
+        let err = validate_data_source(
+            "rtl_sdr",
+            "tpms",
+            None,
+            &json!({"frequency": "315M", "device_serial": "   "}),
+        )
+        .unwrap_err();
+        assert!(err.contains("device_serial"), "got: {err}");
     }
 }
