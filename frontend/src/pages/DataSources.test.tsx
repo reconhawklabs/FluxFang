@@ -287,6 +287,26 @@ test('add source: bluetooth kind — picking an adapter and enabling Active Scan
   });
 });
 
+test('add source: bluetooth kind — active scanning help text explains the RF consequences of the toggle', async () => {
+  const fetchMock = mockMethodRoutes({
+    'GET /api/data-sources': () => [],
+    'GET /api/system/capture-devices': () => captureDevices([], [], ['hci0']),
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<DataSources />, { wrapper });
+  await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+
+  fireEvent.click(screen.getByRole('button', { name: /add data source/i }));
+  fireEvent.change(screen.getByLabelText(/^kind$/i), { target: { value: 'bluetooth' } });
+
+  await screen.findByLabelText(/adapter/i);
+
+  expect(screen.getByText(/transmit scan-request frames/i)).toBeInTheDocument();
+  expect(screen.getByText(/RF-quiet/i)).toBeInTheDocument();
+  expect(screen.getByText(/some adapters may fail/i)).toBeInTheDocument();
+});
+
 test('add source: bluetooth kind with NO enumerated adapters shows "No Bluetooth adapter found." and disables the Add button', async () => {
   const fetchMock = mockMethodRoutes({
     'GET /api/data-sources': () => [],
