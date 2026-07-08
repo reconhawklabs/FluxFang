@@ -56,6 +56,7 @@ pub struct TpmsCapturer {
     running: Arc<AtomicBool>,
     child: Option<Child>,
     handle: Option<thread::JoinHandle<()>>,
+    stderr_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl TpmsCapturer {
@@ -66,6 +67,7 @@ impl TpmsCapturer {
             running: Arc::new(AtomicBool::new(false)),
             child: None,
             handle: None,
+            stderr_handle: None,
         }
     }
 }
@@ -105,6 +107,26 @@ impl Capturer for TpmsCapturer {
             .take()
             .ok_or_else(|| anyhow!("rtl_433 stdout was not captured"))?;
 
+        // Drain stderr on its own thread for the life of the process.
+        // rtl_433 writes periodic diagnostics to stderr; if nobody reads them
+        // the OS pipe buffer (~64KB on Linux) fills and rtl_433's write()
+        // blocks, stalling its main loop and silently starving stdout. The
+        // drain thread just discards the bytes and exits on EOF, which
+        // arrives when stop() kills the child.
+        let stderr_handle = child.stderr.take().map(|stderr| {
+            thread::spawn(move || {
+                let mut reader = BufReader::new(stderr);
+                let mut scratch = String::new();
+                loop {
+                    scratch.clear();
+                    match reader.read_line(&mut scratch) {
+                        Ok(0) | Err(_) => break, // EOF or read error: child gone
+                        Ok(_) => {}              // discard
+                    }
+                }
+            })
+        });
+
         self.running.store(true, Ordering::SeqCst);
         let running = self.running.clone();
         let handle = thread::spawn(move || {
@@ -129,6 +151,7 @@ impl Capturer for TpmsCapturer {
 
         self.child = Some(child);
         self.handle = Some(handle);
+        self.stderr_handle = stderr_handle;
         Ok(())
     }
 
@@ -136,11 +159,16 @@ impl Capturer for TpmsCapturer {
         self.running.store(false, Ordering::SeqCst);
         // Killing the child closes its stdout pipe, which makes the reader
         // thread's blocking read_line return Ok(0) so it exits promptly.
+        // The same kill closes stderr, which lets the drain thread's read
+        // loop hit EOF and return.
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
         }
         if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.stderr_handle.take() {
             let _ = handle.join();
         }
     }
