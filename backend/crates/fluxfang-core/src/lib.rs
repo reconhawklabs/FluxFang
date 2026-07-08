@@ -10,6 +10,7 @@ pub mod auth;
 pub mod bluetooth;
 pub mod catalog;
 pub mod classify;
+pub mod correlate;
 pub mod rule;
 pub mod rule_sql;
 pub mod secrets;

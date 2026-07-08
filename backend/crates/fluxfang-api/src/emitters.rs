@@ -99,7 +99,7 @@
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
@@ -111,7 +111,7 @@ use fluxfang_core::{
 };
 use fluxfang_db::models::{NewEmitter, NewEntity};
 use fluxfang_db::repo::emitter::{EmitterListFilter, EmitterRuleError, EmitterWithEntity};
-use fluxfang_db::{EmissionRepo, EmitterRepo};
+use fluxfang_db::{EmissionRepo, EmitterAssociationRepo, EmitterRepo};
 
 use crate::dto::{EmitterDto, EntityDto, InUseEmitterTypeDto};
 use crate::state::AppState;
@@ -137,6 +137,14 @@ pub fn protected_routes() -> Router<AppState> {
                 .delete(delete_emitter),
         )
         .route("/api/emitters/:id/rule", post(set_rule))
+        .route(
+            "/api/emitters/:id/associations",
+            get(list_associations).post(add_association),
+        )
+        .route(
+            "/api/emitters/:id/associations/:other_id",
+            delete(remove_association),
+        )
 }
 
 /// Validate `rule.conditions` against `kind`'s catalog (Task 4: `kind` is
@@ -545,6 +553,71 @@ async fn set_rule(
         emitter: EmitterDto::from(&emitter),
         attached_count,
     }))
+}
+
+/// `POST /api/emitters/:id/associations` request body — see module docs.
+#[derive(Debug, Deserialize)]
+pub struct AddAssociationRequest {
+    pub associated_emitter_id: Uuid,
+}
+
+/// GET /api/emitters/:id/associations (Spec B, Task 3): the emitters
+/// currently associated with `id` ("Other Tires on the same Car"), plus
+/// each link's `source`/`confidence`.
+async fn list_associations(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<crate::dto::EmitterAssociationDto>>, ApiError> {
+    // 404 if the emitter itself doesn't exist.
+    EmitterRepo::get(&state.pool, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let assocs = EmitterAssociationRepo::list_for(&state.pool, id).await?;
+    Ok(Json(assocs.iter().map(Into::into).collect()))
+}
+
+/// POST /api/emitters/:id/associations { associated_emitter_id } (Spec B,
+/// Task 3): manually link two `tpms_sensor` emitters ("same vehicle").
+/// Rejects self-association and any pairing where either side isn't a
+/// `tpms_sensor` emitter with `400`. Returns the resulting association list
+/// for `id` (source `"manual"`).
+async fn add_association(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<AddAssociationRequest>,
+) -> Result<Json<Vec<crate::dto::EmitterAssociationDto>>, ApiError> {
+    let other = req.associated_emitter_id;
+    if other == id {
+        return Err(ApiError::BadRequest(
+            "an emitter cannot be associated with itself".to_string(),
+        ));
+    }
+    let this = EmitterRepo::get(&state.pool, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let that = EmitterRepo::get(&state.pool, other)
+        .await?
+        .ok_or_else(|| ApiError::BadRequest("associated emitter not found".to_string()))?;
+    for e in [&this, &that] {
+        if e.emitter_type.as_deref() != Some("tpms_sensor") {
+            return Err(ApiError::BadRequest(
+                "associations are only supported between TPMS Sensor emitters".to_string(),
+            ));
+        }
+    }
+    EmitterAssociationRepo::add(&state.pool, id, other, "manual", None).await?;
+    let assocs = EmitterAssociationRepo::list_for(&state.pool, id).await?;
+    Ok(Json(assocs.iter().map(Into::into).collect()))
+}
+
+/// DELETE /api/emitters/:id/associations/:other_id (Spec B, Task 3): remove
+/// a (bidirectional) association.
+async fn remove_association(
+    State(state): State<AppState>,
+    Path((id, other_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    EmitterAssociationRepo::remove(&state.pool, id, other_id).await?;
+    Ok(StatusCode::OK)
 }
 
 #[derive(Debug, Deserialize)]

@@ -168,7 +168,7 @@ impl Default for EmitterListFilter {
 /// `match_enabled`/`identity_key`; sqlx's `FromRow` derive maps by column
 /// name, not position, so appending them here is enough for every query
 /// built from this constant to pick them up.
-const EMITTER_COLUMNS: &str = "id, created_at, name, type, entity_id, match_criteria, \
+pub(crate) const EMITTER_COLUMNS: &str = "id, created_at, name, type, entity_id, match_criteria, \
      first_seen_at, last_seen_at, emitter_type, attributes, match_enabled, identity_key";
 
 /// Allow-listed emitter sort keys -> SQL ordering expressions. `identity`
@@ -588,6 +588,58 @@ impl EmitterRepo {
         .fetch_all(pool)
         .await?;
         Ok(rows.into_iter().map(|(t,)| t).collect())
+    }
+
+    /// TPMS-sensor emitters that have at least one emission — from a data
+    /// source with `config.auto_correlate_tpms = true` — observed at or
+    /// after `since` — the candidate set for the correlation engine (Spec
+    /// B: "only consider emitters with recent activity (seen within a
+    /// lookback window, default 24h)"). Callers pass the same lookback
+    /// boundary used for the per-emitter readings query (see
+    /// `fluxfang-api::correlate::run_correlation_pass`), so the candidate
+    /// window and the readings window agree and stay driven by the passed-in
+    /// `now` rather than diverging wall-clock reads — keeping a correlation
+    /// pass deterministic/testable. `config` values are bound through
+    /// Postgres's own JSONB parsing (`ds.config->'auto_correlate_tpms'`
+    /// compared to the `jsonb` literal `true`), not string-interpolated, so
+    /// this is not susceptible to SQL injection; `since` is the only other
+    /// input and is bound as a plain parameter (`$1`), also not
+    /// interpolated.
+    ///
+    /// Deliberately a `jsonb` equality comparison, not `(ds.config->>
+    /// 'auto_correlate_tpms')::boolean IS TRUE`: `validate_data_source`
+    /// doesn't constrain this field's shape, so a data source's `config` can
+    /// hold any JSON value here (a string like `"enabled"`, a number, an
+    /// array, ...). A `::boolean` cast raises a Postgres runtime error for
+    /// any value that isn't cast-able, which — because this query backs the
+    /// periodic correlation pass — would make ONE misconfigured data source
+    /// error out the whole query and silently disable correlation for every
+    /// eligible emitter. `->` (not `->>`) keeps the value as `jsonb` so it
+    /// can be compared against the `jsonb` literal `'true'::jsonb` without
+    /// ever attempting a cast: an absent key is `NULL` (excluded by `=`,
+    /// same as `IS TRUE` would exclude it), and `false`/strings/numbers/
+    /// arrays are simply "not equal" rather than an error.
+    pub async fn list_auto_correlate_tpms(
+        pool: &PgPool,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<Emitter>, sqlx::Error> {
+        let sql = format!(
+            "SELECT DISTINCT {cols} FROM emitter e \
+             JOIN emission em ON em.emitter_id = e.id \
+             JOIN data_source ds ON ds.id = em.data_source_id \
+             WHERE e.emitter_type = 'tpms_sensor' \
+               AND ds.config->'auto_correlate_tpms' = 'true'::jsonb \
+               AND em.observed_at >= $1",
+            cols = EMITTER_COLUMNS
+                .split(',')
+                .map(|c| format!("e.{}", c.trim()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        sqlx::query_as::<_, Emitter>(&sql)
+            .bind(since)
+            .fetch_all(pool)
+            .await
     }
 
     /// Delete every `emitter` row, returning how many were removed. Phase
