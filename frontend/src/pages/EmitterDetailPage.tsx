@@ -11,10 +11,13 @@ import { queryKeys } from "../api/queryKeys";
 import { createEntity, listEntities } from "../api/entities";
 import type { Entity } from "../api/entities";
 import {
+  addAssociation,
   deleteEmitter,
   getEmitter,
+  listAssociations,
   listEmitters,
   patchEmitter,
+  removeAssociation,
   setEmitterRule,
 } from "../api/emitters";
 import { listEmissions } from "../api/emissions";
@@ -88,6 +91,35 @@ export default function EmitterDetailPage() {
     queryFn: () =>
       listEmitters({ emitter_type: "wifi_access_point", limit: 500 }),
     enabled: isClient,
+  });
+
+  const isTpms = emitter?.emitter_type === "tpms_sensor";
+
+  const associationsQuery = useQuery({
+    queryKey: ["emitter-associations", id],
+    queryFn: () => listAssociations(id!),
+    enabled: isTpms && !!id,
+  });
+
+  // Candidate tires to associate: all tpms_sensor emitters except self and
+  // those already associated.
+  const tpmsCandidatesQuery = useQuery({
+    queryKey: ["tpms-candidates"],
+    queryFn: () => listEmitters({ emitter_type: "tpms_sensor", limit: 500 }),
+    enabled: isTpms,
+  });
+
+  const addAssocMutation = useMutation({
+    mutationFn: (otherId: string) => addAssociation(id!, otherId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["emitter-associations", id] });
+    },
+  });
+  const removeAssocMutation = useMutation({
+    mutationFn: (otherId: string) => removeAssociation(id!, otherId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["emitter-associations", id] });
+    },
   });
 
   const [draftRule, setDraftRule] = useState<Rule>(EMPTY_RULE);
@@ -522,6 +554,70 @@ export default function EmitterDetailPage() {
               </tbody>
             </table>
           )}
+        </section>
+      )}
+
+      {/* Other tires on the same car (tpms_sensor emitters only) */}
+      {isTpms && (
+        <section className="space-y-2">
+          <h2 className={sectionTitleClassName}>Other Tires on the same Car</h2>
+          {associationsQuery.data && associationsQuery.data.length > 0 ? (
+            <table className="w-full text-left text-sm">
+              <tbody>
+                {associationsQuery.data.map((a) => (
+                  <tr key={a.emitter.id} className="border-b border-slate-900">
+                    <td className="py-1 pr-4">
+                      <Link className="text-amber-400 hover:underline" to={`/emitters/${a.emitter.id}`}>
+                        {a.emitter.name}
+                      </Link>
+                    </td>
+                    <td className="py-1 pr-4">
+                      <span className="rounded bg-slate-800 px-2 py-0.5 text-xs capitalize text-slate-300">
+                        {a.source}
+                        {a.source === "auto" && a.confidence != null
+                          ? ` ${Math.round(a.confidence * 100)}%`
+                          : ""}
+                      </span>
+                    </td>
+                    <td className="py-1 text-right">
+                      <button
+                        type="button"
+                        onClick={() => removeAssocMutation.mutate(a.emitter.id)}
+                        className="text-xs text-red-400 hover:underline"
+                      >
+                        Remove
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <p className="text-sm text-slate-500">No other tires associated yet.</p>
+          )}
+
+          <select
+            className={selectClassName}
+            value=""
+            onChange={(e) => {
+              if (e.target.value) addAssocMutation.mutate(e.target.value);
+            }}
+          >
+            <option value="" disabled>
+              Add Association…
+            </option>
+            {(tpmsCandidatesQuery.data?.items ?? [])
+              .filter(
+                (c) =>
+                  c.id !== id &&
+                  !(associationsQuery.data ?? []).some((a) => a.emitter.id === c.id),
+              )
+              .map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+          </select>
         </section>
       )}
 

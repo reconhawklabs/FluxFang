@@ -105,6 +105,20 @@ const TPMS_EMITTER: Emitter = {
   last_seen_at: "2026-07-06T01:00:00Z",
 } as unknown as Emitter;
 
+const ASSOCIATED_TPMS_EMITTER: Emitter = {
+  id: "tire-2",
+  name: "Rear Right Tire",
+  type: "TPMS Sensor",
+  type_label: "TPMS Sensor",
+  emitter_type: "tpms_sensor",
+  entity_id: null,
+  match_enabled: true,
+  match_criteria: { match: "all", conditions: [] },
+  attributes: { sensor_id: "def456" },
+  first_seen_at: "2026-07-06T00:00:00Z",
+  last_seen_at: "2026-07-06T01:00:00Z",
+} as unknown as Emitter;
+
 function mockRoutes(
   handlers: Record<string, (url: URL, init?: RequestInit) => unknown>,
 ) {
@@ -379,6 +393,53 @@ test("tpms_sensor emitter shows the latest TPMS reading, derived from the most r
   ).toBeInTheDocument();
   // Picks the most-recent emission (t2) by observed_at, not just index 0.
   expect(screen.getByText("32.5")).toBeInTheDocument();
+});
+
+test("tpms_sensor emitter shows other associated tires with a source badge and link", async () => {
+  vi.stubGlobal(
+    "fetch",
+    mockRoutes({
+      "GET /api/emitters/emitter-1": () => TPMS_EMITTER,
+      "GET /api/entities": () => ({ items: [], total: 0 }),
+      "GET /api/emissions": () => ({ items: [], total: 0 }),
+      "GET /api/emitters/emitter-1/associations": () => [
+        { emitter: ASSOCIATED_TPMS_EMITTER, source: "auto", confidence: 0.87 },
+      ],
+      "GET /api/emitters": () => ({
+        items: [TPMS_EMITTER, ASSOCIATED_TPMS_EMITTER],
+        total: 2,
+      }),
+    }),
+  );
+  renderPage();
+
+  expect(
+    await screen.findByRole("heading", {
+      name: /other tires on the same car/i,
+    }),
+  ).toBeInTheDocument();
+  const link = await screen.findByRole("link", { name: /rear right tire/i });
+  expect(link).toHaveAttribute("href", "/emitters/tire-2");
+  expect(screen.getByText("auto 87%")).toBeInTheDocument();
+});
+
+test("does not show the associated-tires section for a non-tpms emitter", async () => {
+  vi.stubGlobal(
+    "fetch",
+    mockRoutes({
+      "GET /api/emitters/emitter-1": () => EMITTER,
+      "GET /api/entities": () => ({ items: [], total: 0 }),
+      "GET /api/emissions": () => ({ items: [], total: 0 }),
+    }),
+  );
+  renderPage();
+
+  expect(
+    await screen.findByRole("heading", { name: /kitchen ap/i }),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByText(/other tires on the same car/i),
+  ).not.toBeInTheDocument();
 });
 
 test("does not show a Latest TPMS reading section for a non-tpms emitter", async () => {
