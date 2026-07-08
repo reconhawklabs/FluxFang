@@ -18,6 +18,7 @@ pub mod bluetooth;
 pub mod enumerate;
 pub mod gps;
 pub mod mock;
+pub mod rtl;
 pub mod wifi;
 
 use async_trait::async_trait;
