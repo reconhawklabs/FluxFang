@@ -695,7 +695,21 @@ impl CaptureSupervisor {
     ) -> anyhow::Result<RunningHandle> {
         let (ctx, opened_session) = self.ensure_wifi_session().await?;
         let (tx, mut rx) = mpsc::channel::<RawObservation>(256);
-        if let Err(err) = capturer.start(tx) {
+        // `Capturer::start` can now block for several seconds -- the bluetooth
+        // capturer performs a startup handshake that waits on a channel -- so
+        // run it on the blocking-pool instead of directly on this async task,
+        // otherwise it stalls a runtime worker thread (and, because
+        // `CaptureSupervisor::start` awaits this while holding `self.running`,
+        // serializes all data-source start/stop). `start` takes `&mut capturer`
+        // and we still need `capturer` afterward for the `RunningHandle`, so
+        // move it into the closure and hand it back out alongside the result.
+        let (capturer, start_result) = tokio::task::spawn_blocking(move || {
+            let result = capturer.start(tx);
+            (capturer, result)
+        })
+        .await
+        .map_err(|err| anyhow!("capturer start task panicked: {err}"))?;
+        if let Err(err) = start_result {
             // The capturer failed to actually start (bad interface, no
             // monitor mode, permissions -- a realistic hardware failure).
             // If this call was the one that just opened the shared session,

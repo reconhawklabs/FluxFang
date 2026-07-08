@@ -78,10 +78,8 @@ trait Adapter1 {
     default_service = "org.bluez"
 )]
 trait AdvMonitorManager {
-    fn register_monitor(&self, application: &zbus::zvariant::ObjectPath<'_>)
-        -> zbus::Result<()>;
-    fn unregister_monitor(&self, application: &zbus::zvariant::ObjectPath<'_>)
-        -> zbus::Result<()>;
+    fn register_monitor(&self, application: &zbus::zvariant::ObjectPath<'_>) -> zbus::Result<()>;
+    fn unregister_monitor(&self, application: &zbus::zvariant::ObjectPath<'_>) -> zbus::Result<()>;
 
     #[zbus(property)]
     fn supported_monitor_types(&self) -> zbus::Result<Vec<String>>;
@@ -247,9 +245,11 @@ fn interpret_startup(
     }
 }
 
-/// The D-Bus discovery loop. Talks to `org.bluez` on the system bus:
-/// power on the adapter, `SetDiscoveryFilter` (Transport=auto, DuplicateData
-/// per `active_scan`), `StartDiscovery`, then stream device property
+/// The D-Bus discovery loop. Talks to `org.bluez` on the system bus: powers on
+/// the adapter, then branches on `active_scan`. Active runs BlueZ discovery
+/// (`SetDiscoveryFilter` with Transport=auto + DuplicateData, then
+/// `StartDiscovery`); passive instead registers an `AdvertisementMonitor1` and
+/// never calls `StartDiscovery`. Either way it then streams device property
 /// snapshots (via ObjectManager `InterfacesAdded` + per-device
 /// `PropertiesChanged`), building a `DeviceProps` for each and forwarding
 /// `device_props_to_observation`'s result on `tx`. Honors `running` for
@@ -467,8 +467,10 @@ async fn setup_passive_monitor(
     server
         .at(MONITOR_ROOT, zbus::fdo::ObjectManager)
         .await
-        .map_err(|e| format!("bluetooth scan on {interface}: serving ObjectManager failed: {e:#}"))?;
-    server
+        .map_err(|e| {
+            format!("bluetooth scan on {interface}: serving ObjectManager failed: {e:#}")
+        })?;
+    if let Err(e) = server
         .at(
             MONITOR_PATH,
             AdvMonitor {
@@ -476,10 +478,22 @@ async fn setup_passive_monitor(
             },
         )
         .await
-        .map_err(|e| format!("bluetooth scan on {interface}: serving monitor failed: {e:#}"))?;
+    {
+        teardown_monitor(conn).await;
+        return Err(format!(
+            "bluetooth scan on {interface}: serving monitor failed: {e:#}"
+        ));
+    }
 
-    let root = zbus::zvariant::ObjectPath::try_from(MONITOR_ROOT)
-        .map_err(|e| format!("bluetooth scan on {interface}: bad monitor root path: {e:#}"))?;
+    let root = match zbus::zvariant::ObjectPath::try_from(MONITOR_ROOT) {
+        Ok(root) => root,
+        Err(e) => {
+            teardown_monitor(conn).await;
+            return Err(format!(
+                "bluetooth scan on {interface}: bad monitor root path: {e:#}"
+            ));
+        }
+    };
 
     if let Err(e) = manager.register_monitor(&root).await {
         teardown_monitor(conn).await;
@@ -509,7 +523,9 @@ async fn setup_passive_monitor(
 async fn teardown_monitor(conn: &Connection) {
     let server = conn.object_server();
     let _ = server.remove::<AdvMonitor, _>(MONITOR_PATH).await;
-    let _ = server.remove::<zbus::fdo::ObjectManager, _>(MONITOR_ROOT).await;
+    let _ = server
+        .remove::<zbus::fdo::ObjectManager, _>(MONITOR_ROOT)
+        .await;
 }
 
 /// Emit `props` on `tx` unless throttled. Returns `false` only if the
