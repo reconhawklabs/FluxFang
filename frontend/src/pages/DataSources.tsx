@@ -387,8 +387,11 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
                 Enable Active Scanning
               </label>
               <p className="text-xs text-slate-500">
-                Passive scanning listens only for advertisements. Active scanning also
-                sends scan requests to probe devices for more data.
+                Enabling Active Scanning makes the adapter transmit scan-request
+                frames to probe devices for more data. Leaving it disabled keeps
+                the Bluetooth adapter RF-quiet (listen-only) — but note that some
+                adapters may fail to start if they do not support passive scanning
+                and Active Scanning is disabled.
               </p>
             </div>
           </>
