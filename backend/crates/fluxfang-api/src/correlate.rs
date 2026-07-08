@@ -21,8 +21,8 @@ const MAX_READINGS: i64 = 1000;
 /// Run one correlation pass. Returns the number of new associations added.
 pub async fn run_correlation_pass(pool: &PgPool, now: DateTime<Utc>) -> anyhow::Result<usize> {
     let cfg = CorrelationConfig::default();
-    let candidates = EmitterRepo::list_auto_correlate_tpms(pool).await?;
     let time_from = now - chrono::Duration::from_std(LOOKBACK)?;
+    let candidates = EmitterRepo::list_auto_correlate_tpms(pool, time_from).await?;
 
     // Fetch each candidate's recent readings once.
     let mut readings: Vec<(Emitter, Vec<Reading>)> = Vec::new();
