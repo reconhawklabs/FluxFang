@@ -37,6 +37,13 @@ const EMIT_THROTTLE: Duration = Duration::from_secs(5);
 /// `PropertiesChanged` signals.
 const DEVICE_IFACE: &str = "org.bluez.Device1";
 
+/// Whether BlueZ's `AdvertisementMonitorManager1.SupportedMonitorTypes`
+/// includes a monitor type we can use for an all-devices passive scan. We use
+/// `or_patterns`, the widely supported type. Absent/empty → no passive support.
+fn passive_supported(supported_types: &[String]) -> bool {
+    supported_types.iter().any(|t| t == "or_patterns")
+}
+
 /// A minimal proxy for `org.bluez.Adapter1` — just the bits the discovery
 /// loop drives (power the adapter on, scope the scan, start/stop discovery).
 #[proxy(interface = "org.bluez.Adapter1", default_service = "org.bluez")]
@@ -391,5 +398,25 @@ fn value_to_bytes(value: &Value) -> Vec<u8> {
             })
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn passive_supported_true_when_or_patterns_present() {
+        assert!(passive_supported(&["or_patterns".to_string()]));
+        assert!(passive_supported(&[
+            "unknown".to_string(),
+            "or_patterns".to_string()
+        ]));
+    }
+
+    #[test]
+    fn passive_supported_false_when_absent_or_empty() {
+        assert!(!passive_supported(&[]));
+        assert!(!passive_supported(&["rssi".to_string()]));
     }
 }
