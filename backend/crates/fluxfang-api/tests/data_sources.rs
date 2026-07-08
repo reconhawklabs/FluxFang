@@ -40,6 +40,27 @@ fn wifi_obs(bssid: &str, observed_at: chrono::DateTime<Utc>) -> RawObservation {
     }
 }
 
+/// A `tpms`-kind `RawObservation` matching the shape
+/// `fluxfang_capture::rtl::TpmsCapturer` produces (see `rtl/parse.rs`) and
+/// `classify_tpms` (`fluxfang-core/src/classify.rs`) consumes.
+fn tpms_obs(
+    at: chrono::DateTime<Utc>,
+    id: &str,
+    model: &str,
+    pressure: f64,
+    rssi: i32,
+) -> RawObservation {
+    RawObservation {
+        kind: "tpms".to_string(),
+        observed_at: at,
+        signal_strength: Some(rssi),
+        payload: json!({
+            "id": id, "type": "TPMS", "model": model,
+            "status": 128, "pressure_PSI": pressure, "rssi": rssi as f64, "snr": 12.0
+        }),
+    }
+}
+
 /// Poll `f` (bounded, so a regression fails loudly instead of hanging the
 /// suite) until the future it produces resolves `true`, or the timeout
 /// elapses -- used because the `MockCapturer`/`MockGps` pipelines run on
@@ -219,6 +240,133 @@ async fn bluetooth_data_source_start_flows_mock_emission_through_ingest_then_sto
     assert_status(&resp, StatusCode::OK);
     let stopped = body_json(resp).await;
     assert_eq!(stopped["status"], "stopped", "body: {stopped}");
+}
+
+/// Task 12: an `rtl_sdr`/`tpms` data source with `auto_create_emitters: true`,
+/// driven through the same `MockCapturerFactory`/`CaptureSupervisor` path as
+/// the bluetooth case above, ingests three replayed TPMS reports — two
+/// distinct sensor ids plus a repeat of the first — into exactly two
+/// `tpms_sensor` emitters (one per distinct sensor id), with three `tpms`
+/// emissions total and the repeat report attaching to the *same* emitter as
+/// its first report rather than creating a third.
+#[tokio::test]
+async fn rtl_sdr_tpms_auto_creates_one_emitter_per_sensor_id() {
+    let base = Utc.with_ymd_and_hms(2026, 7, 7, 21, 47, 19).unwrap();
+    let obs = vec![
+        tpms_obs(base, "d8af50f2", "Toyota", 31.0, 1),
+        tpms_obs(
+            base + chrono::Duration::seconds(4),
+            "d8af3245",
+            "Toyota",
+            31.25,
+            -5,
+        ),
+        tpms_obs(
+            base + chrono::Duration::seconds(90),
+            "d8af50f2",
+            "Toyota",
+            30.75,
+            1,
+        ),
+    ];
+    let factory = Arc::new(MockCapturerFactory::with_wifi_observations(obs));
+    let (app, pool) = test_app_with_factory(factory).await;
+    let cookie = login(&app).await;
+
+    // Create: starts out stopped.
+    let resp = post_json_with_cookie(
+        &app,
+        "/api/data-sources",
+        r#"{"kind":"rtl_sdr","mode":"tpms","config":{"frequency":"315M","auto_create_emitters":true}}"#,
+        &cookie,
+    )
+    .await;
+    assert_status(&resp, StatusCode::CREATED);
+    let created = body_json(resp).await;
+    assert_eq!(created["status"], "stopped");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // Start: status flips to running.
+    let resp = post_with_cookie(&app, &format!("/api/data-sources/{id}/start"), &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let started = body_json(resp).await;
+    assert_eq!(started["status"], "running", "body: {started}");
+
+    // The MockCapturer emits asynchronously (a spawned task, a few ms
+    // apart) -- poll until all three replayed reports have landed and been
+    // ingested.
+    let data_source_id: uuid::Uuid = id.parse().unwrap();
+    let found = wait_until(Duration::from_secs(5), || {
+        let pool = pool.clone();
+        async move {
+            let (rows, total) = EmissionRepo::query(
+                &pool,
+                EmissionFilter {
+                    data_source_id: Some(data_source_id),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("query should succeed");
+            total == 3
+                && rows
+                    .iter()
+                    .all(|r| r.kind == "tpms" && r.emitter_id.is_some())
+        }
+    })
+    .await;
+    assert!(
+        found,
+        "expected exactly three tpms emissions for this data source, each attached to an emitter"
+    );
+
+    // Stop before asserting on emitters, matching the wifi/bluetooth cases'
+    // shape (start -> observe -> stop).
+    let resp = post_with_cookie(&app, &format!("/api/data-sources/{id}/stop"), &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let stopped = body_json(resp).await;
+    assert_eq!(stopped["status"], "stopped", "body: {stopped}");
+
+    // Exactly two `tpms_sensor` emitters exist, named per the sensor ids.
+    let emitters: Vec<_> = EmitterRepo::list(&pool)
+        .await
+        .expect("query should succeed")
+        .into_iter()
+        .filter(|e| e.emitter_type.as_deref() == Some("tpms_sensor"))
+        .collect();
+    let mut names: Vec<&str> = emitters.iter().map(|e| e.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec!["TPMS_d8af3245", "TPMS_d8af50f2"],
+        "expected exactly one auto-created tpms_sensor emitter per distinct sensor id, \
+         not a duplicate for the repeat report"
+    );
+
+    // The repeat report (both reports of d8af50f2) attaches to the *same*
+    // emitter as the sensor's first report -- three emissions total, but
+    // only two distinct emitter_ids among them.
+    let (rows, total) = EmissionRepo::query(
+        &pool,
+        EmissionFilter {
+            data_source_id: Some(data_source_id),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("query should succeed");
+    assert_eq!(total, 3, "expected three tpms emissions total");
+    let mut emitter_ids: Vec<uuid::Uuid> = rows
+        .iter()
+        .map(|r| r.emitter_id.expect("attached"))
+        .collect();
+    emitter_ids.sort_unstable();
+    emitter_ids.dedup();
+    assert_eq!(
+        emitter_ids.len(),
+        2,
+        "three emissions should attach to only two distinct emitters (repeat id reuses one)"
+    );
 }
 
 /// (b) Starting a gps data source opens a `survey_session` and writes
