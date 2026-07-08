@@ -225,3 +225,34 @@ export function bulkDeleteEmitters(ids: string[]): Promise<DeletedCount> {
 export function clearEmitters(): Promise<DeletedCount> {
   return post<DeletedCount>("/api/emitters/clear");
 }
+
+/** One entry from `GET /api/emitters/:id/associations` — the associated
+ * emitter plus how the link was made. Mirrors `EmitterAssociationDto`. */
+export interface EmitterAssociation {
+  emitter: Emitter;
+  source: "manual" | "auto";
+  confidence: number | null;
+}
+
+export function listAssociations(id: string): Promise<EmitterAssociation[]> {
+  return get<EmitterAssociation[]>(
+    `/api/emitters/${encodeURIComponent(id)}/associations`,
+  );
+}
+
+/** Add a manual association; returns the updated list for this emitter. */
+export function addAssociation(
+  id: string,
+  associatedEmitterId: string,
+): Promise<EmitterAssociation[]> {
+  return post<EmitterAssociation[]>(
+    `/api/emitters/${encodeURIComponent(id)}/associations`,
+    { associated_emitter_id: associatedEmitterId },
+  );
+}
+
+export function removeAssociation(id: string, otherId: string): Promise<void> {
+  return del<void>(
+    `/api/emitters/${encodeURIComponent(id)}/associations/${encodeURIComponent(otherId)}`,
+  );
+}
