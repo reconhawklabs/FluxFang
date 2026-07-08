@@ -297,7 +297,7 @@ pub struct ZoneDto {
 /// WebUI offers in its data-source setup dropdowns instead of making the
 /// operator type an interface/device name from memory. Built directly from
 /// `fluxfang_capture::enumerate::{list_wifi_interfaces, list_serial_devices,
-/// list_bluetooth_adapters}` — see that module's docs for detection strategy
+/// list_bluetooth_adapters, list_rtl_sdr_devices}` — see that module's docs for detection strategy
 /// and the "never panics, empty on a hardware-less host" guarantee this DTO
 /// relies on.
 #[derive(Debug, Clone, Serialize)]
@@ -305,6 +305,7 @@ pub struct CaptureDevicesDto {
     pub wifi_interfaces: Vec<String>,
     pub serial_devices: Vec<String>,
     pub bluetooth_interfaces: Vec<String>,
+    pub rtl_sdr_devices: Vec<fluxfang_capture::enumerate::RtlSdrDevice>,
 }
 
 /// `GET /api/gps/status` response (Phase 5): what the Dashboard's GPS block

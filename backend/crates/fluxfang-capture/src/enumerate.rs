@@ -17,6 +17,8 @@
 
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+
 /// Interface names known to have a `wireless` subdirectory under
 /// `/sys/class/net/<name>/`, sorted and deduped. This is the canonical
 /// kernel-exposed "is this a wireless interface" check (present for every
@@ -203,6 +205,85 @@ pub fn list_bluetooth_adapters() -> Vec<String> {
     filter_hci_adapters(&names)
 }
 
+/// One RTL-SDR dongle as reported by `rtl_test` — its enumeration `index`
+/// (what rtl_433's `-d N` uses), a human `name` (vendor + product), and its
+/// stable USB `serial` (what we persist and pass as `-d :SERIAL`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RtlSdrDevice {
+    pub index: u32,
+    pub name: String,
+    pub serial: String,
+}
+
+/// Parse `rtl_test`'s device-list lines, e.g.
+/// `  0:  Nooelec, NESDR SMArTee v5, SN: 67475624`. Pure and panic-free:
+/// non-device lines ("Found N device(s):", "Using device 0: …", blanks) are
+/// ignored. A line with no `SN:` or an unparseable index is skipped.
+fn parse_rtl_test(output: &str) -> Vec<RtlSdrDevice> {
+    output.lines().filter_map(parse_rtl_test_line).collect()
+}
+
+fn parse_rtl_test_line(line: &str) -> Option<RtlSdrDevice> {
+    let line = line.trim();
+    let (idx_str, rest) = line.split_once(':')?;
+    let index: u32 = idx_str.trim().parse().ok()?;
+    let (name_part, sn_part) = rest.rsplit_once("SN:")?;
+    let serial = sn_part.trim().to_string();
+    if serial.is_empty() {
+        return None;
+    }
+    let name = name_part.trim().trim_end_matches(',').trim().to_string();
+    Some(RtlSdrDevice {
+        index,
+        name,
+        serial,
+    })
+}
+
+/// Lists connected RTL-SDR dongles by running `rtl_test` briefly and parsing
+/// its device listing (printed to stderr before it opens device 0), then
+/// killing it so it never runs its benchmark loop. Never panics: a missing
+/// `rtl_test` binary, or a device already in use, yields whatever the listing
+/// contained (possibly empty). The listing is printed even when opening the
+/// device subsequently fails, so an in-use dongle still enumerates.
+pub fn list_rtl_sdr_devices() -> Vec<RtlSdrDevice> {
+    use std::io::BufRead;
+    use std::process::{Command, Stdio};
+
+    let Ok(mut child) = Command::new("rtl_test")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    else {
+        return Vec::new();
+    };
+
+    let mut text = String::new();
+    if let Some(stderr) = child.stderr.take() {
+        let mut reader = std::io::BufReader::new(stderr);
+        let mut line = String::new();
+        // Read until rtl_test starts opening a device (right after the list)
+        // or the stream ends; guard with a line cap so a chatty build can't
+        // spin here.
+        for _ in 0..64 {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    text.push_str(&line);
+                    if line.trim_start().starts_with("Using device") {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    parse_rtl_test(&text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,5 +451,35 @@ phy#1
     #[test]
     fn list_serial_devices_never_panics() {
         let _ = list_serial_devices();
+    }
+
+    const RTL_TEST_SAMPLE: &str = "\
+Found 2 device(s):
+  0:  Nooelec, NESDR SMArTee v5, SN: 67475624
+  1:  Realtek, RTL2838UHIDIR, SN: 00000001
+Using device 0: Generic RTL2832U OEM
+";
+
+    #[test]
+    fn parse_rtl_test_extracts_index_name_serial() {
+        let devices = parse_rtl_test(RTL_TEST_SAMPLE);
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].index, 0);
+        assert_eq!(devices[0].name, "Nooelec, NESDR SMArTee v5");
+        assert_eq!(devices[0].serial, "67475624");
+        assert_eq!(devices[1].index, 1);
+        assert_eq!(devices[1].serial, "00000001");
+    }
+
+    #[test]
+    fn parse_rtl_test_ignores_non_device_lines() {
+        assert!(parse_rtl_test("Found 0 device(s):\n").is_empty());
+        assert!(parse_rtl_test("").is_empty());
+        assert!(parse_rtl_test("No supported devices found.\n").is_empty());
+    }
+
+    #[test]
+    fn list_rtl_sdr_devices_never_panics() {
+        let _ = list_rtl_sdr_devices();
     }
 }

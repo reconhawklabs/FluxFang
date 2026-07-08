@@ -17,6 +17,7 @@ import { ApiError } from '../api/client';
 import { queryKeys } from '../api/queryKeys';
 import {
   BAUD_RATES,
+  RTL_FREQUENCIES,
   createDataSource,
   deleteDataSource,
   listCaptureDevices,
@@ -29,6 +30,7 @@ import type {
   CreateDataSourceInput,
   DataSource,
   DataSourceStatus,
+  RtlFrequency,
 } from '../api/dataSources';
 
 /** How often to re-poll the list while this page is mounted (see module doc
@@ -95,10 +97,27 @@ function ConfigSummary({ source }: { source: DataSource }) {
       </>
     );
   }
+  if (source.kind === 'rtl_sdr') {
+    const freq = 'frequency' in source.config ? source.config.frequency : '?';
+    const serial =
+      'device_serial' in source.config && source.config.device_serial
+        ? source.config.device_serial
+        : 'dev 0';
+    const autoCreate =
+      'auto_create_emitters' in source.config && source.config.auto_create_emitters === true;
+    return (
+      <>
+        <span className="font-mono text-slate-300">
+          {freq} @ {serial}
+        </span>
+        <span className="text-slate-500">{autoCreate ? ' (auto)' : ''}</span>
+      </>
+    );
+  }
   return <span className="text-slate-500">—</span>;
 }
 
-type FormKind = 'wifi' | 'gps' | 'bluetooth';
+type FormKind = 'wifi' | 'gps' | 'bluetooth' | 'rtl_sdr';
 type FormWifiMode = 'monitor' | 'scan';
 type FormGpsMode = 'gpsd' | 'serial';
 
@@ -114,11 +133,16 @@ const WIFI_MODE_HELP: Record<FormWifiMode, string> = {
 const NO_WIFI_MESSAGE = 'No compatible WiFi card found.';
 const NO_SERIAL_MESSAGE = 'No compatible serial GPS device found.';
 const NO_BLUETOOTH_MESSAGE = 'No Bluetooth adapter found.';
+const NO_RTL_MESSAGE = 'No RTL-SDR device found.';
 
 /** Bluetooth ships with a single mode for this spec — the dropdown still
  * shows it (for a consistent Mode-select experience across kinds) but it's
  * effectively static since there's only one `<option>`. */
 const BT_MODE_HELP = 'Passive BLE advertisement scanning via a host HCI adapter.';
+
+/** RTL-SDR ships with a single mode (TPMS, via rtl_433) for this spec — same
+ * static-dropdown rationale as `BT_MODE_HELP`. */
+const RTL_MODE_HELP = 'TPMS decodes tire-pressure sensor reports via rtl_433.';
 
 interface AddSourceFormProps {
   onCancel: () => void;
@@ -145,6 +169,10 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
   const [port, setPort] = useState('2947');
   const [device, setDevice] = useState('');
   const [baud, setBaud] = useState<BaudRate>(9600);
+  // RTL-SDR / TPMS state.
+  const [rtlFrequency, setRtlFrequency] = useState<RtlFrequency>('315M');
+  const [rtlSerial, setRtlSerial] = useState('');
+  const [tpmsAutoCorrelate, setTpmsAutoCorrelate] = useState(false);
 
   // Hardware enumeration (Task devdropdown) — the Add form no longer takes
   // free-text interface/device names; it offers only what
@@ -163,6 +191,8 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
   const wifiHasDevices = wifiInterfaces.length > 0;
   const serialHasDevices = serialDevices.length > 0;
   const bluetoothHasDevices = bluetoothInterfaces.length > 0;
+  const rtlDevices = devicesQuery.data?.rtl_sdr_devices ?? [];
+  const rtlHasDevices = rtlDevices.length > 0;
 
   function handleSubmit(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
@@ -187,6 +217,20 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
       return;
     }
 
+    if (kind === 'rtl_sdr') {
+      onSubmit({
+        kind: 'rtl_sdr',
+        mode: 'tpms',
+        config: {
+          frequency: rtlFrequency,
+          ...(rtlSerial ? { device_serial: rtlSerial } : {}),
+          auto_create_emitters: autoCreateEmitters,
+          auto_correlate_tpms: tpmsAutoCorrelate,
+        },
+      });
+      return;
+    }
+
     if (gpsMode === 'gpsd') {
       onSubmit({ kind: 'gps', mode: 'gpsd', config: { host, port: Number(port) } });
       return;
@@ -206,6 +250,11 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
     canSubmit = !devicesLoading && !devicesErrored && wifiInterfaces.includes(iface);
   } else if (kind === 'bluetooth') {
     canSubmit = !devicesLoading && !devicesErrored && bluetoothInterfaces.includes(iface);
+  } else if (kind === 'rtl_sdr') {
+    canSubmit =
+      !devicesLoading &&
+      !devicesErrored &&
+      rtlDevices.some((d) => d.serial === rtlSerial);
   } else if (gpsMode === 'serial') {
     canSubmit = !devicesLoading && !devicesErrored && serialDevices.includes(device);
   } else {
@@ -256,6 +305,7 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
             <option value="wifi">Wifi</option>
             <option value="gps">GPS</option>
             <option value="bluetooth">Bluetooth</option>
+            <option value="rtl_sdr">RTL-SDR</option>
           </select>
         </div>
 
@@ -392,6 +442,98 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
                 the Bluetooth adapter RF-quiet (listen-only) — but note that some
                 adapters may fail to start if they do not support passive scanning
                 and Active Scanning is disabled.
+              </p>
+            </div>
+          </>
+        )}
+
+        {kind === 'rtl_sdr' && (
+          <>
+            <div className="space-y-1">
+              <label htmlFor="ds-rtl-mode" className={labelClassName}>
+                Mode
+              </label>
+              <select id="ds-rtl-mode" value="tpms" disabled className={inputClassName}>
+                <option value="tpms">TPMS</option>
+              </select>
+              <p className="text-xs text-slate-500">{RTL_MODE_HELP}</p>
+            </div>
+
+            <div className="space-y-1">
+              <label htmlFor="ds-rtl-frequency" className={labelClassName}>
+                Frequency
+              </label>
+              <select
+                id="ds-rtl-frequency"
+                value={rtlFrequency}
+                onChange={(event) => setRtlFrequency(event.target.value as RtlFrequency)}
+                className={inputClassName}
+              >
+                {RTL_FREQUENCIES.map((f) => (
+                  <option key={f.value} value={f.value}>
+                    {f.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="space-y-1">
+              <label htmlFor="ds-rtl-device" className={labelClassName}>
+                Device
+              </label>
+              {devicesLoading && <p className="text-sm text-slate-500">Loading devices…</p>}
+              {!devicesLoading && !devicesErrored && rtlHasDevices && (
+                <select
+                  id="ds-rtl-device"
+                  value={rtlSerial}
+                  onChange={(event) => setRtlSerial(event.target.value)}
+                  className={`font-mono ${inputClassName}`}
+                >
+                  <option value="">Select a device…</option>
+                  {rtlDevices.map((d) => (
+                    <option key={d.serial} value={d.serial}>
+                      index {d.index} — {d.name} (SN: {d.serial})
+                    </option>
+                  ))}
+                </select>
+              )}
+              {!devicesLoading && !devicesErrored && !rtlHasDevices && (
+                <p className="text-sm text-amber-400">{NO_RTL_MESSAGE}</p>
+              )}
+            </div>
+
+            <div className="space-y-1">
+              <label className="flex items-center gap-2 text-sm text-slate-200">
+                <input
+                  id="ds-rtl-auto-create-emitters"
+                  type="checkbox"
+                  checked={autoCreateEmitters}
+                  onChange={(event) => setAutoCreateEmitters(event.target.checked)}
+                  className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
+                />
+                Automatically create emitters (one per TPMS sensor id)
+              </label>
+              <p className="text-xs text-slate-500">
+                When enabled, each new tire-sensor id seen on this source is auto-registered as a
+                TPMS Sensor emitter named TPMS_&lt;id&gt;.
+              </p>
+            </div>
+
+            <div className="space-y-1">
+              <label className="flex items-center gap-2 text-sm text-slate-200">
+                <input
+                  id="ds-tpms-auto-correlate"
+                  type="checkbox"
+                  checked={tpmsAutoCorrelate}
+                  onChange={(event) => setTpmsAutoCorrelate(event.target.checked)}
+                  className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
+                />
+                Attempt to Connect TPMS Emitters to Other Tires
+              </label>
+              <p className="text-xs text-slate-500">
+                When enabled, the correlation engine tries to group tire sensors seen travelling
+                together into the same vehicle. (Manual associations are always available on each
+                sensor's detail page.)
               </p>
             </div>
           </>
