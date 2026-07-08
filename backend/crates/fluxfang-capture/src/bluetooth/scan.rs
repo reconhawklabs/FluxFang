@@ -37,6 +37,17 @@ const EMIT_THROTTLE: Duration = Duration::from_secs(5);
 /// `PropertiesChanged` signals.
 const DEVICE_IFACE: &str = "org.bluez.Device1";
 
+/// How long `Capturer::start` waits for the D-Bus loop to report that the scan
+/// actually started (active discovery began, or a passive monitor activated)
+/// before treating it as a failed start. Must exceed `ACTIVATE_TIMEOUT` so a
+/// passive-activation timeout surfaces as its specific reason, not this one.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How long the passive branch waits for BlueZ to call `Activate()` on our
+/// registered AdvertisementMonitor before declaring passive scanning
+/// unsupported on this adapter.
+const ACTIVATE_TIMEOUT: Duration = Duration::from_secs(8);
+
 /// Whether BlueZ's `AdvertisementMonitorManager1.SupportedMonitorTypes`
 /// includes a monitor type we can use for an all-devices passive scan. We use
 /// `or_patterns`, the widely supported type. Absent/empty → no passive support.
@@ -86,6 +97,12 @@ impl Capturer for BluetoothScanCapturer {
         let interface = self.interface.clone();
         let active_scan = self.active_scan;
 
+        // The D-Bus loop reports its startup outcome (scan actually began, or a
+        // reason it could not) back over this channel, so a failure to start —
+        // in particular an adapter that cannot scan passively — surfaces as an
+        // Err from start() and becomes the data source's `last_error`.
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+
         // zbus is async; the Capturer seam is sync (like the wifi capturers,
         // which spawn a std::thread). Run a current-thread tokio runtime in
         // the thread and block on the D-Bus loop.
@@ -96,16 +113,38 @@ impl Capturer for BluetoothScanCapturer {
             {
                 Ok(rt) => rt,
                 Err(err) => {
-                    eprintln!("bluetooth scan: failed to build runtime: {err:#}");
+                    let _ = ready_tx.send(Err(format!(
+                        "bluetooth scan on {interface}: failed to build runtime: {err:#}"
+                    )));
                     return;
                 }
             };
-            if let Err(err) = rt.block_on(run_discovery(&interface, active_scan, &running, &tx)) {
+            if let Err(err) = rt.block_on(run_discovery(
+                &interface,
+                active_scan,
+                &running,
+                &tx,
+                &ready_tx,
+            )) {
+                // Startup outcome was already reported via `ready_tx`; anything
+                // here is a post-startup runtime error.
                 eprintln!("bluetooth scan on {interface}: {err:#}");
             }
         });
-        self.handle = Some(handle);
-        Ok(())
+
+        match interpret_startup(ready_rx.recv_timeout(STARTUP_TIMEOUT), &self.interface) {
+            Ok(()) => {
+                self.handle = Some(handle);
+                Ok(())
+            }
+            Err(err) => {
+                // Stop the loop and reap the thread so a failed start leaves no
+                // orphaned scan running.
+                self.running.store(false, Ordering::SeqCst);
+                let _ = handle.join();
+                Err(err)
+            }
+        }
     }
 
     fn stop(&mut self) {
@@ -113,6 +152,23 @@ impl Capturer for BluetoothScanCapturer {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+    }
+}
+
+/// Map the D-Bus loop thread's startup report into `Capturer::start`'s result.
+/// `Ok(Ok(()))` → started; `Ok(Err(reason))` → the loop reported a startup
+/// failure (surfaced verbatim to `last_error`); `Err(timeout)` → the loop never
+/// reported in time.
+fn interpret_startup(
+    outcome: Result<Result<(), String>, std::sync::mpsc::RecvTimeoutError>,
+    interface: &str,
+) -> anyhow::Result<()> {
+    match outcome {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(reason)) => Err(anyhow::anyhow!(reason)),
+        Err(_) => Err(anyhow::anyhow!(
+            "bluetooth scan on {interface}: timed out waiting for scan startup"
+        )),
     }
 }
 
@@ -138,6 +194,7 @@ async fn run_discovery(
     active_scan: bool,
     running: &AtomicBool,
     tx: &mpsc::Sender<RawObservation>,
+    ready: &std::sync::mpsc::Sender<Result<(), String>>,
 ) -> anyhow::Result<()> {
     let conn = Connection::system().await?;
 
@@ -173,6 +230,8 @@ async fn run_discovery(
     }
 
     adapter.start_discovery().await?;
+    // Active discovery is running — report a successful start.
+    let _ = ready.send(Ok(()));
 
     // ObjectManager on `/` surfaces every `org.bluez.Device1` object as it
     // appears (InterfacesAdded) and lets us seed already-known devices.
@@ -404,6 +463,7 @@ fn value_to_bytes(value: &Value) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc::RecvTimeoutError;
 
     #[test]
     fn passive_supported_true_when_or_patterns_present() {
@@ -418,5 +478,24 @@ mod tests {
     fn passive_supported_false_when_absent_or_empty() {
         assert!(!passive_supported(&[]));
         assert!(!passive_supported(&["rssi".to_string()]));
+    }
+
+    #[test]
+    fn interpret_startup_ok_passes() {
+        assert!(interpret_startup(Ok(Ok(())), "hci0").is_ok());
+    }
+
+    #[test]
+    fn interpret_startup_err_propagates_reason() {
+        let err =
+            interpret_startup(Ok(Err("passive unsupported".to_string())), "hci0").unwrap_err();
+        assert!(err.to_string().contains("passive unsupported"));
+    }
+
+    #[test]
+    fn interpret_startup_timeout_mentions_interface_and_timeout() {
+        let err = interpret_startup(Err(RecvTimeoutError::Timeout), "hci9").unwrap_err();
+        assert!(err.to_string().contains("hci9"));
+        assert!(err.to_string().contains("timed out"));
     }
 }
