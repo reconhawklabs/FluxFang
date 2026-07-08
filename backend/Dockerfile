@@ -22,6 +22,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libudev1 \
     iw \
     iproute2 \
+    rtl-433 \
+    rtl-sdr \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/fluxfang-api /usr/local/bin/fluxfang-api
