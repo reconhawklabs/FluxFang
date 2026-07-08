@@ -158,6 +158,29 @@ export default function EmitterDetailPage() {
     );
   }, [locatedEmissions]);
 
+  // TPMS "last-known" values are computed live from the most recent emission
+  // (its payload carries status/pressure/rssi/snr), matching how wifi/bt
+  // emitters derive last-known state rather than storing it on the emitter.
+  // Picks by max `observed_at` (like `lastKnown` above) rather than assuming
+  // `emissions[0]` is newest, since ordering is a query-side concern.
+  const latestTpms = useMemo(() => {
+    if (emitter?.emitter_type !== "tpms_sensor" || emissions.length === 0) {
+      return null;
+    }
+    const latestEmission = emissions.reduce((a, b) =>
+      a.observed_at > b.observed_at ? a : b,
+    );
+    const latest = latestEmission.payload;
+    const num = (k: string) =>
+      typeof latest[k] === "number" ? (latest[k] as number) : null;
+    return {
+      status: num("status"),
+      pressurePsi: num("pressure_PSI"),
+      rssi: num("rssi"),
+      snr: num("snr"),
+    };
+  }, [emitter?.emitter_type, emissions]);
+
   // Lowercased BSSID → AP emitter id, for linking connected APs.
   const apByBssid = useMemo(() => {
     const map = new Map<string, string>();
@@ -373,6 +396,25 @@ export default function EmitterDetailPage() {
           </button>
         )}
       </section>
+
+      {/* Latest TPMS reading (tpms_sensor emitters only) */}
+      {emitter.emitter_type === "tpms_sensor" && latestTpms && (
+        <section className="space-y-2">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
+            Latest TPMS reading
+          </h2>
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+            <dt className="text-slate-500">Pressure (PSI)</dt>
+            <dd className="text-slate-200">{latestTpms.pressurePsi ?? "—"}</dd>
+            <dt className="text-slate-500">Status</dt>
+            <dd className="text-slate-200">{latestTpms.status ?? "—"}</dd>
+            <dt className="text-slate-500">RSSI</dt>
+            <dd className="text-slate-200">{latestTpms.rssi ?? "—"}</dd>
+            <dt className="text-slate-500">SNR</dt>
+            <dd className="text-slate-200">{latestTpms.snr ?? "—"}</dd>
+          </dl>
+        </section>
+      )}
 
       {/* Match rule */}
       <section className="space-y-2">

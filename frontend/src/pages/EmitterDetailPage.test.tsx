@@ -91,6 +91,20 @@ const CLIENT_EMITTER: Emitter = {
   last_seen_at: "2026-07-06T02:05:00Z",
 } as unknown as Emitter;
 
+const TPMS_EMITTER: Emitter = {
+  id: "emitter-1",
+  name: "Front Left Tire",
+  type: "TPMS Sensor",
+  type_label: "TPMS Sensor",
+  emitter_type: "tpms_sensor",
+  entity_id: null,
+  match_enabled: true,
+  match_criteria: { match: "all", conditions: [] },
+  attributes: { sensor_id: "abc123" },
+  first_seen_at: "2026-07-06T00:00:00Z",
+  last_seen_at: "2026-07-06T01:00:00Z",
+} as unknown as Emitter;
+
 function mockRoutes(
   handlers: Record<string, (url: URL, init?: RequestInit) => unknown>,
 ) {
@@ -323,4 +337,79 @@ test("omits vendor/device type lines when absent", async () => {
   ).toBeInTheDocument();
   expect(screen.queryByText("Vendor")).not.toBeInTheDocument();
   expect(screen.queryByText("Device type")).not.toBeInTheDocument();
+});
+
+test("tpms_sensor emitter shows the latest TPMS reading, derived from the most recent emission", async () => {
+  vi.stubGlobal(
+    "fetch",
+    mockRoutes({
+      "GET /api/emitters/emitter-1": () => TPMS_EMITTER,
+      "GET /api/entities": () => ({ items: [], total: 0 }),
+      "GET /api/emissions": () => ({
+        items: [
+          {
+            id: "t2",
+            observed_at: "2026-07-06T02:00:00Z",
+            kind: "tpms",
+            payload: { status: 1, pressure_PSI: 32.5, rssi: -60, snr: 12 },
+            signal_strength: -60,
+            lon: null,
+            lat: null,
+            emitter_id: "emitter-1",
+          },
+          {
+            id: "t1",
+            observed_at: "2026-07-06T01:00:00Z",
+            kind: "tpms",
+            payload: { status: 0, pressure_PSI: 30.0, rssi: -70, snr: 8 },
+            signal_strength: -70,
+            lon: null,
+            lat: null,
+            emitter_id: "emitter-1",
+          },
+        ],
+        total: 2,
+      }),
+    }),
+  );
+  renderPage();
+
+  expect(
+    await screen.findByRole("heading", { name: /latest tpms reading/i }),
+  ).toBeInTheDocument();
+  // Picks the most-recent emission (t2) by observed_at, not just index 0.
+  expect(screen.getByText("32.5")).toBeInTheDocument();
+});
+
+test("does not show a Latest TPMS reading section for a non-tpms emitter", async () => {
+  vi.stubGlobal(
+    "fetch",
+    mockRoutes({
+      "GET /api/emitters/emitter-1": () => EMITTER,
+      "GET /api/entities": () => ({ items: [], total: 0 }),
+      "GET /api/emissions": () => ({
+        items: [
+          {
+            id: "e1",
+            observed_at: "2026-07-06T01:00:00Z",
+            kind: "wifi",
+            payload: { bssid: "aa:bb:cc:dd:ee:ff", ssid: "KitchenNet" },
+            signal_strength: -40,
+            lon: -98.5,
+            lat: 39.5,
+            emitter_id: "emitter-1",
+          },
+        ],
+        total: 1,
+      }),
+    }),
+  );
+  renderPage();
+
+  expect(
+    await screen.findByRole("heading", { name: /kitchen ap/i }),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByText(/latest tpms reading/i),
+  ).not.toBeInTheDocument();
 });
