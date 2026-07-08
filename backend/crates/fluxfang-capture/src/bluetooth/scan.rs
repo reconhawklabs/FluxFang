@@ -1,7 +1,8 @@
 //! BlueZ (`org.bluez`, D-Bus) Scanning-mode capturer. Connects to the system
-//! bus, selects the adapter, starts discovery (active when `active_scan`,
-//! otherwise a passive advertisement scan), and maps each discovered
-//! `org.bluez.Device1` snapshot to a `RawObservation` via
+//! bus, selects the adapter, and either starts active discovery (when
+//! `active_scan`) or registers an `org.bluez.AdvertisementMonitor1` for a
+//! genuinely passive, listen-only scan (no `SCAN_REQ`) otherwise. Each
+//! discovered `org.bluez.Device1` snapshot maps to a `RawObservation` via
 //! [`super::props::device_props_to_observation`].
 //!
 //! Not unit-tested (needs a live bus + adapter), same convention as the wifi
@@ -67,6 +68,80 @@ trait Adapter1 {
     fn powered(&self) -> zbus::Result<bool>;
     #[zbus(property)]
     fn set_powered(&self, value: bool) -> zbus::Result<()>;
+}
+
+/// Proxy for `org.bluez.AdvertisementMonitorManager1` (lives on the adapter
+/// object). Passive scanning is driven by registering a monitor here; BlueZ
+/// then runs a background passive LE scan (no `SCAN_REQ`).
+#[proxy(
+    interface = "org.bluez.AdvertisementMonitorManager1",
+    default_service = "org.bluez"
+)]
+trait AdvMonitorManager {
+    fn register_monitor(&self, application: &zbus::zvariant::ObjectPath<'_>)
+        -> zbus::Result<()>;
+    fn unregister_monitor(&self, application: &zbus::zvariant::ObjectPath<'_>)
+        -> zbus::Result<()>;
+
+    #[zbus(property)]
+    fn supported_monitor_types(&self) -> zbus::Result<Vec<String>>;
+}
+
+/// The object path root we register with BlueZ; it hosts an ObjectManager and
+/// the single monitor object beneath it.
+const MONITOR_ROOT: &str = "/org/fluxfang/advmon";
+/// The monitor object path (child of `MONITOR_ROOT`).
+const MONITOR_PATH: &str = "/org/fluxfang/advmon/monitor0";
+
+/// Broadest `or_patterns` set BlueZ will accept, used to catch as many
+/// advertisers as possible. `or_patterns` requires at least one pattern (there
+/// is no true wildcard), so we OR several near-ubiquitous AD types with empty
+/// content (empty content matches presence of that AD structure). Coverage is
+/// still controller-dependent — see the module caveat.
+///
+/// Tuple layout is BlueZ's `Patterns` element: (start_position, ad_data_type, content).
+fn catch_all_patterns() -> Vec<(u8, u8, Vec<u8>)> {
+    // 0x01 Flags, 0x02/0x03 incomplete/complete 16-bit UUIDs,
+    // 0x08/0x09 shortened/complete local name, 0x16 service data,
+    // 0xFF manufacturer-specific data.
+    [0x01u8, 0x02, 0x03, 0x08, 0x09, 0x16, 0xFF]
+        .into_iter()
+        .map(|ad_type| (0u8, ad_type, Vec::new()))
+        .collect()
+}
+
+/// Our `org.bluez.AdvertisementMonitor1` implementation. BlueZ calls `Activate`
+/// once the monitor is accepted (that is our signal passive scanning is live),
+/// `Release` when it drops the monitor, and `DeviceFound`/`DeviceLost` as the
+/// passive scan sees devices. We harvest device data through the existing
+/// ObjectManager/`PropertiesChanged` pipeline rather than from these callbacks,
+/// so the callbacks only need to exist.
+struct AdvMonitor {
+    /// Fired from `Activate` to release the setup code waiting on activation.
+    activated: Arc<tokio::sync::Notify>,
+}
+
+#[zbus::interface(name = "org.bluez.AdvertisementMonitor1")]
+impl AdvMonitor {
+    fn release(&self) {}
+
+    fn activate(&self) {
+        self.activated.notify_one();
+    }
+
+    fn device_found(&self, _device: zbus::zvariant::OwnedObjectPath) {}
+
+    fn device_lost(&self, _device: zbus::zvariant::OwnedObjectPath) {}
+
+    #[zbus(property)]
+    fn type_(&self) -> &str {
+        "or_patterns"
+    }
+
+    #[zbus(property)]
+    fn patterns(&self) -> Vec<(u8, u8, Vec<u8>)> {
+        catch_all_patterns()
+    }
 }
 
 pub struct BluetoothScanCapturer {
@@ -180,15 +255,16 @@ fn interpret_startup(
 /// `device_props_to_observation`'s result on `tx`. Honors `running` for
 /// cooperative shutdown and `StopDiscovery` on exit.
 ///
-/// Passive vs active caveat: BlueZ discovery is active by default. Enforcing
-/// a *passive* scan type requires registering an
-/// `org.bluez.AdvertisementMonitor1` all-match monitor, which needs a
-/// server-side D-Bus object and is not wired here — so when `!active_scan`
-/// this logs the limitation and proceeds with default discovery (see the
-/// design doc's passive caveat; the data source records this in its status).
-/// The `SetDiscoveryFilter` `DuplicateData` flag is still varied by
-/// `active_scan` so a passive-intent scan at least suppresses duplicate
-/// advertisement reports.
+/// Passive vs active: when `active_scan`, this runs BlueZ active discovery
+/// (issues `SCAN_REQ`). Otherwise it registers an all-devices
+/// `AdvertisementMonitor1` and lets BlueZ run a listen-only passive scan — it
+/// never calls `StartDiscovery`, so the adapter transmits nothing. If the
+/// adapter cannot scan passively (no AdvertisementMonitor support, registration
+/// fails, or activation times out) this reports the reason over `ready` and
+/// returns without scanning, so the data source fails loudly rather than
+/// silently transmitting. Passive-scan completeness is controller-dependent
+/// (offloaded filtering may drop non-matching advertisers); the complete
+/// passive path is the future nRF Sniffing mode.
 async fn run_discovery(
     interface: &str,
     active_scan: bool,
@@ -211,27 +287,29 @@ async fn run_discovery(
         eprintln!("bluetooth scan on {interface}: could not power on adapter: {err:#}");
     }
 
-    // Scope the scan. `Transport=auto` covers BR/EDR + LE; `DuplicateData`
-    // controls whether BlueZ re-reports identical advertisements (wanted for
-    // an active survey, suppressed for a lighter passive-intent scan).
-    let mut filter: HashMap<&str, Value> = HashMap::new();
-    filter.insert("Transport", Value::from("auto"));
-    filter.insert("DuplicateData", Value::from(active_scan));
-    if let Err(err) = adapter.set_discovery_filter(filter).await {
-        eprintln!("bluetooth scan on {interface}: SetDiscoveryFilter failed: {err:#}");
+    if active_scan {
+        // Active survey: richest data. `Transport=auto` covers BR/EDR + LE;
+        // `DuplicateData=true` re-reports identical advertisements.
+        let mut filter: HashMap<&str, Value> = HashMap::new();
+        filter.insert("Transport", Value::from("auto"));
+        filter.insert("DuplicateData", Value::from(true));
+        if let Err(err) = adapter.set_discovery_filter(filter).await {
+            eprintln!("bluetooth scan on {interface}: SetDiscoveryFilter failed: {err:#}");
+        }
+        adapter.start_discovery().await?;
+        // Active discovery is running — report a successful start.
+        let _ = ready.send(Ok(()));
+    } else {
+        // Passive: register an AdvertisementMonitor and let BlueZ run a
+        // listen-only scan. Never call StartDiscovery (that would transmit).
+        // Any failure is reported as a precise reason and aborts the scan —
+        // we do not fall back to active discovery.
+        if let Err(reason) = setup_passive_monitor(interface, &conn, &adapter_path).await {
+            let _ = ready.send(Err(reason));
+            return Ok(());
+        }
+        let _ = ready.send(Ok(()));
     }
-
-    if !active_scan {
-        // See the function-level caveat: no AdvertisementMonitor1 wiring yet.
-        eprintln!(
-            "bluetooth scan on {interface}: passive advertisement monitoring is not \
-             implemented; proceeding with default (active) discovery"
-        );
-    }
-
-    adapter.start_discovery().await?;
-    // Active discovery is running — report a successful start.
-    let _ = ready.send(Ok(()));
 
     // ObjectManager on `/` surfaces every `org.bluez.Device1` object as it
     // appears (InterfacesAdded) and lets us seed already-known devices.
@@ -333,8 +411,105 @@ async fn run_discovery(
         }
     }
 
-    let _ = adapter.stop_discovery().await;
+    if active_scan {
+        let _ = adapter.stop_discovery().await;
+    } else {
+        // Best-effort unregister of the monitor, then drop the served objects.
+        if let Ok(builder) = AdvMonitorManagerProxy::builder(&conn).path(adapter_path.clone()) {
+            if let Ok(manager) = builder.build().await {
+                if let Ok(root) = zbus::zvariant::ObjectPath::try_from(MONITOR_ROOT) {
+                    let _ = manager.unregister_monitor(&root).await;
+                }
+            }
+        }
+        teardown_monitor(&conn).await;
+    }
     Ok(())
+}
+
+/// Register an all-devices passive AdvertisementMonitor on `adapter_path` and
+/// wait for BlueZ to `Activate` it. Returns `Err(reason)` (a user-facing string)
+/// if the adapter has no AdvertisementMonitor support, registration fails, or
+/// activation does not arrive within `ACTIVATE_TIMEOUT`. On failure it best-effort
+/// tears down anything it created. Never starts active discovery.
+async fn setup_passive_monitor(
+    interface: &str,
+    conn: &Connection,
+    adapter_path: &str,
+) -> Result<(), String> {
+    let manager = AdvMonitorManagerProxy::builder(conn)
+        .path(adapter_path.to_string())
+        .map_err(|e| format!("bluetooth scan on {interface}: bad adapter path: {e:#}"))?
+        .build()
+        .await
+        .map_err(|e| {
+            format!(
+                "bluetooth scan on {interface}: passive scan unsupported \
+                 (no AdvertisementMonitorManager1): {e:#}. Enable Active Scanning \
+                 to use this adapter."
+            )
+        })?;
+
+    let supported = manager.supported_monitor_types().await.map_err(|e| {
+        format!("bluetooth scan on {interface}: could not query SupportedMonitorTypes: {e:#}")
+    })?;
+    if !passive_supported(&supported) {
+        return Err(format!(
+            "bluetooth scan on {interface}: passive scan unsupported on this adapter \
+             (SupportedMonitorTypes = {supported:?}). Enable Active Scanning to use it."
+        ));
+    }
+
+    // Serve an ObjectManager root + the monitor object beneath it. BlueZ
+    // enumerates monitors under the registered root via ObjectManager.
+    let activated = Arc::new(tokio::sync::Notify::new());
+    let server = conn.object_server();
+    server
+        .at(MONITOR_ROOT, zbus::fdo::ObjectManager)
+        .await
+        .map_err(|e| format!("bluetooth scan on {interface}: serving ObjectManager failed: {e:#}"))?;
+    server
+        .at(
+            MONITOR_PATH,
+            AdvMonitor {
+                activated: activated.clone(),
+            },
+        )
+        .await
+        .map_err(|e| format!("bluetooth scan on {interface}: serving monitor failed: {e:#}"))?;
+
+    let root = zbus::zvariant::ObjectPath::try_from(MONITOR_ROOT)
+        .map_err(|e| format!("bluetooth scan on {interface}: bad monitor root path: {e:#}"))?;
+
+    if let Err(e) = manager.register_monitor(&root).await {
+        teardown_monitor(conn).await;
+        return Err(format!(
+            "bluetooth scan on {interface}: RegisterMonitor failed: {e:#}. \
+             Enable Active Scanning to use this adapter."
+        ));
+    }
+
+    // Wait for BlueZ to Activate the monitor — that is the confirmation the
+    // passive scan is actually running.
+    match tokio::time::timeout(ACTIVATE_TIMEOUT, activated.notified()).await {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            let _ = manager.unregister_monitor(&root).await;
+            teardown_monitor(conn).await;
+            Err(format!(
+                "bluetooth scan on {interface}: passive monitor was not activated within \
+                 {}s; adapter likely does not support passive scanning. Enable Active Scanning.",
+                ACTIVATE_TIMEOUT.as_secs()
+            ))
+        }
+    }
+}
+
+/// Best-effort removal of the objects `setup_passive_monitor` exported.
+async fn teardown_monitor(conn: &Connection) {
+    let server = conn.object_server();
+    let _ = server.remove::<AdvMonitor, _>(MONITOR_PATH).await;
+    let _ = server.remove::<zbus::fdo::ObjectManager, _>(MONITOR_ROOT).await;
 }
 
 /// Emit `props` on `tx` unless throttled. Returns `false` only if the
