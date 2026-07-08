@@ -82,12 +82,26 @@ fn bluetooth_catalog() -> Vec<FieldDef> {
     ]
 }
 
+fn tpms_catalog() -> Vec<FieldDef> {
+    vec![
+        field("id", "Sensor ID", FieldType::Text),
+        field("model", "Model", FieldType::Text),
+        field("type", "Type", FieldType::Enum(vec!["TPMS".to_string()])),
+        field("status", "Status", FieldType::Number),
+        field("pressure_PSI", "Pressure (PSI)", FieldType::Number),
+        field("temperature_C", "Temperature (C)", FieldType::Number),
+        field("rssi", "RSSI", FieldType::Number),
+        field("snr", "SNR", FieldType::Number),
+    ]
+}
+
 /// Return the field catalog for a data source `kind` (e.g. `"wifi"`).
 /// Unknown kinds return an empty catalog.
 pub fn catalog_for(kind: &str) -> Vec<FieldDef> {
     match kind {
         "wifi" => wifi_catalog(),
         "bluetooth" => bluetooth_catalog(),
+        "tpms" => tpms_catalog(),
         _ => Vec::new(),
     }
 }
@@ -148,5 +162,17 @@ mod tests {
             }
             other => panic!("frame_type should be an Enum, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn tpms_catalog_exposes_id_model_and_numeric_pressure() {
+        let c = catalog_for("tpms");
+        assert!(c.iter().any(|f| f.key == "id" && f.ty == FieldType::Text));
+        assert!(c
+            .iter()
+            .any(|f| f.key == "model" && f.ty == FieldType::Text));
+        let pressure = c.iter().find(|f| f.key == "pressure_PSI").unwrap();
+        assert_eq!(pressure.ty, FieldType::Number);
+        assert!(pressure.ops.contains(&Op::Gte)); // numeric → ordered
     }
 }
