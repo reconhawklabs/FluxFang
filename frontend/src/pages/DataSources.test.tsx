@@ -102,11 +102,17 @@ test('renders the source list with color-coded status badges and last_error', as
 /** `GET /api/system/capture-devices` fixture builder — the Add form fetches
  * this whenever it's mounted (wifi, gps-serial, and bluetooth paths all
  * depend on it), so every Add-form test below registers a route for it. */
-function captureDevices(wifiInterfaces: string[], serialDevices: string[], bluetoothInterfaces: string[] = []) {
+function captureDevices(
+  wifiInterfaces: string[],
+  serialDevices: string[],
+  bluetoothInterfaces: string[] = [],
+  rtlSdrDevices: { index: number; name: string; serial: string }[] = [],
+) {
   return {
     wifi_interfaces: wifiInterfaces,
     serial_devices: serialDevices,
     bluetooth_interfaces: bluetoothInterfaces,
+    rtl_sdr_devices: rtlSdrDevices,
   };
 }
 
@@ -325,6 +331,80 @@ test('add source: bluetooth kind with NO enumerated adapters shows "No Bluetooth
 
   const submitButton = screen.getByRole('button', { name: /^add$|^create$|^save$/i });
   expect(submitButton).toBeDisabled();
+});
+
+test('add source: rtl_sdr kind — submits an rtl_sdr/tpms source with frequency, device_serial, and toggles', async () => {
+  const created: DataSource = {
+    id: 'new-rtl',
+    created_at: '2026-01-01T00:00:00Z',
+    kind: 'rtl_sdr',
+    mode: 'tpms',
+    interface: null,
+    status: 'stopped',
+    config: {
+      frequency: '433.92M',
+      device_serial: '67475624',
+      auto_create_emitters: true,
+      auto_correlate_tpms: true,
+    },
+    last_error: null,
+  };
+  const fetchMock = mockMethodRoutes({
+    'GET /api/data-sources': () => [],
+    'GET /api/system/capture-devices': () =>
+      captureDevices([], [], [], [{ index: 0, name: 'Nooelec NESDR', serial: '67475624' }]),
+    'POST /api/data-sources': () => created,
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<DataSources />, { wrapper });
+  await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+
+  fireEvent.click(screen.getByRole('button', { name: /add data source/i }));
+  fireEvent.change(screen.getByLabelText(/^kind$/i), { target: { value: 'rtl_sdr' } });
+
+  const frequencyField = await screen.findByLabelText(/frequency/i);
+  expect(frequencyField.tagName).toBe('SELECT');
+  fireEvent.change(frequencyField, { target: { value: '433.92M' } });
+
+  const deviceField = screen.getByLabelText(/device/i);
+  expect(deviceField.tagName).toBe('SELECT');
+  const deviceOptions = within(deviceField as HTMLSelectElement)
+    .getAllByRole('option')
+    .map((o) => o.textContent);
+  expect(deviceOptions).toEqual(['Select a device…', 'index 0 — Nooelec NESDR (SN: 67475624)']);
+  fireEvent.change(deviceField, { target: { value: '67475624' } });
+
+  const autoCreateCheckbox = screen.getByLabelText(/automatically create emitters/i);
+  expect(autoCreateCheckbox).not.toBeChecked();
+  fireEvent.click(autoCreateCheckbox);
+  expect(autoCreateCheckbox).toBeChecked();
+
+  const autoCorrelateCheckbox = screen.getByLabelText(/attempt to connect tpms emitters to other tires/i);
+  expect(autoCorrelateCheckbox).not.toBeChecked();
+  fireEvent.click(autoCorrelateCheckbox);
+  expect(autoCorrelateCheckbox).toBeChecked();
+
+  const submitButton = screen.getByRole('button', { name: /^add$|^create$|^save$/i });
+  expect(submitButton).not.toBeDisabled();
+  fireEvent.click(submitButton);
+
+  await waitFor(() => expect(screen.queryByLabelText(/frequency/i)).not.toBeInTheDocument());
+
+  const postCall = fetchMock.mock.calls.find(([, init]) => init?.method === 'POST');
+  expect(postCall).toBeDefined();
+  const [url, init] = postCall as [RequestInfo | URL, RequestInit];
+  expect(String(url)).toBe('/api/data-sources');
+  expect(JSON.parse(init.body as string)).toEqual({
+    kind: 'rtl_sdr',
+    mode: 'tpms',
+    config: {
+      frequency: '433.92M',
+      device_serial: '67475624',
+      auto_create_emitters: true,
+      auto_correlate_tpms: true,
+    },
+  });
 });
 
 test('add source: wifi kind with NO enumerated interfaces shows "No compatible WiFi card found." and disables the Add button, with no text input fallback', async () => {
