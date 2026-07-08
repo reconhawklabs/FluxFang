@@ -1013,3 +1013,159 @@ async fn bulk_delete_and_clear_require_auth() {
         StatusCode::UNAUTHORIZED,
     );
 }
+
+// ---------------------------------------------------------------------
+// Spec B, Task 3: TPMS association endpoints (add/list/remove).
+// ---------------------------------------------------------------------
+
+/// Seed a `tpms_sensor`-classified emitter directly against the DB,
+/// bypassing the API, for the association tests below.
+async fn seed_tpms(pool: &PgPool, name: &str) -> Uuid {
+    EmitterRepoInsertHelper::insert_classified(
+        pool,
+        name,
+        "tpms_sensor",
+        json!({"sensor_id": name}),
+    )
+    .await
+}
+
+/// Full roundtrip: POSTing an association between two `tpms_sensor`
+/// emitters makes it visible from *both* sides (with `source: "manual"`),
+/// and DELETE removes it from both sides too.
+#[tokio::test]
+async fn tpms_associations_add_list_remove_roundtrip() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    let a = seed_tpms(&pool, "TPMS_a").await;
+    let b = seed_tpms(&pool, "TPMS_b").await;
+
+    let body = json!({"associated_emitter_id": b}).to_string();
+    let resp = post_json_with_cookie(
+        &app,
+        &format!("/api/emitters/{a}/associations"),
+        &body,
+        &cookie,
+    )
+    .await;
+    assert_status(&resp, StatusCode::OK);
+    let resp_body = body_json(resp).await;
+    assert_eq!(resp_body.as_array().unwrap().len(), 1, "body: {resp_body}");
+    assert_eq!(resp_body[0]["emitter"]["id"], b.to_string());
+    assert_eq!(resp_body[0]["source"], "manual", "body: {resp_body}");
+    assert!(resp_body[0]["confidence"].is_null(), "body: {resp_body}");
+
+    // Visible from a's side.
+    let resp = get_with_cookie(&app, &format!("/api/emitters/{a}/associations"), &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let list_a = body_json(resp).await;
+    assert_eq!(list_a.as_array().unwrap().len(), 1, "body: {list_a}");
+    assert_eq!(list_a[0]["emitter"]["id"], b.to_string());
+    assert_eq!(list_a[0]["source"], "manual");
+
+    // Visible from b's side too (bidirectional).
+    let resp = get_with_cookie(&app, &format!("/api/emitters/{b}/associations"), &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let list_b = body_json(resp).await;
+    assert_eq!(list_b.as_array().unwrap().len(), 1, "body: {list_b}");
+    assert_eq!(list_b[0]["emitter"]["id"], a.to_string());
+    assert_eq!(list_b[0]["source"], "manual");
+
+    // Remove: 200, then both lists are empty again.
+    let resp = delete_with_cookie(
+        &app,
+        &format!("/api/emitters/{a}/associations/{b}"),
+        &cookie,
+    )
+    .await;
+    assert_status(&resp, StatusCode::OK);
+
+    let resp = get_with_cookie(&app, &format!("/api/emitters/{a}/associations"), &cookie).await;
+    let list_a = body_json(resp).await;
+    assert_eq!(list_a.as_array().unwrap().len(), 0, "body: {list_a}");
+
+    let resp = get_with_cookie(&app, &format!("/api/emitters/{b}/associations"), &cookie).await;
+    let list_b = body_json(resp).await;
+    assert_eq!(list_b.as_array().unwrap().len(), 0, "body: {list_b}");
+}
+
+/// Associations are only supported between `tpms_sensor` emitters: pairing a
+/// tpms sensor with a `wifi_client` emitter (in either direction) is `400`,
+/// and self-association is `400` too — none of these create any row.
+#[tokio::test]
+async fn tpms_associations_reject_non_tpms_and_self() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    let tpms = seed_tpms(&pool, "TPMS_x").await;
+    let wifi = EmitterRepoInsertHelper::insert_classified(
+        &pool,
+        "Some Client",
+        "wifi_client",
+        json!({"src_mac": "aa:bb:cc:dd:ee:ff"}),
+    )
+    .await;
+
+    // tpms -> wifi_client: rejected.
+    let body = json!({"associated_emitter_id": wifi}).to_string();
+    let resp = post_json_with_cookie(
+        &app,
+        &format!("/api/emitters/{tpms}/associations"),
+        &body,
+        &cookie,
+    )
+    .await;
+    assert_status(&resp, StatusCode::BAD_REQUEST);
+
+    // wifi_client -> tpms: also rejected (checked on both sides).
+    let body = json!({"associated_emitter_id": tpms}).to_string();
+    let resp = post_json_with_cookie(
+        &app,
+        &format!("/api/emitters/{wifi}/associations"),
+        &body,
+        &cookie,
+    )
+    .await;
+    assert_status(&resp, StatusCode::BAD_REQUEST);
+
+    // Self-association: rejected.
+    let body = json!({"associated_emitter_id": tpms}).to_string();
+    let resp = post_json_with_cookie(
+        &app,
+        &format!("/api/emitters/{tpms}/associations"),
+        &body,
+        &cookie,
+    )
+    .await;
+    assert_status(&resp, StatusCode::BAD_REQUEST);
+
+    // Nothing was actually created.
+    let resp = get_with_cookie(&app, &format!("/api/emitters/{tpms}/associations"), &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let list = body_json(resp).await;
+    assert_eq!(list.as_array().unwrap().len(), 0, "body: {list}");
+}
+
+/// The association endpoints are behind auth, same as every other emitter
+/// route.
+#[tokio::test]
+async fn association_endpoints_require_auth() {
+    let (app, _pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let id = Uuid::new_v4();
+    let other = Uuid::new_v4();
+
+    assert_status(
+        &get(&app, &format!("/api/emitters/{id}/associations")).await,
+        StatusCode::UNAUTHORIZED,
+    );
+    assert_status(
+        &post_json(
+            &app,
+            &format!("/api/emitters/{id}/associations"),
+            &json!({"associated_emitter_id": other}).to_string(),
+        )
+        .await,
+        StatusCode::UNAUTHORIZED,
+    );
+}

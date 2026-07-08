@@ -229,6 +229,25 @@ impl EmitterDto {
     }
 }
 
+/// One entry in `GET /api/emitters/:id/associations`: the associated emitter
+/// plus how the link was made (`manual`/`auto`) and its confidence (auto only).
+#[derive(Debug, Clone, Serialize)]
+pub struct EmitterAssociationDto {
+    pub emitter: EmitterDto,
+    pub source: String,
+    pub confidence: Option<f64>,
+}
+
+impl From<&fluxfang_db::AssociatedEmitter> for EmitterAssociationDto {
+    fn from(a: &fluxfang_db::AssociatedEmitter) -> Self {
+        EmitterAssociationDto {
+            emitter: EmitterDto::from(&a.emitter),
+            source: a.source.clone(),
+            confidence: a.confidence,
+        }
+    }
+}
+
 /// One entry in `GET /api/emitters/types`' response (Task 4): a machine
 /// `emitter_type` key that actually has at least one emitter, plus its
 /// human-readable label — the stable Type-filter dropdown's backend source,
