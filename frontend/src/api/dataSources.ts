@@ -14,8 +14,8 @@
 //     `BAUD_RATES` (the backend's `ALLOWED_BAUD_RATES`)
 import { del, get, post } from "./client";
 
-export type DataSourceKind = "wifi" | "gps" | "bluetooth";
-export type DataSourceMode = "monitor" | "scan" | "gpsd" | "serial";
+export type DataSourceKind = "wifi" | "gps" | "bluetooth" | "rtl_sdr";
+export type DataSourceMode = "monitor" | "scan" | "gpsd" | "serial" | "tpms";
 export type DataSourceStatus = "stopped" | "starting" | "running" | "error";
 
 /** The backend's `ALLOWED_BAUD_RATES` (`fluxfang-api::capture`) — the only
@@ -55,8 +55,28 @@ export interface BtConfig {
   active_scan?: boolean;
 }
 
+/** The two rtl_433 frequencies the TPMS mode offers (literal rtl_433
+ * frequency strings, sent verbatim to the backend and into the command). */
+export const RTL_FREQUENCIES = [
+  { value: "315M", label: "315 MHz" },
+  { value: "433.92M", label: "433.92 MHz" },
+] as const;
+export type RtlFrequency = (typeof RTL_FREQUENCIES)[number]["value"];
+
+/** rtl_sdr's `config` (mode `tpms`). `device_serial` is the stable USB serial
+ * (resolved to rtl_433's `-d :SERIAL` at start); optional for a single-device
+ * fallback. `auto_create_emitters` mirrors wifi/bt; `auto_correlate_tpms` is
+ * the "Attempt to Connect TPMS Emitters to Other Tires" toggle consumed by
+ * Spec B's correlation engine. */
+export interface RtlSdrConfig {
+  frequency: RtlFrequency;
+  device_serial?: string;
+  auto_create_emitters?: boolean;
+  auto_correlate_tpms?: boolean;
+}
+
 export type DataSourceConfig =
-  WifiConfig | BtConfig | GpsdConfig | SerialConfig | Record<string, never>;
+  WifiConfig | BtConfig | RtlSdrConfig | GpsdConfig | SerialConfig | Record<string, never>;
 
 /** Mirrors `fluxfang_db::models::DataSource` exactly. */
 export interface DataSource {
@@ -109,6 +129,15 @@ export function deleteDataSource(id: string): Promise<void> {
   return del<void>(`/api/data-sources/${encodeURIComponent(id)}`);
 }
 
+/** One RTL-SDR dongle from `GET /api/system/capture-devices`
+ * (`fluxfang_capture::enumerate::RtlSdrDevice`). `serial` is stored in config;
+ * `index` is shown for context. */
+export interface RtlSdrDevice {
+  index: number;
+  name: string;
+  serial: string;
+}
+
 /** `GET /api/system/capture-devices` response (`fluxfang-api::system`) —
  * hardware the Add-Data-Source form enumerates so the user picks an
  * interface/device from a dropdown instead of typing one that may not
@@ -120,6 +149,7 @@ export interface CaptureDevices {
   wifi_interfaces: string[];
   serial_devices: string[];
   bluetooth_interfaces: string[];
+  rtl_sdr_devices: RtlSdrDevice[];
 }
 
 export function listCaptureDevices(): Promise<CaptureDevices> {
