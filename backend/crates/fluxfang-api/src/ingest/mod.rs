@@ -71,6 +71,7 @@
 //! `ingest` itself (see [`auto_create_emitter`]'s self-containment note).
 
 pub mod alerts;
+pub mod location;
 pub mod session;
 pub mod zones;
 
