@@ -28,6 +28,10 @@ async fn main() {
 
     let state = AppState::with_capture(pool, secret_key, Arc::new(RealCapturerFactory));
 
+    // Start the supervisor's background tasks (the device-failure drain) before
+    // resuming, so a source that dies during/after resume is reconciled.
+    state.capture.spawn_background();
+
     // Data sources that were capturing when this process last stopped still
     // carry `status = 'running'` in Postgres, but the supervisor's in-memory
     // running set and capture session don't survive a restart. Resume them so

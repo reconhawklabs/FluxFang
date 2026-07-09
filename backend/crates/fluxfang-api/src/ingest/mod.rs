@@ -72,6 +72,7 @@
 
 pub mod alerts;
 pub mod location;
+pub mod pump;
 pub mod session;
 pub mod zones;
 
@@ -137,6 +138,10 @@ pub struct IngestCtx {
     /// itself still requires a session (`None` here behaves exactly like a
     /// closed/absent one — see "No active session" above).
     pub sessions: Option<Arc<SessionManager>>,
+    /// The shared "where am I?" value, fed by a `LocationPump` (Task 4). Every
+    /// emission reads its location from here, decoupled from whether/how a GPS
+    /// source is running.
+    pub location: std::sync::Arc<crate::ingest::location::LocationProvider>,
     pub events: broadcast::Sender<Event>,
     /// AES-256-GCM key used to decrypt `alert_method.config_encrypted` when
     /// [`alerts::fire_rule`] dispatches a fired alert's notification (Task
@@ -161,8 +166,8 @@ pub struct IngestCtx {
 /// 1. Build a `NewEmission`: `session_id` from
 ///    `ctx.sessions.current_session_id()` — required; see the module docs'
 ///    "No active session" section for why a missing session is an `Err`,
-///    not a skip. `location` from `ctx.sessions.latest_fix()` (`None` if no
-///    fix has arrived yet this session). `observed_at`/`signal_strength`/
+///    not a skip. `location` from `ctx.location` (the shared `LocationProvider`
+///    fed by the `LocationPump`; `None` if no fix is available). `observed_at`/`signal_strength`/
 ///    `kind`/`payload` copied from `obs`. `emitter_id` starts `None`.
 /// 2. Insert it (`EmissionRepo::insert`).
 /// 3. **Auto-attach** (see module docs for the full first-match-wins
@@ -216,11 +221,7 @@ pub async fn ingest(
                  SessionManager-bounded session is open (see this module's docs)"
             )
         })?;
-    let location = ctx
-        .sessions
-        .as_ref()
-        .and_then(|sessions| sessions.latest_fix())
-        .map(|fix| (fix.lon, fix.lat));
+    let location = ctx.location.latest_raw().map(|fix| (fix.lon, fix.lat));
 
     let new = NewEmission {
         data_source_id: Some(data_source_id),
@@ -448,31 +449,13 @@ async fn maybe_enrich_connected_ap(ctx: &IngestCtx, emission: &Emission) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ingest::location::LocationProvider;
     use crate::test_support::fresh_pool;
-    use async_trait::async_trait;
     use chrono::{Duration as ChronoDuration, TimeZone, Utc};
-    use fluxfang_capture::mock::MockGps;
-    use fluxfang_capture::{GpsFix, LocationSource};
+    use fluxfang_capture::GpsFix;
     use fluxfang_db::models::{NewDataSource, NewEmitter};
     use fluxfang_db::DataSourceRepo;
-    use session::{no_op_hook, SessionManagerConfig};
     use std::time::Duration;
-    use tokio::sync::mpsc;
-
-    /// A `LocationSource` backed by a channel, letting tests control exactly
-    /// when a fix arrives without racing the source's own exhaustion (a
-    /// finite `MockGps` track would close the session as soon as it drains,
-    /// which every test here needs to stay open through). Duplicated from
-    /// `session::tests::ChannelGps` rather than reused: that type is
-    /// private to `session`'s own test module.
-    struct ChannelGps(mpsc::UnboundedReceiver<GpsFix>);
-
-    #[async_trait]
-    impl LocationSource for ChannelGps {
-        async fn next_fix(&mut self) -> Option<GpsFix> {
-            self.0.recv().await
-        }
-    }
 
     async fn seed_wifi_source(pool: &PgPool) -> Uuid {
         DataSourceRepo::insert(pool, NewDataSource::wifi_monitor("wlan0"))
@@ -517,39 +500,21 @@ mod tests {
         .id
     }
 
-    /// Open a `SessionManager` on a `ChannelGps`, send exactly one `fix`,
-    /// and poll (bounded) until `latest_fix()` reflects it. The sender is
-    /// returned (rather than dropped) so the channel -- and therefore the
-    /// session -- stays open for the rest of the test; only the gap timer
-    /// (5 minutes, never reached in a test) could otherwise close it.
+    /// Open a fresh `survey_session` and a `LocationProvider` pre-loaded with
+    /// `fix`, mirroring what the `LocationPump` would feed at runtime. The
+    /// session stays open until explicitly closed (it is no longer tied to a
+    /// GPS source's lifetime), and the provider gives `ingest` a location to
+    /// stamp onto emissions.
     async fn session_with_fix(
         pool: PgPool,
         fix: GpsFix,
-    ) -> (SessionManager, mpsc::UnboundedSender<GpsFix>) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let gps = ChannelGps(rx);
-        let manager = SessionManager::open(
-            pool,
-            gps,
-            SessionManagerConfig {
-                inactivity_gap: Duration::from_secs(5 * 60),
-                write_interval: Duration::ZERO,
-            },
-            no_op_hook(),
-        )
-        .await
-        .expect("open SessionManager");
-
-        tx.send(fix.clone()).expect("send fix over ChannelGps");
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while manager.latest_fix().as_ref() != Some(&fix) {
-                tokio::time::sleep(Duration::from_millis(2)).await;
-            }
-        })
-        .await
-        .expect("latest_fix should reflect the sent fix");
-
-        (manager, tx)
+    ) -> (SessionManager, Arc<LocationProvider>) {
+        let manager = SessionManager::open(pool)
+            .await
+            .expect("open SessionManager");
+        let provider = Arc::new(LocationProvider::new());
+        provider.update(fix);
+        (manager, provider)
     }
 
     fn wifi_obs(bssid: &str, observed_at: chrono::DateTime<Utc>) -> RawObservation {
@@ -636,13 +601,14 @@ mod tests {
         let ds = seed_wifi_source(&pool).await;
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
         let fix = a_fix(base);
-        let (manager, _tx) = session_with_fix(pool.clone(), fix.clone()).await;
+        let (manager, provider) = session_with_fix(pool.clone(), fix.clone()).await;
         let session_id = manager.current_session_id().unwrap();
 
         let (events_tx, mut events_rx) = broadcast::channel(8);
         let ctx = IngestCtx {
             pool: pool.clone(),
             sessions: Some(Arc::new(manager)),
+            location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
         };
@@ -680,24 +646,17 @@ mod tests {
         let pool = fresh_pool().await;
         let ds = seed_wifi_source(&pool).await;
 
-        // An empty, non-looping MockGps track exhausts (returns `None`)
-        // essentially immediately, closing the session -- `join` waits for
-        // exactly that deterministic point.
-        let mut manager = SessionManager::open(
-            pool.clone(),
-            MockGps::new(vec![]),
-            SessionManagerConfig::default(),
-            no_op_hook(),
-        )
-        .await
-        .unwrap();
-        manager.join().await;
+        // Open then immediately close a session: `current_session_id()` is
+        // then `None`, standing in for "capture is not currently running".
+        let manager = SessionManager::open(pool.clone()).await.unwrap();
+        manager.close().await.unwrap();
         assert!(manager.current_session_id().is_none());
 
         let (events_tx, _rx) = broadcast::channel(8);
         let ctx = IngestCtx {
             pool,
             sessions: Some(Arc::new(manager)),
+            location: Arc::new(LocationProvider::new()),
             events: events_tx,
             secret_key: [0x11u8; 32],
         };
@@ -714,7 +673,7 @@ mod tests {
         let pool = fresh_pool().await;
         let ds = seed_wifi_source(&pool).await;
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+        let (manager, provider) = session_with_fix(pool.clone(), a_fix(base)).await;
 
         let emitter = EmitterRepo::insert(
             &pool,
@@ -743,6 +702,7 @@ mod tests {
         let ctx = IngestCtx {
             pool: pool.clone(),
             sessions: Some(Arc::new(manager)),
+            location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
         };
@@ -770,7 +730,7 @@ mod tests {
         let pool = fresh_pool().await;
         let ds = seed_wifi_source(&pool).await;
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+        let (manager, provider) = session_with_fix(pool.clone(), a_fix(base)).await;
 
         // Both emitters would match this observation (channel=6, and the
         // exact bssid) -- `first` is created (and therefore listed) before
@@ -822,6 +782,7 @@ mod tests {
         let ctx = IngestCtx {
             pool: pool.clone(),
             sessions: Some(Arc::new(manager)),
+            location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
         };
@@ -846,7 +807,7 @@ mod tests {
         let pool = fresh_pool().await;
         let ds = seed_wifi_source(&pool).await;
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+        let (manager, provider) = session_with_fix(pool.clone(), a_fix(base)).await;
 
         // Created first (and therefore listed/evaluated first by auto-
         // attach's created_at ASC order) but its match_criteria isn't a
@@ -886,6 +847,7 @@ mod tests {
         let ctx = IngestCtx {
             pool: pool.clone(),
             sessions: Some(Arc::new(manager)),
+            location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
         };
@@ -913,12 +875,13 @@ mod tests {
             seed_wifi_source_with_config(&pool, serde_json::json!({"auto_create_emitters": true}))
                 .await;
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+        let (manager, provider) = session_with_fix(pool.clone(), a_fix(base)).await;
 
         let (events_tx, _rx) = broadcast::channel(8);
         let ctx = IngestCtx {
             pool: pool.clone(),
             sessions: Some(Arc::new(manager)),
+            location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
         };
@@ -974,12 +937,13 @@ mod tests {
             seed_wifi_source_with_config(&pool, serde_json::json!({"auto_create_emitters": true}))
                 .await;
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+        let (manager, provider) = session_with_fix(pool.clone(), a_fix(base)).await;
 
         let (events_tx, _rx) = broadcast::channel(8);
         let ctx = IngestCtx {
             pool: pool.clone(),
             sessions: Some(Arc::new(manager)),
+            location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
         };
@@ -1017,11 +981,12 @@ mod tests {
             serde_json::json!({}),
         ] {
             let ds = seed_wifi_source_with_config(&pool, config).await;
-            let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+            let (manager, provider) = session_with_fix(pool.clone(), a_fix(base)).await;
             let (events_tx, _rx) = broadcast::channel(8);
             let ctx = IngestCtx {
                 pool: pool.clone(),
                 sessions: Some(Arc::new(manager)),
+                location: provider.clone(),
                 events: events_tx,
                 secret_key: [0x11u8; 32],
             };
@@ -1054,7 +1019,7 @@ mod tests {
             seed_wifi_source_with_config(&pool, serde_json::json!({"auto_create_emitters": true}))
                 .await;
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+        let (manager, provider) = session_with_fix(pool.clone(), a_fix(base)).await;
 
         let bssid = "aa:bb:cc:dd:ee:ff";
         let disabled = EmitterRepo::insert(
@@ -1080,6 +1045,7 @@ mod tests {
         let ctx = IngestCtx {
             pool: pool.clone(),
             sessions: Some(Arc::new(manager)),
+            location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
         };
@@ -1114,12 +1080,13 @@ mod tests {
             seed_wifi_source_with_config(&pool, serde_json::json!({"auto_create_emitters": true}))
                 .await;
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+        let (manager, provider) = session_with_fix(pool.clone(), a_fix(base)).await;
 
         let (events_tx, _rx) = broadcast::channel(8);
         let ctx = IngestCtx {
             pool: pool.clone(),
             sessions: Some(Arc::new(manager)),
+            location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
         };
@@ -1145,7 +1112,7 @@ mod tests {
         let pool = fresh_pool().await;
         let ds = seed_wifi_source(&pool).await;
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+        let (manager, provider) = session_with_fix(pool.clone(), a_fix(base)).await;
 
         // Pre-existing AP emitter (rule bssid == the target), created FIRST so
         // first-match-wins would attach to it if the association carried a
@@ -1194,6 +1161,7 @@ mod tests {
         let ctx = IngestCtx {
             pool: pool.clone(),
             sessions: Some(Arc::new(manager)),
+            location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
         };
@@ -1223,12 +1191,13 @@ mod tests {
             seed_wifi_source_with_config(&pool, serde_json::json!({"auto_create_emitters": true}))
                 .await;
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+        let (manager, provider) = session_with_fix(pool.clone(), a_fix(base)).await;
 
         let (events_tx, _rx) = broadcast::channel(8);
         let ctx = IngestCtx {
             pool: pool.clone(),
             sessions: Some(Arc::new(manager)),
+            location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
         };
@@ -1249,12 +1218,13 @@ mod tests {
         let pool = fresh_pool().await;
         let ds = seed_wifi_source(&pool).await; // no auto_create config => off
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+        let (manager, provider) = session_with_fix(pool.clone(), a_fix(base)).await;
 
         let (events_tx, _rx) = broadcast::channel(8);
         let ctx = IngestCtx {
             pool: pool.clone(),
             sessions: Some(Arc::new(manager)),
+            location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
         };
@@ -1276,12 +1246,13 @@ mod tests {
         )
         .await;
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+        let (manager, provider) = session_with_fix(pool.clone(), a_fix(base)).await;
 
         let (events_tx, _rx) = broadcast::channel(8);
         let ctx = IngestCtx {
             pool: pool.clone(),
             sessions: Some(Arc::new(manager)),
+            location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
         };
@@ -1319,12 +1290,13 @@ mod tests {
         )
         .await;
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+        let (manager, provider) = session_with_fix(pool.clone(), a_fix(base)).await;
 
         let (events_tx, _rx) = broadcast::channel(8);
         let ctx = IngestCtx {
             pool: pool.clone(),
             sessions: Some(Arc::new(manager)),
+            location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
         };

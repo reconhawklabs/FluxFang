@@ -19,8 +19,8 @@
 //! ## `latest_fix`
 //!
 //! Via `CaptureSupervisor::latest_gps_fix()`, itself a thin pass-through to
-//! `SessionManager::latest_fix()` for whatever session is currently open
-//! (see that method's doc comment). `fix_age_seconds` is computed against
+//! the shared `LocationProvider`'s `latest_raw()` (fed by the running
+//! location source's `LocationPump`). `fix_age_seconds` is computed against
 //! `Utc::now()` taken *here*, in the handler — this is a request path, not
 //! the deterministic ingest/session code, so wall-clock "now" is exactly
 //! right (unlike e.g. `NewLocationFix`, which stamps `observed_at` from the

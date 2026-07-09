@@ -276,9 +276,8 @@ fn notification_payload_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use chrono::{TimeZone, Utc as ChronoUtc};
-    use fluxfang_capture::{GpsFix, LocationSource, RawObservation};
+    use fluxfang_capture::{GpsFix, RawObservation};
     use fluxfang_core::secrets::encrypt;
     use fluxfang_db::models::{NewAlertMethod, NewAlertRule, NewDataSource, NewEmitter, NewEntity};
     use fluxfang_db::{AlertMethodRepo, DataSourceRepo, EntityRepo};
@@ -286,23 +285,10 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::broadcast;
-    use tokio::sync::mpsc;
 
-    use super::super::session::{no_op_hook, SessionManager, SessionManagerConfig};
+    use super::super::location::LocationProvider;
+    use super::super::session::SessionManager;
     use crate::test_support::fresh_pool;
-
-    /// See `ingest::tests::ChannelGps` (mod.rs) for the full rationale --
-    /// duplicated here since that module's test-only helpers are private to
-    /// it, same convention `ingest::tests` itself already follows relative
-    /// to `session::tests`.
-    struct ChannelGps(mpsc::UnboundedReceiver<GpsFix>);
-
-    #[async_trait]
-    impl LocationSource for ChannelGps {
-        async fn next_fix(&mut self) -> Option<GpsFix> {
-            self.0.recv().await
-        }
-    }
 
     fn test_key() -> [u8; 32] {
         [0x11u8; 32]
@@ -315,37 +301,16 @@ mod tests {
             .id
     }
 
-    /// Open a `SessionManager` on a `ChannelGps`, send exactly one `fix`,
-    /// and poll (bounded) until `latest_fix()` reflects it -- identical
-    /// rationale to `ingest::tests::session_with_fix`.
-    async fn session_with_fix(
-        pool: PgPool,
-        fix: GpsFix,
-    ) -> (SessionManager, mpsc::UnboundedSender<GpsFix>) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let gps = ChannelGps(rx);
-        let manager = SessionManager::open(
-            pool,
-            gps,
-            SessionManagerConfig {
-                inactivity_gap: Duration::from_secs(5 * 60),
-                write_interval: Duration::ZERO,
-            },
-            no_op_hook(),
-        )
-        .await
-        .expect("open SessionManager");
-
-        tx.send(fix.clone()).expect("send fix over ChannelGps");
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while manager.latest_fix().as_ref() != Some(&fix) {
-                tokio::time::sleep(Duration::from_millis(2)).await;
-            }
-        })
-        .await
-        .expect("latest_fix should reflect the sent fix");
-
-        (manager, tx)
+    /// Open a fresh session and a `LocationProvider` pre-loaded with `fix`
+    /// (what the pump would feed at runtime) -- identical rationale to
+    /// `ingest::tests::session_with_fix`.
+    async fn session_with_fix(pool: PgPool, fix: GpsFix) -> (SessionManager, Arc<LocationProvider>) {
+        let manager = SessionManager::open(pool)
+            .await
+            .expect("open SessionManager");
+        let provider = Arc::new(LocationProvider::new());
+        provider.update(fix);
+        (manager, provider)
     }
 
     fn a_fix(at: chrono::DateTime<ChronoUtc>) -> GpsFix {
@@ -376,11 +341,13 @@ mod tests {
     async fn full_ctx(
         pool: PgPool,
         manager: SessionManager,
+        location: Arc<LocationProvider>,
     ) -> (IngestCtx, broadcast::Receiver<Event>) {
         let (events_tx, events_rx) = broadcast::channel(16);
         let ctx = IngestCtx {
             pool,
             sessions: Some(Arc::new(manager)),
+            location,
             events: events_tx,
             secret_key: test_key(),
         };
@@ -393,7 +360,7 @@ mod tests {
         let pool = fresh_pool().await;
         let ds = seed_wifi_source(&pool).await;
         let base = ChronoUtc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+        let (manager, provider) = session_with_fix(pool.clone(), a_fix(base)).await;
 
         let entity = EntityRepo::insert(
             &pool,
@@ -450,7 +417,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (ctx, mut events_rx) = full_ctx(pool.clone(), manager).await;
+        let (ctx, mut events_rx) = full_ctx(pool.clone(), manager, provider).await;
 
         let emission = super::super::ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", 6, base))
             .await
@@ -486,7 +453,7 @@ mod tests {
         let pool = fresh_pool().await;
         let ds = seed_wifi_source(&pool).await;
         let base = ChronoUtc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+        let (manager, provider) = session_with_fix(pool.clone(), a_fix(base)).await;
 
         let entity = EntityRepo::insert(
             &pool,
@@ -548,7 +515,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (ctx, _events_rx) = full_ctx(pool.clone(), manager).await;
+        let (ctx, _events_rx) = full_ctx(pool.clone(), manager, provider).await;
 
         // channel = 1 must NOT fire.
         super::super::ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", 1, base))
@@ -577,7 +544,7 @@ mod tests {
         let pool = fresh_pool().await;
         let ds = seed_wifi_source(&pool).await;
         let base = ChronoUtc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+        let (manager, provider) = session_with_fix(pool.clone(), a_fix(base)).await;
 
         let emitter = EmitterRepo::insert(
             &pool,
@@ -637,7 +604,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (ctx, _events_rx) = full_ctx(pool.clone(), manager).await;
+        let (ctx, _events_rx) = full_ctx(pool.clone(), manager, provider).await;
 
         super::super::ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", 6, base))
             .await
@@ -658,7 +625,7 @@ mod tests {
         let pool = fresh_pool().await;
         let ds = seed_wifi_source(&pool).await;
         let base = ChronoUtc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+        let (manager, provider) = session_with_fix(pool.clone(), a_fix(base)).await;
 
         let emitter = EmitterRepo::insert(
             &pool,
@@ -737,7 +704,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (ctx, _events_rx) = full_ctx(pool.clone(), manager).await;
+        let (ctx, _events_rx) = full_ctx(pool.clone(), manager, provider).await;
 
         let result = tokio::time::timeout(
             Duration::from_secs(15),
@@ -776,7 +743,7 @@ mod tests {
         let pool = fresh_pool().await;
         let ds = seed_wifi_source(&pool).await;
         let base = ChronoUtc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+        let (manager, provider) = session_with_fix(pool.clone(), a_fix(base)).await;
 
         let emitter = EmitterRepo::insert(
             &pool,
@@ -836,7 +803,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (ctx, _events_rx) = full_ctx(pool.clone(), manager).await;
+        let (ctx, _events_rx) = full_ctx(pool.clone(), manager, provider).await;
 
         super::super::ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", 6, base))
             .await
@@ -862,7 +829,7 @@ mod tests {
         let pool = fresh_pool().await;
         let ds = seed_wifi_source(&pool).await;
         let base = ChronoUtc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+        let (manager, provider) = session_with_fix(pool.clone(), a_fix(base)).await;
 
         let emitter = EmitterRepo::insert(
             &pool,
@@ -924,7 +891,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (ctx, _events_rx) = full_ctx(pool.clone(), manager).await;
+        let (ctx, _events_rx) = full_ctx(pool.clone(), manager, provider).await;
 
         let result = tokio::time::timeout(
             Duration::from_secs(15),
@@ -963,7 +930,7 @@ mod tests {
         let pool = fresh_pool().await;
         let ds = seed_wifi_source(&pool).await;
         let base = ChronoUtc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base)).await;
+        let (manager, provider) = session_with_fix(pool.clone(), a_fix(base)).await;
 
         EmitterRepo::insert(
             &pool,
@@ -1010,7 +977,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (ctx, _events_rx) = full_ctx(pool.clone(), manager).await;
+        let (ctx, _events_rx) = full_ctx(pool.clone(), manager, provider).await;
 
         super::super::ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", 6, base))
             .await

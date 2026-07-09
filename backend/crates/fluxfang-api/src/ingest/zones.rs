@@ -318,34 +318,20 @@ pub async fn update_host_zones(ctx: &IngestCtx, fix: &GpsFix) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use chrono::TimeZone;
-    use fluxfang_capture::{LocationSource, RawObservation};
+    use fluxfang_capture::RawObservation;
     use fluxfang_db::models::{
         NewAlertMethod, NewAlertRule, NewDataSource, NewEmitter, NewEntity, NewZone,
     };
     use fluxfang_db::{AlertMethodRepo, DataSourceRepo, EntityRepo, NotificationRepo};
     use sqlx::PgPool;
     use std::sync::Arc;
-    use std::time::Duration;
     use tokio::sync::broadcast;
-    use tokio::sync::mpsc;
 
-    use crate::ingest::session::{no_op_hook, SessionManager, SessionManagerConfig};
+    use crate::ingest::location::LocationProvider;
+    use crate::ingest::session::SessionManager;
     use crate::ingest::Event;
     use crate::test_support::fresh_pool;
-
-    /// See `ingest::tests::ChannelGps` (mod.rs) for the full rationale --
-    /// duplicated here since that module's test-only helpers are private
-    /// to it, same convention `ingest::alerts::tests` already follows.
-    struct ChannelGps(mpsc::UnboundedReceiver<GpsFix>);
-
-    #[async_trait]
-    impl LocationSource for ChannelGps {
-        async fn next_fix(&mut self) -> Option<GpsFix> {
-            self.0.recv().await
-        }
-    }
 
     fn test_key() -> [u8; 32] {
         [0x11u8; 32]
@@ -381,37 +367,17 @@ mod tests {
         .id
     }
 
-    /// Open a `SessionManager` on a `ChannelGps`, send exactly one `fix`,
-    /// and poll (bounded) until `latest_fix()` reflects it -- identical
-    /// rationale to `ingest::tests::session_with_fix`.
-    async fn session_with_fix(
-        pool: PgPool,
-        fix: GpsFix,
-    ) -> (SessionManager, mpsc::UnboundedSender<GpsFix>) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let gps = ChannelGps(rx);
-        let manager = SessionManager::open(
-            pool,
-            gps,
-            SessionManagerConfig {
-                inactivity_gap: Duration::from_secs(5 * 60),
-                write_interval: Duration::ZERO,
-            },
-            no_op_hook(),
-        )
-        .await
-        .expect("open SessionManager");
-
-        tx.send(fix.clone()).expect("send fix over ChannelGps");
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while manager.latest_fix().as_ref() != Some(&fix) {
-                tokio::time::sleep(Duration::from_millis(2)).await;
-            }
-        })
-        .await
-        .expect("latest_fix should reflect the sent fix");
-
-        (manager, tx)
+    /// Open a fresh session and a `LocationProvider` pre-loaded with `fix`
+    /// (what the pump would feed at runtime). The returned provider is handed
+    /// to `full_ctx`; a test that needs the host's position to *move* just
+    /// calls `provider.update(new_fix)` (synchronous — no channel/poll).
+    async fn session_with_fix(pool: PgPool, fix: GpsFix) -> (SessionManager, Arc<LocationProvider>) {
+        let manager = SessionManager::open(pool)
+            .await
+            .expect("open SessionManager");
+        let provider = Arc::new(LocationProvider::new());
+        provider.update(fix);
+        (manager, provider)
     }
 
     fn a_fix(at: chrono::DateTime<Utc>, point: (f64, f64)) -> GpsFix {
@@ -438,11 +404,13 @@ mod tests {
     async fn full_ctx(
         pool: PgPool,
         manager: SessionManager,
+        location: Arc<LocationProvider>,
     ) -> (IngestCtx, broadcast::Receiver<Event>) {
         let (events_tx, events_rx) = broadcast::channel(16);
         let ctx = IngestCtx {
             pool,
             sessions: Some(Arc::new(manager)),
+            location,
             events: events_tx,
             secret_key: test_key(),
         };
@@ -514,7 +482,7 @@ mod tests {
         let pool = fresh_pool().await;
         let ds = seed_wifi_source(&pool).await;
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base, INSIDE)).await;
+        let (manager, provider) = session_with_fix(pool.clone(), a_fix(base, INSIDE)).await;
 
         let emitter = EmitterRepo::insert(
             &pool,
@@ -535,7 +503,7 @@ mod tests {
         let zone_id = seed_zone(&pool).await;
         seed_emitter_enter_rule(&pool, zone_id, emitter.id).await;
 
-        let (ctx, _events_rx) = full_ctx(pool.clone(), manager).await;
+        let (ctx, _events_rx) = full_ctx(pool.clone(), manager, provider).await;
 
         // First located emission, inside the zone -- exactly one
         // notification.
@@ -566,7 +534,7 @@ mod tests {
         let pool = fresh_pool().await;
         let ds = seed_wifi_source(&pool).await;
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let (manager, tx) = session_with_fix(pool.clone(), a_fix(base, INSIDE)).await;
+        let (manager, provider) = session_with_fix(pool.clone(), a_fix(base, INSIDE)).await;
 
         let emitter = EmitterRepo::insert(
             &pool,
@@ -588,14 +556,13 @@ mod tests {
         seed_emitter_enter_rule(&pool, zone_id, emitter.id).await;
         let leave_rule_id = seed_emitter_leave_rule(&pool, zone_id, emitter.id).await;
 
-        let (ctx, _events_rx) = full_ctx(pool.clone(), manager).await;
+        let (ctx, _events_rx) = full_ctx(pool.clone(), manager, provider.clone()).await;
 
         // First emission: inside -- fires enters_zone (1 notification). An
-        // emission's `location` always comes from the session's current
-        // `latest_fix` (see `ingest`'s own doc comment), so to observe a
-        // transition to OUTSIDE the *session's* fix itself must move --
-        // `session_with_fix`'s returned `tx` lets this test send a second
-        // fix over the same still-open `ChannelGps` channel.
+        // emission's `location` always comes from the shared `LocationProvider`
+        // (see `ingest`'s own doc comment), so to observe a transition to
+        // OUTSIDE the provider's fix itself must move -- `provider.update`
+        // does that synchronously (what the pump would do at runtime).
         super::super::ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", base))
             .await
             .expect("ingest should succeed");
@@ -603,16 +570,7 @@ mod tests {
         assert_eq!(total, 1, "first located emission inside fires once");
 
         let outside_fix = a_fix(base + chrono::Duration::seconds(1), OUTSIDE);
-        tx.send(outside_fix.clone())
-            .expect("send second fix over ChannelGps");
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while ctx.sessions.as_ref().and_then(|s| s.latest_fix()).as_ref() != Some(&outside_fix)
-            {
-                tokio::time::sleep(Duration::from_millis(2)).await;
-            }
-        })
-        .await
-        .expect("latest_fix should reflect the outside fix");
+        provider.update(outside_fix);
 
         super::super::ingest(
             &ctx,
@@ -638,7 +596,7 @@ mod tests {
         let pool = fresh_pool().await;
         let ds = seed_wifi_source(&pool).await;
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let (manager, _tx) = session_with_fix(pool.clone(), a_fix(base, INSIDE)).await;
+        let (manager, provider) = session_with_fix(pool.clone(), a_fix(base, INSIDE)).await;
 
         let entity = EntityRepo::insert(
             &pool,
@@ -693,7 +651,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (ctx, _events_rx) = full_ctx(pool.clone(), manager).await;
+        let (ctx, _events_rx) = full_ctx(pool.clone(), manager, provider).await;
 
         let emission = super::super::ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", base))
             .await
@@ -715,15 +673,9 @@ mod tests {
         let ctx = IngestCtx {
             pool: pool.clone(),
             sessions: Some(Arc::new(
-                SessionManager::open(
-                    pool.clone(),
-                    ChannelGps(mpsc::unbounded_channel().1),
-                    SessionManagerConfig::default(),
-                    no_op_hook(),
-                )
-                .await
-                .unwrap(),
+                SessionManager::open(pool.clone()).await.unwrap(),
             )),
+            location: Arc::new(LocationProvider::new()),
             events: events_tx,
             secret_key: test_key(),
         };

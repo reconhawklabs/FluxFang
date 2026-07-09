@@ -1,6 +1,6 @@
-//! `CaptureSupervisor` (Task 6.2): the orchestration layer that turns a
-//! configured `data_source` row into an actually-running capture (a wifi
-//! monitor-mode sniffer or a GPS fix stream), and back.
+//! `CaptureSupervisor`: the orchestration layer that turns a configured
+//! `data_source` row into an actually-running capture (a wifi monitor-mode
+//! sniffer or a GPS fix stream), and back.
 //!
 //! ## Pieces
 //!
@@ -14,50 +14,38 @@
 //!   hardware. Which one `AppState` holds is a constructor argument — see
 //!   `state.rs`.
 //! - [`CaptureSupervisor`] holds the running set (`data_source_id ->
-//!   RunningHandle`) and the one shared "survey session" (see below), and
-//!   implements [`CaptureSupervisor::start`]/[`CaptureSupervisor::stop`].
+//!   RunningHandle`), one shared [`LocationProvider`] (the current fix), and
+//!   the one shared "survey session" (see below), and implements
+//!   [`CaptureSupervisor::start`]/[`CaptureSupervisor::stop`].
 //!
-//! ## Session lifecycle: first-start opens, last-stop closes
+//! ## Session lifecycle: first-start opens, last-stop closes (GPS-agnostic)
 //!
 //! Every `ingest()` call requires an active `survey_session` (see
 //! `ingest`'s module docs). So starting *any* data source — wifi or gps —
 //! must ensure a session is open, and stopping the *last* running source
 //! must close it. This module tracks that with one
-//! `Mutex<Option<SharedSession>>`:
+//! `Mutex<Option<Arc<SessionManager>>>`:
 //!
-//! - If a **gps** source starts and no session is open, it opens a fresh
-//!   `SessionManager` fed by that gps source's real `LocationSource` — exactly
-//!   Task 5.1's intended wiring, with the [`host_zone_hook`] closing the
-//!   loop back to Task 5.4's `zones::update_host_zones`.
-//! - If a **wifi** source starts and no session is open, it opens a
-//!   `SessionManager` fed by [`InertGps`] — a `LocationSource` that never yields
-//!   a fix and never exhausts — with [`WIFI_ONLY_SESSION_GAP`] (a
-//!   multi-decade "gap") in place of the real 5-minute default, so the
-//!   *absence* of any GPS hardware doesn't auto-close the session; only an
-//!   explicit last-stop does. Host-zone tracking is simply unavailable in
-//!   this mode (there's no real position to evaluate), which is the
-//!   expected, documented tradeoff of a wifi-only survey.
-//! - A second source of either kind, once a session is already open, just
-//!   reuses it — **except** starting a second concurrent gps source (or a
-//!   gps source while a wifi-only/`InertGps`-backed session is already
-//!   open), which is rejected outright: see [`CaptureSupervisor::ensure_gps_session`]'s
-//!   doc comment for why, and for the known limitation this implies.
+//! - The **first** source of any kind opens a fresh `SessionManager`
+//!   ([`Self::ensure_session`]); the session is no longer tied to GPS.
+//! - A **location** source additionally spins up a [`LocationPump`] that
+//!   feeds the shared [`LocationProvider`] and logs the host track into
+//!   `location_fix`, with the [`host_zone_hook`] closing the loop back to
+//!   `zones::update_host_zones`. Only **one** location source may run at a
+//!   time ([`Self::a_location_source_is_running`]); a second is rejected as
+//!   `error`.
+//! - Any subsequent source, once a session is already open, just reuses it.
 //! - [`CaptureSupervisor::stop`] closes the session once the running set
 //!   becomes empty.
 //!
-//! ## Known limitation: mixed-kind stop ordering
+//! ## Device failure
 //!
-//! If a gps source and one or more wifi sources are running together
-//! (sharing one session, gps-backed), stopping the *gps* source alone does
-//! not stop that session's underlying fix loop — the loop lives inside the
-//! shared `SessionManager`, which only this supervisor's own last-stop
-//! closes. The gps data source's own `status` is still correctly flipped to
-//! `stopped`, but `location_fix` rows keep being written (using the same
-//! physical gps hardware) until every other running source also stops.
-//! Fixing this properly would need decoupling "the session's bookkeeping"
-//! from "which `LocationSource` feeds it" (e.g. a hot-swappable or multi-source
-//! `SessionManager`) — out of scope (YAGNI) for this slice, which only
-//! requires the two TDD scenarios (wifi-only, gps-only) to work correctly.
+//! A running source whose device dies (a wifi capturer's channel closing
+//! unexpectedly, or a location source's `next_fix()` returning `None`)
+//! reports its id on the failure channel; [`Self::spawn_background`]'s drain
+//! task flips it to `status='error'`, drops its handle, and closes the
+//! session if it was the last one. The retry reconciler that brings such a
+//! source back while `desired_state='running'` is a later task.
 //!
 //! ## Known limitation: `zone_membership` TOCTOU
 //!
@@ -74,6 +62,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -91,20 +80,17 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::ingest::session::{HostZoneHook, SessionManager, SessionManagerConfig};
+use crate::ingest::location::LocationProvider;
+use crate::ingest::pump::{LocationPump, OnExhausted};
+use crate::ingest::session::{HostZoneHook, SessionManager};
 use crate::ingest::zones::update_host_zones;
 use crate::ingest::{ingest, Event, IngestCtx};
-
-/// `SessionManagerConfig::inactivity_gap` used for a session opened without
-/// a real GPS source (see module docs). ~50 years: long enough to never
-/// fire in practice, short enough that `Instant + gap` can't overflow.
-const WIFI_ONLY_SESSION_GAP: Duration = Duration::from_secs(60 * 60 * 24 * 365 * 50);
 
 /// What a [`CapturerFactory`] builds for one `data_source` row, matching its
 /// `kind`.
 pub enum BuiltCapture {
     Wifi(Box<dyn Capturer>),
-    Gps(Box<dyn LocationSource + Send>),
+    Location(Box<dyn LocationSource>),
     Bluetooth(Box<dyn Capturer>),
 }
 
@@ -159,7 +145,7 @@ impl CapturerFactory for RealCapturerFactory {
                         .ok_or_else(|| anyhow!("gps gpsd config missing 'port'"))?
                         as u16;
                     let gps = fluxfang_capture::gps::GpsdSource::connect(host, port).await?;
-                    Ok(BuiltCapture::Gps(Box::new(gps)))
+                    Ok(BuiltCapture::Location(Box::new(gps)))
                 }
                 "serial" => {
                     let device = source
@@ -174,7 +160,7 @@ impl CapturerFactory for RealCapturerFactory {
                         .ok_or_else(|| anyhow!("gps serial config missing 'baud'"))?
                         as u32;
                     let gps = fluxfang_capture::gps::SerialGpsSource::open(device, baud)?;
-                    Ok(BuiltCapture::Gps(Box::new(gps)))
+                    Ok(BuiltCapture::Location(Box::new(gps)))
                 }
                 other => Err(anyhow!("unsupported gps mode '{other}'")),
             },
@@ -303,16 +289,13 @@ impl MockCapturerFactory {
     ///
     /// Needed because [`MockGps`] (unlike [`MockCapturer`], which paces
     /// itself via a real `interval` between sends) has no artificial delay
-    /// between fixes at all — a finite, non-looping track drains as fast as
-    /// each fix's `location_fix` DB write completes, which
-    /// [`session::run_ingest_loop`](crate::ingest::session) then treats as
-    /// **source exhaustion**: the shared `survey_session` self-closes almost
-    /// immediately, well before a realistic caller (e.g. an end-to-end test
-    /// driving several more HTTP requests, or a wifi-only data source
-    /// wanting to keep reusing this same gps-backed session) is done with
-    /// it. Looping keeps the session's `current_session_id()` valid and its
-    /// `latest_fix()` fresh for as long as the caller needs, only ending
-    /// when the gps data source is explicitly stopped.
+    /// between fixes at all — a finite, non-looping track drains almost
+    /// instantly, and the [`LocationPump`] then treats that exhaustion as a
+    /// device disconnect (reporting the source as failed). Looping keeps the
+    /// pump feeding the shared [`LocationProvider`] for as long as the caller
+    /// needs (e.g. an end-to-end test driving several more HTTP requests, or a
+    /// gps-status poll expecting a fresh fix), only ending when the gps data
+    /// source is explicitly stopped.
     pub fn looping_gps(self) -> Self {
         self.loop_gps
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -351,7 +334,7 @@ impl CapturerFactory for MockCapturerFactory {
                 if self.loop_gps.load(std::sync::atomic::Ordering::SeqCst) {
                     gps = gps.looping(true);
                 }
-                Ok(BuiltCapture::Gps(Box::new(gps)))
+                Ok(BuiltCapture::Location(Box::new(gps)))
             }
             "bluetooth" => {
                 let observations = self
@@ -373,34 +356,6 @@ impl CapturerFactory for MockCapturerFactory {
             }
             other => Err(anyhow!("MockCapturerFactory: unsupported kind '{other}'")),
         }
-    }
-}
-
-/// A `LocationSource` that never yields a fix and never exhausts — used to back
-/// a wifi-only session's `SessionManager` (see module docs). Paired with
-/// [`WIFI_ONLY_SESSION_GAP`] so the loop's `select!` never actually races a
-/// completed `next_fix()` against the gap timer in practice.
-struct InertGps;
-
-#[async_trait]
-impl LocationSource for InertGps {
-    async fn next_fix(&mut self) -> Option<GpsFix> {
-        std::future::pending().await
-    }
-}
-
-/// Adapts an owned `Box<dyn LocationSource + Send>` back into a plain
-/// `LocationSource` impl, since `SessionManager::open<G: LocationSource + Send +
-/// 'static>` needs a concrete-enough `G` to be generic over, not a bare
-/// trait object (there's no blanket `impl LocationSource for Box<dyn LocationSource +
-/// Send>` in `fluxfang_capture`, which otherwise has no reason to know
-/// about boxed trait objects at all).
-struct BoxedGps(Box<dyn LocationSource + Send>);
-
-#[async_trait]
-impl LocationSource for BoxedGps {
-    async fn next_fix(&mut self) -> Option<GpsFix> {
-        self.0.next_fix().await
     }
 }
 
@@ -526,32 +481,30 @@ enum RunningHandle {
     Wifi {
         capturer: Box<dyn Capturer>,
         reader: JoinHandle<()>,
+        /// Set true when *we* asked the capturer to stop, so the reader task
+        /// can distinguish a deliberate stop from an unexpected device death
+        /// when its channel closes (fully exercised in a later task; declared
+        /// here so the type is stable).
+        stopping: Arc<std::sync::atomic::AtomicBool>,
     },
-    /// A running gps source has nothing of its own to stop: its `LocationSource`
-    /// was consumed by the shared `SessionManager` when the session opened
-    /// (or, per the module docs' known limitation, wasn't wired in at all
-    /// if a session was already open). Its presence in the running map is
-    /// still what makes last-stop accounting correct.
-    Gps,
+    Location {
+        pump: LocationPump,
+    },
 }
 
-/// Whether the currently-open session (if any) is backed by a real
-/// `LocationSource` (opened for a gps-kind start) or [`InertGps`] (opened for a
-/// wifi-kind start with no gps running yet). See module docs.
-struct SharedSession {
-    manager: Arc<SessionManager>,
-    has_real_gps: bool,
-}
-
-/// The Task 6.2 orchestrator: turns `data_source` rows on and off. See
-/// module docs for the full design (session lifecycle, factory injection,
-/// known limitations).
+/// The orchestrator: turns `data_source` rows on and off. See module docs
+/// for the full design (session lifecycle, factory injection, known
+/// limitations).
 pub struct CaptureSupervisor {
     pool: PgPool,
     events: broadcast::Sender<Event>,
     secret_key: [u8; 32],
     factory: Arc<dyn CapturerFactory>,
-    session: Mutex<Option<SharedSession>>,
+    /// The shared "where am I?" value, fed by the running location source's
+    /// [`LocationPump`] and read by every ingest task + the gps status
+    /// endpoint.
+    provider: Arc<LocationProvider>,
+    session: Mutex<Option<Arc<SessionManager>>>,
     /// Guards both the running-set map itself *and* serializes
     /// `start`/`stop` end-to-end (the lock is held for a whole call, not
     /// just the map mutation) — deliberately coarse-grained: this is a
@@ -561,6 +514,11 @@ pub struct CaptureSupervisor {
     /// last-running, then close the session" both race-free without a
     /// second, more fiddly locking scheme.
     running: Mutex<HashMap<Uuid, RunningHandle>>,
+    /// Sender half of the failure channel; each running source's task sends
+    /// its own id here on unexpected death. Drained by `spawn_background`.
+    failure_tx: mpsc::UnboundedSender<Uuid>,
+    /// The receiver half, taken by the first `spawn_background` call.
+    failure_rx: StdMutex<Option<mpsc::UnboundedReceiver<Uuid>>>,
 }
 
 impl CaptureSupervisor {
@@ -570,13 +528,17 @@ impl CaptureSupervisor {
         secret_key: [u8; 32],
         factory: Arc<dyn CapturerFactory>,
     ) -> Self {
+        let (failure_tx, failure_rx) = mpsc::unbounded_channel();
         Self {
             pool,
             events,
             secret_key,
             factory,
+            provider: Arc::new(LocationProvider::new()),
             session: Mutex::new(None),
             running: Mutex::new(HashMap::new()),
+            failure_tx,
+            failure_rx: StdMutex::new(Some(failure_rx)),
         }
     }
 
@@ -588,6 +550,7 @@ impl CaptureSupervisor {
         IngestCtx {
             pool: self.pool.clone(),
             sessions: None,
+            location: self.provider.clone(),
             events: self.events.clone(),
             secret_key: self.secret_key,
         }
@@ -601,23 +564,20 @@ impl CaptureSupervisor {
         self.events.subscribe()
     }
 
-    /// The most recent GPS fix seen by the currently-open session, if any
-    /// (Phase 5's `GET /api/gps/status`). `None` whenever no session is
-    /// open (nothing running at all, or only a wifi-only/`InertGps`-backed
-    /// session — see module docs) or a real gps session is open but hasn't
-    /// received its first fix yet; both cases are indistinguishable from
-    /// here on purpose, since the handler derives its own `"acquiring"` vs
-    /// `"disabled"` distinction separately from whether a `kind='gps'` data
-    /// source is `running` (see `gps_status.rs`), not from this alone.
+    /// The most recent raw GPS fix in the shared [`LocationProvider`], if any
+    /// (Phase 5's `GET /api/gps/status`). `None` whenever no location source
+    /// has fed a fix yet (or one was cleared on stop); the handler derives its
+    /// own `"acquiring"`/`"disabled"`/`"degraded"` distinctions from this plus
+    /// whether a `kind='gps'` data source is `running` (see `gps_status.rs`).
     pub async fn latest_gps_fix(&self) -> Option<GpsFix> {
-        let guard = self.session.lock().await;
-        guard.as_ref()?.manager.latest_fix()
+        self.provider.latest_raw()
     }
 
     fn ctx_for(&self, manager: Arc<SessionManager>) -> IngestCtx {
         IngestCtx {
             pool: self.pool.clone(),
             sessions: Some(manager),
+            location: self.provider.clone(),
             events: self.events.clone(),
             secret_key: self.secret_key,
         }
@@ -633,113 +593,39 @@ impl CaptureSupervisor {
         })
     }
 
-    /// Ensure a session is open for a **wifi** start, opening one backed by
-    /// [`InertGps`] if none exists yet. Reuses whatever session is already
-    /// open (gps-backed or not) otherwise.
-    ///
-    /// Returns `(ctx, opened_fresh)`: `opened_fresh` is `true` only when
-    /// *this* call was the one that opened a brand-new session (as opposed
-    /// to reusing one already open from another running source). Callers
-    /// that can still fail *after* this returns (see `start_wifi`) need that
-    /// bit to know whether they're the one responsible for rolling the
-    /// session back on such a failure — rolling back a session some other
-    /// still-running source legitimately opened would incorrectly yank it
-    /// out from under that source.
-    async fn ensure_wifi_session(&self) -> anyhow::Result<(IngestCtx, bool)> {
+    /// Ensure a `survey_session` is open, opening one if none exists. Any
+    /// data source of any kind can be the opener — the session is no longer
+    /// tied to GPS. Returns the ingest `ctx` and the shared session manager.
+    async fn ensure_session(&self) -> anyhow::Result<(IngestCtx, Arc<SessionManager>)> {
         let mut guard = self.session.lock().await;
-        if let Some(shared) = guard.as_ref() {
-            return Ok((self.ctx_for(shared.manager.clone()), false));
+        if let Some(manager) = guard.as_ref() {
+            return Ok((self.ctx_for(manager.clone()), manager.clone()));
         }
-        let hook = self.host_zone_hook();
-        let manager = SessionManager::open(
-            self.pool.clone(),
-            InertGps,
-            SessionManagerConfig {
-                inactivity_gap: WIFI_ONLY_SESSION_GAP,
-                write_interval: Duration::ZERO,
-            },
-            hook,
-        )
-        .await?;
-        let manager = Arc::new(manager);
-        *guard = Some(SharedSession {
-            manager: manager.clone(),
-            has_real_gps: false,
-        });
-        Ok((self.ctx_for(manager), true))
+        let manager = Arc::new(SessionManager::open(self.pool.clone()).await?);
+        *guard = Some(manager.clone());
+        Ok((self.ctx_for(manager.clone()), manager))
     }
 
-    /// Close and clear a session *this call itself* just opened via
-    /// [`Self::ensure_wifi_session`], because the capturer it was opened for
-    /// then failed to actually start. Without this, a failed wifi start
-    /// would leave `self.session` permanently `Some(...)` with nothing in
-    /// the running map: the DB's `survey_session` row would stay open
-    /// forever (no last-stop to close it), and every subsequent gps start
-    /// would be wrongly rejected by [`Self::ensure_gps_session`] ("session
-    /// already open").
-    ///
-    /// Only ever called when the caller knows *it* opened the session this
-    /// call (`ensure_wifi_session`'s `opened_fresh` was `true`) — `start`
-    /// holds `self.running`'s lock for its entire call (see that field's
-    /// doc comment), so nothing else can have raced in and touched
-    /// `self.session` between opening it and this rollback.
-    async fn rollback_freshly_opened_session(&self) {
-        let mut guard = self.session.lock().await;
-        if let Some(shared) = guard.take() {
-            if let Err(err) = shared.manager.close().await {
-                eprintln!(
-                    "CaptureSupervisor: failed to close session while rolling back a failed \
-                     capturer start: {err:#}"
-                );
-            }
-        }
+    /// Whether any currently-running source is a location source (only one is
+    /// allowed at a time). Associated fn — inspects the passed running map
+    /// without locking (the caller already holds the `running` guard).
+    fn a_location_source_is_running(running: &HashMap<Uuid, RunningHandle>) -> bool {
+        running
+            .values()
+            .any(|h| matches!(h, RunningHandle::Location { .. }))
     }
 
-    /// Ensure a session is open for a **gps** start, opening one backed by
-    /// `gps` if none exists yet.
-    ///
-    /// Rejects starting a gps source if a session is *already* open,
-    /// whether backed by another real gps source (concurrent gps sources
-    /// aren't supported — a `SessionManager` can only be fed by one
-    /// `LocationSource`) or by [`InertGps`] (an already-running wifi-only
-    /// session can't be rewired onto a real gps source after the fact
-    /// without reopening — and losing the continuity of — the session).
-    /// Both are documented, deliberate limitations for this slice (see
-    /// module docs); the caller (`start`) surfaces the rejection as this
-    /// data source's `status = 'error'` + `last_error`, not a crash.
-    async fn ensure_gps_session(&self, gps: Box<dyn LocationSource + Send>) -> anyhow::Result<()> {
-        let mut guard = self.session.lock().await;
-        if let Some(shared) = guard.as_ref() {
-            // Rejected here, `gps` is simply never wired into anything and
-            // is dropped when this function returns; that runs its own
-            // `Drop` impl (e.g. `SerialGpsSource` explicitly stops its
-            // reader thread, `GpsdSource`'s socket halves close via their
-            // own default `Drop`) with no extra teardown needed here.
-            if shared.has_real_gps {
-                anyhow::bail!(
-                    "a gps source is already driving the active session; only one \
-                     concurrent gps source is supported"
-                );
-            } else {
-                anyhow::bail!(
-                    "cannot start a gps source while a session is already open without gps \
-                     support; stop the other running source(s) first"
-                );
+    /// Close the shared session iff `running` is empty. Caller passes its
+    /// already-held `running` guard (no re-lock — avoids deadlock).
+    async fn close_session_if_idle_locked(&self, running: &mut HashMap<Uuid, RunningHandle>) {
+        if running.is_empty() {
+            let mut guard = self.session.lock().await;
+            if let Some(manager) = guard.take() {
+                if let Err(err) = manager.close().await {
+                    eprintln!("CaptureSupervisor: failed to close idle session: {err:#}");
+                }
             }
         }
-        let hook = self.host_zone_hook();
-        let manager = SessionManager::open(
-            self.pool.clone(),
-            BoxedGps(gps),
-            SessionManagerConfig::default(),
-            hook,
-        )
-        .await?;
-        *guard = Some(SharedSession {
-            manager: Arc::new(manager),
-            has_real_gps: true,
-        });
-        Ok(())
     }
 
     async fn start_wifi(
@@ -747,7 +633,7 @@ impl CaptureSupervisor {
         data_source_id: Uuid,
         mut capturer: Box<dyn Capturer>,
     ) -> anyhow::Result<RunningHandle> {
-        let (ctx, opened_session) = self.ensure_wifi_session().await?;
+        let (ctx, _session) = self.ensure_session().await?;
         let (tx, mut rx) = mpsc::channel::<RawObservation>(256);
         // `Capturer::start` can now block for several seconds -- the bluetooth
         // capturer performs a startup handshake that waits on a channel -- so
@@ -763,49 +649,70 @@ impl CaptureSupervisor {
         })
         .await
         .map_err(|err| anyhow!("capturer start task panicked: {err}"))?;
-        if let Err(err) = start_result {
-            // The capturer failed to actually start (bad interface, no
-            // monitor mode, permissions -- a realistic hardware failure).
-            // If this call was the one that just opened the shared session,
-            // it must not linger: `start`'s caller will mark this source
-            // `error` and never reach the `running.insert` below, so
-            // nothing would ever close it otherwise. A session that was
-            // already open before this call (from another running source)
-            // is left untouched.
-            if opened_session {
-                self.rollback_freshly_opened_session().await;
-            }
-            return Err(err);
-        }
+        // The capturer failed to actually start (bad interface, no monitor
+        // mode, permissions -- a realistic hardware failure). `start` (our
+        // caller) holds the `running` lock and will close the session via
+        // `close_session_if_idle_locked` on this Err. Don't re-lock `running`
+        // here.
+        start_result?;
 
+        let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopping_reader = stopping.clone();
+        let failure_tx = self.failure_tx.clone();
         let reader = tokio::spawn(async move {
             while let Some(obs) = rx.recv().await {
                 if let Err(err) = ingest(&ctx, data_source_id, obs).await {
                     // No tracing/log crate is wired into this workspace yet
-                    // (same situation `session.rs`'s ingest loop documents)
-                    // -- a single failed ingest (most commonly: the shared
-                    // session closed out from under this still-running
-                    // wifi source, see the module docs' known limitation)
-                    // must not kill the whole reader task; log and keep
-                    // draining.
+                    // (same situation `ingest`'s own docs note) -- a single
+                    // failed ingest must not kill the whole reader task; log
+                    // and keep draining.
                     eprintln!(
                         "CaptureSupervisor: ingest failed for data source {data_source_id}: {err:#}"
                     );
                 }
             }
+            // Channel closed. If we weren't asked to stop, the capturer died
+            // unexpectedly (device unplugged / driver error) -> report failure.
+            if !stopping_reader.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = failure_tx.send(data_source_id);
+            }
         });
 
-        Ok(RunningHandle::Wifi { capturer, reader })
+        Ok(RunningHandle::Wifi {
+            capturer,
+            reader,
+            stopping,
+        })
     }
 
-    async fn start_gps(&self, gps: Box<dyn LocationSource + Send>) -> anyhow::Result<RunningHandle> {
-        // No rollback needed here, unlike `start_wifi`: `ensure_gps_session`
-        // only ever sets `self.session` *after* `SessionManager::open`
-        // already succeeded, and there is no further fallible step in this
-        // function afterward -- so a failure from the line below always
-        // means no session was opened at all, nothing to roll back.
-        self.ensure_gps_session(gps).await?;
-        Ok(RunningHandle::Gps)
+    /// Start a location source: spin up a [`LocationPump`] feeding the shared
+    /// [`LocationProvider`]. The one-location-source check is done by `start`
+    /// before dispatch, so this does not re-lock `running`.
+    async fn start_location(
+        &self,
+        data_source_id: Uuid,
+        source: Box<dyn LocationSource>,
+    ) -> anyhow::Result<RunningHandle> {
+        let (_ctx, session) = self.ensure_session().await?;
+        let provider = self.provider.clone();
+        let hook = self.host_zone_hook();
+        let failure_tx = self.failure_tx.clone();
+        let on_exhausted: OnExhausted = Arc::new(move || {
+            let failure_tx = failure_tx.clone();
+            Box::pin(async move {
+                let _ = failure_tx.send(data_source_id);
+            })
+        });
+        let pump = LocationPump::start(
+            self.pool.clone(),
+            source,
+            provider,
+            session,
+            Duration::ZERO,
+            hook,
+            on_exhausted,
+        );
+        Ok(RunningHandle::Location { pump })
     }
 
     /// Start capturing from `data_source_id`.
@@ -813,10 +720,9 @@ impl CaptureSupervisor {
     /// No-op (`Ok(())`, nothing touched) if it's already running -- a
     /// client retrying or double-clicking "start" shouldn't produce an
     /// error. On any failure (unknown id, invalid config, factory build
-    /// failure, or a rejected session-sharing attempt -- see
-    /// [`Self::ensure_gps_session`]) the row's `status` is set to `'error'`
-    /// with `last_error` describing why, and this returns `Err` with the
-    /// same message; it never panics.
+    /// failure, or a second concurrent location source) the row's `status`
+    /// is set to `'error'` with `last_error` describing why, and this returns
+    /// `Err` with the same message; it never panics.
     pub async fn start(&self, data_source_id: Uuid) -> anyhow::Result<()> {
         let mut running = self.running.lock().await;
         if running.contains_key(&data_source_id) {
@@ -833,6 +739,14 @@ impl CaptureSupervisor {
             source.interface.as_deref(),
             &source.config,
         ) {
+            DataSourceRepo::set_status(&self.pool, data_source_id, "error", Some(&msg)).await?;
+            return Err(anyhow!(msg));
+        }
+
+        // One location source at a time.
+        let is_location = source.kind == "gps"; // future: || source.kind == "static_location"
+        if is_location && Self::a_location_source_is_running(&running) {
+            let msg = "another location source is already running; stop it first".to_string();
             DataSourceRepo::set_status(&self.pool, data_source_id, "error", Some(&msg)).await?;
             return Err(anyhow!(msg));
         }
@@ -854,7 +768,7 @@ impl CaptureSupervisor {
         let handle = match built {
             BuiltCapture::Wifi(capturer) => self.start_wifi(data_source_id, capturer).await,
             BuiltCapture::Bluetooth(capturer) => self.start_wifi(data_source_id, capturer).await,
-            BuiltCapture::Gps(gps) => self.start_gps(gps).await,
+            BuiltCapture::Location(source) => self.start_location(data_source_id, source).await,
         };
 
         let handle = match handle {
@@ -867,6 +781,9 @@ impl CaptureSupervisor {
                     Some(&err.to_string()),
                 )
                 .await?;
+                // start_wifi/start_location may have opened the session; close
+                // if nothing ended up running.
+                self.close_session_if_idle_locked(&mut running).await;
                 return Err(err);
             }
         };
@@ -886,11 +803,10 @@ impl CaptureSupervisor {
     /// nothing), and whose Stop button, with no in-memory handle to remove,
     /// would silently no-op (now also handled defensively in [`Self::stop`]).
     ///
-    /// GPS sources are resumed before wifi sources so the shared session is
-    /// opened gps-backed: a wifi-first resume would open an [`InertGps`]
-    /// session that a subsequent gps resume can't join (see
-    /// [`Self::ensure_gps_session`]), needlessly downgrading a gps+wifi survey
-    /// to wifi-only and flipping the gps source to `error`.
+    /// GPS sources are resumed before wifi sources purely so the location
+    /// source claims the single "one location source at a time" slot first;
+    /// the session itself is now GPS-agnostic and opened by whichever source
+    /// starts first.
     ///
     /// Best-effort per source and never fatal: a source whose hardware isn't
     /// available at boot is flipped to `error`/`last_error` by [`Self::start`]
@@ -927,10 +843,9 @@ impl CaptureSupervisor {
     /// Stop capturing from `data_source_id`.
     ///
     /// No-op (`Ok(())`) if it isn't currently running. Otherwise stops its
-    /// capturer/loop, marks it `'stopped'`, and — if this was the last
-    /// running source — closes the shared session (see module docs for the
-    /// known limitation when a gps source stops while others remain
-    /// running).
+    /// capturer/pump, marks it `'stopped'`, clears the provider (for a
+    /// location source), and — if this was the last running source — closes
+    /// the shared session.
     pub async fn stop(&self, data_source_id: Uuid) -> anyhow::Result<()> {
         let mut running = self.running.lock().await;
         let Some(handle) = running.remove(&data_source_id) else {
@@ -955,7 +870,11 @@ impl CaptureSupervisor {
             RunningHandle::Wifi {
                 mut capturer,
                 reader,
+                stopping,
             } => {
+                // Mark the stop deliberate so the reader task doesn't report
+                // the channel closing as an unexpected device death.
+                stopping.store(true, std::sync::atomic::Ordering::SeqCst);
                 // `Capturer::stop` is a synchronous method that, for real
                 // hardware (`WifiMonitorCapturer`), blocks on joining its
                 // capture thread -- run it on the blocking-pool so it never
@@ -969,19 +888,55 @@ impl CaptureSupervisor {
                 // observation has actually been ingested.
                 let _ = reader.await;
             }
-            RunningHandle::Gps => {}
-        }
-
-        DataSourceRepo::set_status(&self.pool, data_source_id, "stopped", None).await?;
-
-        if running.is_empty() {
-            let mut session_guard = self.session.lock().await;
-            if let Some(shared) = session_guard.take() {
-                shared.manager.close().await?;
+            RunningHandle::Location { pump } => {
+                pump.abort();
+                // User-initiated stop clears the provider so emissions read
+                // `none` immediately (a failure would leave it `stale`).
+                self.provider.clear();
             }
         }
 
+        DataSourceRepo::set_status(&self.pool, data_source_id, "stopped", None).await?;
+        self.close_session_if_idle_locked(&mut running).await;
         Ok(())
+    }
+
+    /// Start the supervisor's background tasks (failure drain now; the 10s
+    /// recovery reconciler is added in a later task). Call once at startup,
+    /// after construction, with the `Arc<CaptureSupervisor>` from `AppState`.
+    pub fn spawn_background(self: &Arc<Self>) {
+        let rx = self
+            .failure_rx
+            .lock()
+            .expect("failure_rx mutex poisoned")
+            .take();
+        let Some(mut rx) = rx else {
+            return; // already started
+        };
+        let this = self.clone();
+        tokio::spawn(async move {
+            while let Some(id) = rx.recv().await {
+                this.handle_source_failed(id).await;
+            }
+        });
+    }
+
+    /// A running source's device died. Mark it `error` and drop its handle so
+    /// the reconciler (later task) can retry while `desired_state='running'`.
+    /// Does NOT clear the provider (a lost fix stays `stale` and ages out).
+    async fn handle_source_failed(&self, data_source_id: Uuid) {
+        let mut running = self.running.lock().await;
+        // Only act if we still think it's running (ignore races with stop()).
+        if running.remove(&data_source_id).is_none() {
+            return;
+        }
+        let msg = "capture device stopped unexpectedly (disconnected or failed)";
+        if let Err(err) =
+            DataSourceRepo::set_status(&self.pool, data_source_id, "error", Some(msg)).await
+        {
+            eprintln!("CaptureSupervisor: failed to mark source {data_source_id} error: {err:#}");
+        }
+        self.close_session_if_idle_locked(&mut running).await;
     }
 }
 
