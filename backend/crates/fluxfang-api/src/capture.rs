@@ -44,8 +44,9 @@
 //! unexpectedly, or a location source's `next_fix()` returning `None`)
 //! reports its id on the failure channel; [`Self::spawn_background`]'s drain
 //! task flips it to `status='error'`, drops its handle, and closes the
-//! session if it was the last one. The retry reconciler that brings such a
-//! source back while `desired_state='running'` is a later task.
+//! session if it was the last one. [`Self::spawn_background`]'s 10s recovery
+//! reconciler ([`Self::reconcile_once`]) then brings such a source back while
+//! `desired_state='running'` — the auto-recover-on-replug behavior.
 //!
 //! ## Known limitation: `zone_membership` TOCTOU
 //!
@@ -85,6 +86,10 @@ use crate::ingest::pump::{LocationPump, OnExhausted};
 use crate::ingest::session::{HostZoneHook, SessionManager};
 use crate::ingest::zones::update_host_zones;
 use crate::ingest::{ingest, Event, IngestCtx};
+
+/// How often the recovery reconciler retries sources the user wants running
+/// but that aren't (failed device, not-yet-available hardware at boot).
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// What a [`CapturerFactory`] builds for one `data_source` row, matching its
 /// `kind`.
@@ -847,6 +852,35 @@ impl CaptureSupervisor {
         }
     }
 
+    /// One reconciliation sweep: (re)start every source the user wants
+    /// running that isn't currently in the running set. `start` itself is a
+    /// no-op for already-running sources and records `error`/`last_error` on
+    /// failure, so this is safe to call repeatedly.
+    async fn reconcile_once(&self) {
+        let sources = match DataSourceRepo::list(&self.pool).await {
+            Ok(s) => s,
+            Err(err) => {
+                eprintln!("CaptureSupervisor: reconcile could not list sources: {err:#}");
+                return;
+            }
+        };
+        let want: Vec<Uuid> = {
+            let running = self.running.lock().await;
+            sources
+                .into_iter()
+                .filter(|s| s.desired_state == "running" && !running.contains_key(&s.id))
+                .map(|s| s.id)
+                .collect()
+        };
+        for id in want {
+            if let Err(err) = self.start(id).await {
+                // Expected while hardware is absent; start() already recorded
+                // error/last_error. Log once per attempt for visibility.
+                eprintln!("CaptureSupervisor: reconcile retry for {id} failed: {err:#}");
+            }
+        }
+    }
+
     /// Stop capturing from `data_source_id`.
     ///
     /// No-op (`Ok(())`) if it isn't currently running. Otherwise stops its
@@ -908,9 +942,12 @@ impl CaptureSupervisor {
         Ok(())
     }
 
-    /// Start the supervisor's background tasks (failure drain now; the 10s
-    /// recovery reconciler is added in a later task). Call once at startup,
-    /// after construction, with the `Arc<CaptureSupervisor>` from `AppState`.
+    /// Start the supervisor's background tasks: the failure drain (flips a
+    /// disconnected source to `error` and drops its handle) and the 10s
+    /// recovery reconciler (re-starts any `desired_state='running'` source
+    /// that isn't running). Together these deliver unplug → `error` →
+    /// auto-recover-on-replug. Call once at startup, after construction, with
+    /// the `Arc<CaptureSupervisor>` from `AppState`.
     pub fn spawn_background(self: &Arc<Self>) {
         let rx = self
             .failure_rx
@@ -926,10 +963,19 @@ impl CaptureSupervisor {
                 this.handle_source_failed(id).await;
             }
         });
+
+        let reconciler = self.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
+            loop {
+                ticker.tick().await;
+                reconciler.reconcile_once().await;
+            }
+        });
     }
 
     /// A running source's device died. Mark it `error` and drop its handle so
-    /// the reconciler (later task) can retry while `desired_state='running'`.
+    /// [`Self::reconcile_once`] can retry it while `desired_state='running'`.
     /// Does NOT clear the provider (a lost fix stays `stale` and ages out).
     async fn handle_source_failed(&self, data_source_id: Uuid) {
         let mut running = self.running.lock().await;
@@ -1026,5 +1072,72 @@ mod validate_data_source_tests {
         )
         .unwrap_err();
         assert!(err.contains("device_serial"), "got: {err}");
+    }
+}
+
+#[cfg(test)]
+mod reconcile_tests {
+    use std::sync::Arc;
+
+    use fluxfang_db::models::NewDataSource;
+    use fluxfang_db::DataSourceRepo;
+    use tokio::sync::broadcast;
+
+    use super::{CaptureSupervisor, MockCapturerFactory};
+    use crate::test_support::fresh_pool;
+
+    /// The recovery reconciler brings back a source the user wants running
+    /// (`desired_state = 'running'`) that isn't in the running set and is
+    /// sitting in `status = 'error'` — exactly the state
+    /// `handle_source_failed` leaves a device that died mid-capture (status
+    /// flipped to `error`, handle dropped from the running set). A fresh
+    /// supervisor's running set is empty, so the row's absence from it models
+    /// that post-failure state directly. One `reconcile_once()` pass, with a
+    /// factory that now succeeds (the device is "replugged"), must
+    /// (re)`start` it and flip `status` back to `running` — the
+    /// unplug→error→auto-recover-on-replug behavior.
+    #[tokio::test]
+    async fn reconcile_restarts_a_failed_desired_running_source() {
+        let pool = fresh_pool().await;
+
+        // Arrange: a wifi source the user wants running, currently `error`
+        // and absent from the (empty) running set — the state a failed device
+        // is left in by `handle_source_failed`.
+        let created = DataSourceRepo::insert(&pool, NewDataSource::wifi_monitor("wlan0"))
+            .await
+            .expect("insert data source");
+        DataSourceRepo::set_desired_state(&pool, created.id, "running")
+            .await
+            .expect("mark desired_state running");
+        DataSourceRepo::set_status(&pool, created.id, "error", Some("device died"))
+            .await
+            .expect("mark status error");
+
+        // Guard non-vacuity: it really is in the failed state pre-reconcile.
+        let before = DataSourceRepo::get(&pool, created.id)
+            .await
+            .expect("get")
+            .expect("row exists");
+        assert_eq!(before.status, "error", "precondition: source is failed");
+
+        // A factory that now succeeds (the device is back), and a fresh
+        // supervisor whose running set is empty.
+        let factory = Arc::new(MockCapturerFactory::new());
+        let (events_tx, _events_rx) = broadcast::channel(8);
+        let supervisor = CaptureSupervisor::new(pool.clone(), events_tx, [0u8; 32], factory);
+
+        // Act: one reconciliation sweep. (Called directly, not via
+        // `spawn_background`'s 10s loop, so the suite stays deterministic.)
+        supervisor.reconcile_once().await;
+
+        // Assert: the row genuinely transitioned back to running.
+        let after = DataSourceRepo::get(&pool, created.id)
+            .await
+            .expect("get")
+            .expect("row exists");
+        assert_eq!(
+            after.status, "running",
+            "reconcile_once should (re)start a desired-running source that isn't running"
+        );
     }
 }
