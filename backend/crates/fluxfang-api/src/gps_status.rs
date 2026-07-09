@@ -52,16 +52,8 @@ use chrono::Utc;
 use fluxfang_db::DataSourceRepo;
 
 use crate::dto::GpsStatusDto;
+use crate::ingest::location::{FRESH_FIX_MAX_AGE_SECONDS, MIN_USABLE_QUALITY};
 use crate::state::AppState;
-
-/// A fix older than this many seconds is treated as stale (`"degraded"`)
-/// even if the gps data source is still `running` — see module docs.
-const FRESH_FIX_MAX_AGE_SECONDS: f64 = 15.0;
-
-/// Minimum NMEA/gpsd-style fix quality treated as "a real, usable fix"
-/// (`0` conventionally means "no fix" / invalid in both protocols). Below
-/// this, a fix is reported as `"degraded"` even if it just arrived.
-const MIN_USABLE_QUALITY: i32 = 1;
 
 pub fn protected_routes() -> Router<AppState> {
     Router::new().route("/api/gps/status", get(gps_status))
