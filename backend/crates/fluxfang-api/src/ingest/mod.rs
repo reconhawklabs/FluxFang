@@ -166,8 +166,14 @@ pub struct IngestCtx {
 /// 1. Build a `NewEmission`: `session_id` from
 ///    `ctx.sessions.current_session_id()` — required; see the module docs'
 ///    "No active session" section for why a missing session is an `Err`,
-///    not a skip. `location` from `ctx.location` (the shared `LocationProvider`
-///    fed by the `LocationPump`; `None` if no fix is available). `observed_at`/`signal_strength`/
+///    not a skip. `location`/`location_quality` from
+///    `ctx.location.classify(obs.observed_at)` (the shared `LocationProvider`
+///    fed by the `LocationPump`, gated by that fix's freshness/quality as of
+///    this observation's own timestamp -- not `Utc::now()` -- so replaying
+///    older observations classifies deterministically); coordinates are
+///    `None` unless the fix is fresh and usable (see
+///    `location::LocationProvider::classify`'s doc comment for the exact
+///    gate). `observed_at`/`signal_strength`/
 ///    `kind`/`payload` copied from `obs`. `emitter_id` starts `None`.
 /// 2. Insert it (`EmissionRepo::insert`).
 /// 3. **Auto-attach** (see module docs for the full first-match-wins
@@ -221,7 +227,7 @@ pub async fn ingest(
                  SessionManager-bounded session is open (see this module's docs)"
             )
         })?;
-    let location = ctx.location.latest_raw().map(|fix| (fix.lon, fix.lat));
+    let (location, location_quality) = ctx.location.classify(obs.observed_at);
 
     let new = NewEmission {
         data_source_id: Some(data_source_id),
@@ -230,9 +236,7 @@ pub async fn ingest(
         observed_at: obs.observed_at,
         signal_strength: obs.signal_strength,
         location,
-        // TEMPORARY: presence-based tagging until Task 5 wires up the real
-        // `classify` logic (freshness-gated `LocationProvider`, Task 2).
-        location_quality: if location.is_some() { "fresh" } else { "none" }.to_string(),
+        location_quality: location_quality.as_str().to_string(),
         kind: obs.kind,
         payload: obs.payload,
     };
@@ -639,6 +643,39 @@ mod tests {
             Event::Emission(e) => assert_eq!(e.id, emission.id),
             Event::Notification(_) => panic!("expected an Emission event"),
         }
+    }
+
+    /// Task 5: a fix that exists but is older than
+    /// [`location::FRESH_FIX_MAX_AGE_SECONDS`] as of the observation's own
+    /// `observed_at` must tag the emission `location_quality: "stale"` with
+    /// NULL coordinates -- not `"fresh"` (the fix is real, just too old) and
+    /// not `"none"` (a fix does exist). This is the real `classify` gate
+    /// replacing Task 3's temporary presence-based tagging, which conflated
+    /// "no fix" and "stale fix" into the same `"none"` bucket.
+    #[tokio::test]
+    async fn stale_fix_tags_emission_null_with_stale_quality() {
+        let pool = fresh_pool().await;
+        let ds = seed_wifi_source(&pool).await;
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        // Fix recorded at `base`; observation 30s later -- well past the 15s
+        // freshness gate, so this must classify as stale, not fresh/none.
+        let (manager, provider) = session_with_fix(pool.clone(), a_fix(base)).await;
+
+        let (events_tx, _rx) = broadcast::channel(8);
+        let ctx = IngestCtx {
+            pool: pool.clone(),
+            sessions: Some(Arc::new(manager)),
+            location: provider.clone(),
+            events: events_tx,
+            secret_key: [0x11u8; 32],
+        };
+
+        let obs = wifi_obs("aa:bb:cc:dd:ee:ff", base + ChronoDuration::seconds(30));
+        let emission = ingest(&ctx, ds, obs).await.expect("ingest should succeed");
+
+        assert_eq!(emission.location_quality, "stale");
+        assert!(emission.lon.is_none());
+        assert!(emission.lat.is_none());
     }
 
     #[tokio::test]
