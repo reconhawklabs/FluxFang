@@ -43,6 +43,8 @@ const SOURCES: DataSource[] = [
     status: 'stopped',
     config: {},
     last_error: null,
+    desired_state: 'stopped',
+    last_ok_at: null,
   },
   {
     id: 'wifi-2',
@@ -53,6 +55,8 @@ const SOURCES: DataSource[] = [
     status: 'starting',
     config: {},
     last_error: null,
+    desired_state: 'running',
+    last_ok_at: null,
   },
   {
     id: 'gps-1',
@@ -63,6 +67,8 @@ const SOURCES: DataSource[] = [
     status: 'running',
     config: { host: '127.0.0.1', port: 2947 },
     last_error: null,
+    desired_state: 'running',
+    last_ok_at: '2026-01-01T00:05:00Z',
   },
   {
     id: 'gps-2',
@@ -73,6 +79,10 @@ const SOURCES: DataSource[] = [
     status: 'error',
     config: { device: '/dev/ttyUSB0', baud: 9600 },
     last_error: 'device not found',
+    // desired_state stays 'running' — the reconciler is retrying every 10s
+    // (see backend module docs); last_ok_at anchors the "down for" duration.
+    desired_state: 'running',
+    last_ok_at: '2026-01-01T00:00:00Z',
   },
 ];
 
@@ -97,6 +107,13 @@ test('renders the source list with color-coded status badges and last_error', as
 
   // last_error surfaced only for the errored source
   expect(within(screen.getByTestId('source-row-gps-2')).getByText(/device not found/i)).toBeInTheDocument();
+
+  // Health column: an errored source whose desired_state is still 'running'
+  // (the reconciler is retrying) reads honestly as "retrying", not a bare
+  // "error" that could be mistaken for something requiring manual action.
+  expect(within(screen.getByTestId('source-row-gps-2')).getByText(/retrying/i)).toBeInTheDocument();
+  // ...while a running source reads as healthy.
+  expect(within(screen.getByTestId('source-row-gps-1')).getByText(/healthy/i)).toBeInTheDocument();
 });
 
 /** `GET /api/system/capture-devices` fixture builder — the Add form fetches
@@ -126,6 +143,8 @@ test('add source: wifi kind with enumerated interfaces shows a Mode dropdown and
     status: 'stopped',
     config: {},
     last_error: null,
+    desired_state: 'stopped',
+    last_ok_at: null,
   };
   const fetchMock = mockMethodRoutes({
     'GET /api/data-sources': () => [],
@@ -184,6 +203,8 @@ test('add source: wifi kind — checking "Automatically create emitters" posts c
     status: 'stopped',
     config: { auto_create_emitters: true },
     last_error: null,
+    desired_state: 'stopped',
+    last_ok_at: null,
   };
   const fetchMock = mockMethodRoutes({
     'GET /api/data-sources': () => [],
@@ -248,6 +269,8 @@ test('add source: bluetooth kind — picking an adapter and enabling Active Scan
     status: 'stopped',
     config: { auto_create_emitters: false, active_scan: true },
     last_error: null,
+    desired_state: 'stopped',
+    last_ok_at: null,
   };
   const fetchMock = mockMethodRoutes({
     'GET /api/data-sources': () => [],
@@ -348,6 +371,8 @@ test('add source: rtl_sdr kind — submits an rtl_sdr/tpms source with frequency
       auto_correlate_tpms: true,
     },
     last_error: null,
+    desired_state: 'stopped',
+    last_ok_at: null,
   };
   const fetchMock = mockMethodRoutes({
     'GET /api/data-sources': () => [],
@@ -453,6 +478,8 @@ test('add source: gps + serial mode reveals a device SELECT (not free text) and 
     status: 'stopped',
     config: { device: '/dev/ttyUSB1', baud: 57600 },
     last_error: null,
+    desired_state: 'stopped',
+    last_ok_at: null,
   };
   const fetchMock = mockMethodRoutes({
     'GET /api/data-sources': () => [],

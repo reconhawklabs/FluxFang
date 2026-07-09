@@ -189,6 +189,8 @@ const DATA_SOURCE_1: DataSource = {
   status: "running",
   config: {},
   last_error: null,
+  desired_state: 'running',
+  last_ok_at: null,
 };
 
 const EMISSION_1: Emission = {
@@ -353,6 +355,8 @@ test("Sources group lists wifi sources but hides gps sources (gps provides locat
     status: "running",
     config: {},
     last_error: null,
+    desired_state: 'running',
+    last_ok_at: null,
   };
   const fetchMock = mockRoutes(
     baseRoutes({ "GET /api/data-sources": () => [DATA_SOURCE_1, GPS_SOURCE] }),

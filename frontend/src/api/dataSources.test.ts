@@ -12,6 +12,8 @@ function source(kind: DataSource["kind"]): DataSource {
     status: "running",
     config: {},
     last_error: null,
+    desired_state: 'running',
+    last_ok_at: null,
   };
 }
 

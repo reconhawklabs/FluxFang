@@ -88,6 +88,8 @@ export interface DataSource {
   status: DataSourceStatus;
   config: DataSourceConfig;
   last_error: string | null;
+  desired_state: "running" | "stopped";
+  last_ok_at: string | null;
 }
 
 /** A GPS data source provides *location*, not emissions — so it must not

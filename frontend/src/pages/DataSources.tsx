@@ -61,6 +61,35 @@ function StatusBadge({ status }: { status: DataSourceStatus }) {
   );
 }
 
+/** Honest health summary: `running` reads as healthy; an `error` while the
+ * user still wants the source running (`desired_state === 'running'`) reads
+ * as "retrying" (the backend's reconciler retries every 10s) plus how long
+ * it's been down since `last_ok_at`, rather than a bare "error" that could
+ * be mistaken for a permanent/manual state. Everything else (stopped,
+ * starting, or an error the user has since stopped wanting) falls back to
+ * the plain status. */
+function HealthCell({ source }: { source: DataSource }) {
+  if (source.status === 'running') {
+    return <span className="text-xs text-green-400">● healthy</span>;
+  }
+  if (source.status === 'error' && source.desired_state === 'running') {
+    const since = source.last_ok_at ? `, down ${relativeSince(source.last_ok_at)}` : '';
+    return <span className="text-xs text-red-400">⚠ error — retrying{since}</span>;
+  }
+  return <span className="text-xs text-slate-500">○ {source.status}</span>;
+}
+
+/** Coarse relative-time string ("Ns"/"Nm"/"Nh") since an ISO timestamp — the
+ * Health cell's "down for" duration. The page already re-polls every
+ * `REFETCH_INTERVAL_MS`, so this recomputes on each render without extra
+ * timers/wiring. */
+function relativeSince(iso: string): string {
+  const secs = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m`;
+  return `${Math.floor(secs / 3600)}h`;
+}
+
 /** A short human summary of a source's interface/config, shown monospace
  * since it's device-ish identifying text (interface name / serial device /
  * host:port), not prose. */
@@ -740,6 +769,7 @@ export default function DataSources() {
               <th className="py-2 pr-4 font-medium">Mode</th>
               <th className="py-2 pr-4 font-medium">Interface / Config</th>
               <th className="py-2 pr-4 font-medium">Status</th>
+              <th className="py-2 pr-4 font-medium">Health</th>
               <th className="py-2 pr-4 font-medium">Actions</th>
             </tr>
           </thead>
@@ -768,6 +798,9 @@ export default function DataSources() {
                     {source.status === 'error' && source.last_error && (
                       <p className="mt-1 max-w-xs text-xs text-red-400">{source.last_error}</p>
                     )}
+                  </td>
+                  <td className="py-2 pr-4">
+                    <HealthCell source={source} />
                   </td>
                   <td className="py-2 pr-4">
                     <div className="flex gap-2">

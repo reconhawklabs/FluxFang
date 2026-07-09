@@ -155,6 +155,8 @@ const DATA_SOURCE_1: DataSource = {
   status: "running",
   config: {},
   last_error: null,
+  desired_state: 'running',
+  last_ok_at: null,
 };
 
 const DATA_SOURCE_2: DataSource = {
@@ -166,6 +168,8 @@ const DATA_SOURCE_2: DataSource = {
   status: "running",
   config: { host: "localhost", port: 2947 },
   last_error: null,
+  desired_state: 'running',
+  last_ok_at: null,
 };
 
 /** The default routes every test needs at minimum (emissions/emitters/

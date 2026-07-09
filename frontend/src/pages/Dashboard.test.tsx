@@ -118,6 +118,8 @@ const DATA_SOURCE_RUNNING: DataSource = {
   status: "running",
   config: {},
   last_error: null,
+  desired_state: 'running',
+  last_ok_at: null,
 };
 
 const DATA_SOURCE_STOPPED: DataSource = {
@@ -348,6 +350,8 @@ test("feed tabs list wifi sources but hide gps sources (gps provides location, n
     status: "running",
     config: {},
     last_error: null,
+    desired_state: 'running',
+    last_ok_at: null,
   };
   const GPS_SOURCE: DataSource = {
     id: "g1",
@@ -358,6 +362,8 @@ test("feed tabs list wifi sources but hide gps sources (gps provides location, n
     status: "running",
     config: {},
     last_error: null,
+    desired_state: 'running',
+    last_ok_at: null,
   };
   const fetchMock = mockRoutes(
     baseRoutes({ "GET /api/data-sources": () => [WIFI_SOURCE, GPS_SOURCE] }),
