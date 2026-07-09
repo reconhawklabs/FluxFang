@@ -193,6 +193,11 @@ async fn start_data_source(
     if DataSourceRepo::get(&state.pool, id).await?.is_none() {
         return Err(ApiError::NotFound);
     }
+    // Record the user's intent before touching the supervisor -- see Task 7:
+    // `desired_state` is what `CaptureSupervisor::resume_running` keys off
+    // after a restart, so it must be persisted regardless of whether the
+    // capture attempt below actually succeeds.
+    DataSourceRepo::set_desired_state(&state.pool, id, "running").await?;
     // Errors are reflected in the row's own status/last_error -- see module
     // docs -- not propagated as an HTTP error.
     let _ = state.capture.start(id).await;
@@ -209,6 +214,8 @@ async fn stop_data_source(
     if DataSourceRepo::get(&state.pool, id).await?.is_none() {
         return Err(ApiError::NotFound);
     }
+    // Same reasoning as start_data_source: record intent first.
+    DataSourceRepo::set_desired_state(&state.pool, id, "stopped").await?;
     let _ = state.capture.stop(id).await;
     let current = DataSourceRepo::get(&state.pool, id)
         .await?

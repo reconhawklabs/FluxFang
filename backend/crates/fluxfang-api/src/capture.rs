@@ -793,20 +793,28 @@ impl CaptureSupervisor {
         Ok(())
     }
 
-    /// Reconcile persisted `status = 'running'` rows with this freshly-built
-    /// supervisor's (empty) in-memory running set by actually (re)starting
-    /// capture for each. Call once at process startup: a data source's
-    /// `status` survives a restart in Postgres, but the running capturers and
-    /// the shared survey session do not — so without this, a source that was
-    /// running when the process last stopped comes back as a phantom
-    /// "running" that captures nothing (GPS never acquires, wifi ingests
-    /// nothing), and whose Stop button, with no in-memory handle to remove,
-    /// would silently no-op (now also handled defensively in [`Self::stop`]).
+    /// Reconcile persisted `desired_state = 'running'` rows with this
+    /// freshly-built supervisor's (empty) in-memory running set by actually
+    /// (re)starting capture for each. Call once at process startup: a data
+    /// source's `desired_state` — the user's recorded intent, set by
+    /// `data_sources::start_data_source`/`stop_data_source` via
+    /// `DataSourceRepo::set_desired_state` — survives a restart in Postgres,
+    /// but the running capturers and the shared survey session do not — so
+    /// without this, a source the user wanted running comes back as a
+    /// phantom "running" `status` that captures nothing (GPS never acquires,
+    /// wifi ingests nothing), and whose Stop button, with no in-memory
+    /// handle to remove, would silently no-op (now also handled defensively
+    /// in [`Self::stop`]).
     ///
-    /// GPS sources are resumed before wifi sources purely so the location
-    /// source claims the single "one location source at a time" slot first;
-    /// the session itself is now GPS-agnostic and opened by whichever source
-    /// starts first.
+    /// Keying off `desired_state` rather than `status` also means a source
+    /// left in `'error'` after a crash (its device died mid-run, per
+    /// [`Self::handle_source_failed`]) still comes back on the next restart,
+    /// since the user's intent to have it running never changed.
+    ///
+    /// No kind ordering: the shared session is GPS-agnostic (see
+    /// [`Self::ensure_session`]) and opened by whichever source starts
+    /// first, so sources are resumed in whatever order
+    /// `DataSourceRepo::list` returns them.
     ///
     /// Best-effort per source and never fatal: a source whose hardware isn't
     /// available at boot is flipped to `error`/`last_error` by [`Self::start`]
@@ -823,12 +831,11 @@ impl CaptureSupervisor {
             }
         };
 
-        let mut to_resume: Vec<DataSource> = sources
+        let to_resume: Vec<DataSource> = sources
             .into_iter()
-            .filter(|source| source.status == "running")
+            .filter(|source| source.desired_state == "running")
             .collect();
-        // gps (0) before wifi (1) — see the doc comment above.
-        to_resume.sort_by_key(|source| if source.kind == "gps" { 0 } else { 1 });
+        // No kind ordering: the session is GPS-agnostic now.
 
         for source in to_resume {
             if let Err(err) = self.start(source.id).await {

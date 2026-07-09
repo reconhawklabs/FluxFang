@@ -146,6 +146,55 @@ async fn wifi_data_source_start_flows_mock_emission_through_ingest_then_stop() {
     assert_eq!(stopped["status"], "stopped", "body: {stopped}");
 }
 
+/// Task 7: `start`/`stop` record the user's *intent* in `desired_state`
+/// (independent of the actual `status` the supervisor drives), which
+/// `resume_running` keys off after a restart. A fresh data source starts
+/// with `desired_state = 'stopped'`; hitting `/start` flips it to
+/// `'running'` and `/stop` flips it back to `'stopped'` -- asserted both via
+/// the HTTP response body and directly against the DB row, so this would
+/// fail if the handlers only updated `status` and forgot `desired_state`.
+#[tokio::test]
+async fn start_and_stop_record_desired_state() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    let resp = post_json_with_cookie(
+        &app,
+        "/api/data-sources",
+        r#"{"kind":"wifi","mode":"monitor","interface":"wlan0","config":{}}"#,
+        &cookie,
+    )
+    .await;
+    assert_status(&resp, StatusCode::CREATED);
+    let created = body_json(resp).await;
+    assert_eq!(created["desired_state"], "stopped", "body: {created}");
+    let id = created["id"].as_str().unwrap().to_string();
+    let data_source_id: uuid::Uuid = id.parse().unwrap();
+
+    // Start: desired_state flips to running immediately (before the
+    // supervisor even finishes attempting the capture).
+    let resp = post_with_cookie(&app, &format!("/api/data-sources/{id}/start"), &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let started = body_json(resp).await;
+    assert_eq!(started["desired_state"], "running", "body: {started}");
+    let row = DataSourceRepo::get(&pool, data_source_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.desired_state, "running");
+
+    // Stop: desired_state flips back to stopped.
+    let resp = post_with_cookie(&app, &format!("/api/data-sources/{id}/stop"), &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let stopped = body_json(resp).await;
+    assert_eq!(stopped["desired_state"], "stopped", "body: {stopped}");
+    let row = DataSourceRepo::get(&pool, data_source_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.desired_state, "stopped");
+}
+
 /// (a2) Task 6: starting a `bluetooth`/`scan` data source through the same
 /// `CaptureSupervisor`/mock-factory path routes its `BuiltCapture::Bluetooth`
 /// through `start_wifi` (the generic capturer + inert-gps-session path) —
@@ -832,13 +881,18 @@ async fn resume_running_restarts_a_wifi_source_after_restart() {
     let pool = fresh_pool_shared().await;
 
     // Model a wifi source that was capturing when the previous process died:
-    // present in the DB and marked running, but with no live supervisor.
+    // present in the DB, marked running with desired_state = 'running' (Task
+    // 7: resume_running keys off desired_state, not status), but with no
+    // live supervisor.
     let created = DataSourceRepo::insert(&pool, NewDataSource::wifi_monitor("wlan0"))
         .await
         .expect("insert data source");
     DataSourceRepo::set_status(&pool, created.id, "running", None)
         .await
         .expect("mark running");
+    DataSourceRepo::set_desired_state(&pool, created.id, "running")
+        .await
+        .expect("mark desired_state running");
 
     // A fresh supervisor (empty in-memory set) on the same DB == a restart.
     let factory = Arc::new(MockCapturerFactory::with_wifi_observations(vec![wifi_obs(
@@ -876,19 +930,32 @@ async fn resume_running_restarts_a_wifi_source_after_restart() {
     assert_eq!(row.status, "running");
 }
 
-/// `resume_running` resumes GPS before wifi so the shared survey session is
-/// opened gps-backed. With both a gps and a wifi source left "running", the
-/// gps source must end up `running`, not `error` — the deterministic proof of
-/// ordering: `ensure_gps_session` only succeeds (→ `running`) when the gps
-/// source opens the session itself, which requires it to run *before* any
-/// wifi source opens an `InertGps` session. Resume the other way round and the
-/// gps start is rejected, leaving it `error`. `resume_running().await` commits
-/// both statuses before returning, so no polling (and no unbounded mock-gps
-/// loop) is needed.
+/// Task 7 drops `resume_running`'s old gps-before-wifi sort (the shared
+/// session is GPS-agnostic now, so no ordering is needed to claim it). This
+/// is the regression guard for that: a wifi source is created (and thus
+/// listed) *before* a gps source, both left with `desired_state = 'running'`
+/// as if a restart happened mid-capture, and both must still come up
+/// `running` in that wifi-first order — proving the removed sort was never
+/// load-bearing for correctness. `resume_running().await` commits both
+/// statuses before returning, so no polling (and no unbounded mock-gps loop)
+/// is needed.
 #[tokio::test]
-async fn resume_running_brings_up_gps_before_wifi() {
+async fn resume_running_resumes_gps_and_wifi_regardless_of_list_order() {
     let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
     let pool = fresh_pool_shared().await;
+
+    // wifi inserted (and thus listed by `DataSourceRepo::list`'s
+    // `ORDER BY created_at`) first -- the order the old sort would have
+    // reversed.
+    let wifi = DataSourceRepo::insert(&pool, NewDataSource::wifi_monitor("wlan0"))
+        .await
+        .unwrap();
+    DataSourceRepo::set_status(&pool, wifi.id, "running", None)
+        .await
+        .unwrap();
+    DataSourceRepo::set_desired_state(&pool, wifi.id, "running")
+        .await
+        .unwrap();
 
     let gps_src = NewDataSource {
         config: json!({"host": "127.0.0.1", "port": 2947}),
@@ -898,11 +965,7 @@ async fn resume_running_brings_up_gps_before_wifi() {
     DataSourceRepo::set_status(&pool, gps.id, "running", None)
         .await
         .unwrap();
-
-    let wifi = DataSourceRepo::insert(&pool, NewDataSource::wifi_monitor("wlan0"))
-        .await
-        .unwrap();
-    DataSourceRepo::set_status(&pool, wifi.id, "running", None)
+    DataSourceRepo::set_desired_state(&pool, gps.id, "running")
         .await
         .unwrap();
 
@@ -926,8 +989,7 @@ async fn resume_running_brings_up_gps_before_wifi() {
             .unwrap()
             .status,
         "running",
-        "gps must be resumed before wifi so it opens the gps-backed session \
-         (a wifi-first resume would reject the gps start, leaving it 'error')"
+        "gps must resume successfully even when listed after a wifi source"
     );
     assert_eq!(
         DataSourceRepo::get(&pool, wifi.id)
