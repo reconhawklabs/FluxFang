@@ -229,6 +229,9 @@ pub async fn ingest(
         observed_at: obs.observed_at,
         signal_strength: obs.signal_strength,
         location,
+        // TEMPORARY: presence-based tagging until Task 5 wires up the real
+        // `classify` logic (freshness-gated `LocationProvider`, Task 2).
+        location_quality: if location.is_some() { "fresh" } else { "none" }.to_string(),
         kind: obs.kind,
         payload: obs.payload,
     };

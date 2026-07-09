@@ -70,7 +70,7 @@ pub struct EmissionRepo;
 /// Column list shared by every query that produces an [`Emission`] — see
 /// the module docs on why `location` is never selected directly.
 const EMISSION_COLUMNS: &str = "id, created_at, data_source_id, emitter_id, session_id, \
-     observed_at, signal_strength, kind, payload, \
+     observed_at, signal_strength, kind, payload, location_quality, \
      ST_X(location::geometry) AS lon, ST_Y(location::geometry) AS lat";
 
 /// Allow-listed sort keys for the emissions list -> SQL ordering expressions.
@@ -358,13 +358,13 @@ impl EmissionRepo {
         let sql = format!(
             "INSERT INTO emission \
                  (data_source_id, emitter_id, session_id, observed_at, signal_strength, \
-                  location, kind, payload) \
+                  location, kind, payload, location_quality) \
              VALUES \
                  ($1, $2, $3, $4, $5, \
                   CASE WHEN $6::double precision IS NULL THEN NULL \
                        ELSE ST_SetSRID(ST_MakePoint($6::double precision, $7::double precision), 4326)::geography \
                   END, \
-                  $8, $9) \
+                  $8, $9, $10) \
              RETURNING {EMISSION_COLUMNS}"
         );
 
@@ -378,6 +378,7 @@ impl EmissionRepo {
             .bind(lat)
             .bind(new.kind)
             .bind(new.payload)
+            .bind(new.location_quality)
             .fetch_one(pool)
             .await
     }

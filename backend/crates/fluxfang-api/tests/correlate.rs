@@ -86,6 +86,7 @@ async fn insert_tpms(
             observed_at: at,
             signal_strength: Some(-40),
             location: Some((lon, lat)),
+            location_quality: "fresh".to_string(),
             kind: "tpms".to_string(),
             payload: json!({"id": "x", "type": "TPMS"}),
         },

@@ -111,6 +111,27 @@ async fn get_returns_none_for_unknown_id() {
 }
 
 #[tokio::test]
+async fn insert_persists_location_quality() {
+    let pool = fresh_pool().await;
+    let session = seed_session(&pool).await;
+
+    let new = NewEmission {
+        data_source_id: None,
+        emitter_id: None,
+        session_id: session,
+        observed_at: Utc::now(),
+        signal_strength: None,
+        location: None,
+        location_quality: "stale".to_string(),
+        kind: "wifi".to_string(),
+        payload: serde_json::json!({}),
+    };
+    let e = EmissionRepo::insert(&pool, new).await.unwrap();
+    assert_eq!(e.location_quality, "stale");
+    assert!(e.lon.is_none());
+}
+
+#[tokio::test]
 async fn insert_with_location_roundtrips_lon_lat() {
     let pool = fresh_pool().await;
     let ds = seed_wifi_source(&pool).await;

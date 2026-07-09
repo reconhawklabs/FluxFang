@@ -156,6 +156,7 @@ mod tests {
             signal_strength: None,
             kind: "wifi".to_string(),
             payload: serde_json::json!({}),
+            location_quality: "none".to_string(),
             lon: None,
             lat: None,
         }

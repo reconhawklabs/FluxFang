@@ -64,7 +64,10 @@ impl DataSourceRepo {
 
     /// Transition a data source's runtime `status` (e.g. on start/stop/
     /// error from the capture supervisor). `last_error` is cleared to NULL
-    /// when not provided.
+    /// when not provided. A transition to `'running'` also stamps
+    /// `last_ok_at = now()`, recording the last time the source was
+    /// confirmed healthy (see migration
+    /// `0009_location_quality_and_datasource_health.sql`).
     pub async fn set_status(
         pool: &PgPool,
         id: Uuid,
@@ -72,11 +75,31 @@ impl DataSourceRepo {
         last_error: Option<&str>,
     ) -> Result<DataSource, sqlx::Error> {
         sqlx::query_as::<_, DataSource>(
-            "UPDATE data_source SET status = $2, last_error = $3 WHERE id = $1 RETURNING *",
+            "UPDATE data_source \
+                SET status = $2, last_error = $3, \
+                    last_ok_at = CASE WHEN $2 = 'running' THEN now() ELSE last_ok_at END \
+                WHERE id = $1 RETURNING *",
         )
         .bind(id)
         .bind(status)
         .bind(last_error)
+        .fetch_one(pool)
+        .await
+    }
+
+    /// Record the user's *intent* for a source (`'running'` | `'stopped'`),
+    /// independent of its actual `status`. The reconciler drives `status`
+    /// toward this and retries while it is `'running'`.
+    pub async fn set_desired_state(
+        pool: &PgPool,
+        id: Uuid,
+        desired: &str,
+    ) -> Result<DataSource, sqlx::Error> {
+        sqlx::query_as::<_, DataSource>(
+            "UPDATE data_source SET desired_state = $2 WHERE id = $1 RETURNING *",
+        )
+        .bind(id)
+        .bind(desired)
         .fetch_one(pool)
         .await
     }

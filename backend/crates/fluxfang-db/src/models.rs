@@ -47,6 +47,8 @@ pub struct DataSource {
     pub status: String,
     pub config: serde_json::Value,
     pub last_error: Option<String>,
+    pub desired_state: String,
+    pub last_ok_at: Option<DateTime<Utc>>,
 }
 
 /// Fields required to create a new `data_source`. `status` is intentionally
@@ -161,6 +163,9 @@ pub struct Emission {
     pub signal_strength: Option<i32>,
     pub kind: String,
     pub payload: serde_json::Value,
+    /// Why `location` is what it is: `"fresh"` | `"stale"` | `"none"` (see
+    /// migration `0009_location_quality_and_datasource_health.sql`).
+    pub location_quality: String,
     /// Longitude, decoded from `ST_X(location::geometry)`. `None` when
     /// `location` is NULL.
     pub lon: Option<f64>,
@@ -182,6 +187,8 @@ pub struct NewEmission {
     pub signal_strength: Option<i32>,
     /// `(lon, lat)`. `None` when the emission wasn't geo-located.
     pub location: Option<(f64, f64)>,
+    /// Why `location` is what it is: `"fresh"` | `"stale"` | `"none"`.
+    pub location_quality: String,
     pub kind: String,
     pub payload: serde_json::Value,
 }
@@ -198,6 +205,7 @@ impl NewEmission {
             observed_at: Utc::now(),
             signal_strength: None,
             location: None,
+            location_quality: "none".to_string(),
             kind: "wifi".to_string(),
             payload,
         }
