@@ -86,7 +86,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex, RwLock};
 use std::time::Duration;
 
-use fluxfang_capture::{GpsFix, GpsSource};
+use fluxfang_capture::{GpsFix, LocationSource};
 use fluxfang_db::models::NewLocationFix;
 use fluxfang_db::{LocationRepo, SessionRepo};
 use sqlx::PgPool;
@@ -129,7 +129,7 @@ impl Default for SessionManagerConfig {
     }
 }
 
-/// Opens/bounds a `survey_session` and logs a `GpsSource`'s fixes into
+/// Opens/bounds a `survey_session` and logs a `LocationSource`'s fixes into
 /// `location_fix` for as long as it stays active. See module docs for the
 /// full design.
 pub struct SessionManager {
@@ -160,7 +160,7 @@ impl SessionManager {
         hook: HostZoneHook,
     ) -> Result<Self, sqlx::Error>
     where
-        G: GpsSource + Send + 'static,
+        G: LocationSource + Send + 'static,
     {
         SessionRepo::close_active(&pool).await?;
         let session = SessionRepo::open(&pool).await?;
@@ -250,7 +250,7 @@ impl SessionManager {
 /// every fix (subject to `write_interval` throttling) and updating
 /// `latest_fix`, until the source is exhausted or the gap elapses — then
 /// closes the session and returns.
-async fn run_ingest_loop<G: GpsSource>(
+async fn run_ingest_loop<G: LocationSource>(
     pool: PgPool,
     session_id: Uuid,
     mut gps: G,
@@ -333,7 +333,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::mpsc;
 
-    /// A `GpsSource` backed by a channel, letting tests control exactly
+    /// A `LocationSource` backed by a channel, letting tests control exactly
     /// when (and whether) fixes arrive -- unlike `MockGps`, which yields
     /// its whole track instantly with no real await/timing behavior.
     /// Needed to exercise the inactivity-gap path in isolation from
@@ -343,7 +343,7 @@ mod tests {
     struct ChannelGps(mpsc::UnboundedReceiver<GpsFix>);
 
     #[async_trait]
-    impl GpsSource for ChannelGps {
+    impl LocationSource for ChannelGps {
         async fn next_fix(&mut self) -> Option<GpsFix> {
             self.0.recv().await
         }

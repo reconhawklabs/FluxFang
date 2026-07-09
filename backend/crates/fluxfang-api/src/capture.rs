@@ -6,7 +6,7 @@
 //!
 //! - [`CapturerFactory`] is the seam between this module and real hardware:
 //!   given a `data_source` row it builds either a `fluxfang_capture::Capturer`
-//!   (wifi) or a `fluxfang_capture::GpsSource` (gps). [`RealCapturerFactory`]
+//!   (wifi) or a `fluxfang_capture::LocationSource` (gps). [`RealCapturerFactory`]
 //!   builds the genuine hardware-touching types
 //!   (`WifiMonitorCapturer`/`GpsdSource`/`SerialGpsSource`); [`MockCapturerFactory`]
 //!   builds `fluxfang_capture::mock::{MockCapturer, MockGps}` instead, so
@@ -26,11 +26,11 @@
 //! `Mutex<Option<SharedSession>>`:
 //!
 //! - If a **gps** source starts and no session is open, it opens a fresh
-//!   `SessionManager` fed by that gps source's real `GpsSource` — exactly
+//!   `SessionManager` fed by that gps source's real `LocationSource` — exactly
 //!   Task 5.1's intended wiring, with the [`host_zone_hook`] closing the
 //!   loop back to Task 5.4's `zones::update_host_zones`.
 //! - If a **wifi** source starts and no session is open, it opens a
-//!   `SessionManager` fed by [`InertGps`] — a `GpsSource` that never yields
+//!   `SessionManager` fed by [`InertGps`] — a `LocationSource` that never yields
 //!   a fix and never exhausts — with [`WIFI_ONLY_SESSION_GAP`] (a
 //!   multi-decade "gap") in place of the real 5-minute default, so the
 //!   *absence* of any GPS hardware doesn't auto-close the session; only an
@@ -55,7 +55,7 @@
 //! `stopped`, but `location_fix` rows keep being written (using the same
 //! physical gps hardware) until every other running source also stops.
 //! Fixing this properly would need decoupling "the session's bookkeeping"
-//! from "which `GpsSource` feeds it" (e.g. a hot-swappable or multi-source
+//! from "which `LocationSource` feeds it" (e.g. a hot-swappable or multi-source
 //! `SessionManager`) — out of scope (YAGNI) for this slice, which only
 //! requires the two TDD scenarios (wifi-only, gps-only) to work correctly.
 //!
@@ -82,7 +82,7 @@ use fluxfang_capture::gps::ALLOWED_BAUD_RATES;
 use fluxfang_capture::mock::{MockCapturer, MockGps};
 use fluxfang_capture::wifi::monitor::WifiMonitorCapturer;
 use fluxfang_capture::wifi::scan::WifiScanCapturer;
-use fluxfang_capture::{Capturer, GpsFix, GpsSource, RawObservation};
+use fluxfang_capture::{Capturer, GpsFix, LocationSource, RawObservation};
 use fluxfang_db::models::DataSource;
 use fluxfang_db::DataSourceRepo;
 use serde_json::Value;
@@ -104,7 +104,7 @@ const WIFI_ONLY_SESSION_GAP: Duration = Duration::from_secs(60 * 60 * 24 * 365 *
 /// `kind`.
 pub enum BuiltCapture {
     Wifi(Box<dyn Capturer>),
-    Gps(Box<dyn GpsSource + Send>),
+    Gps(Box<dyn LocationSource + Send>),
     Bluetooth(Box<dyn Capturer>),
 }
 
@@ -376,29 +376,29 @@ impl CapturerFactory for MockCapturerFactory {
     }
 }
 
-/// A `GpsSource` that never yields a fix and never exhausts — used to back
+/// A `LocationSource` that never yields a fix and never exhausts — used to back
 /// a wifi-only session's `SessionManager` (see module docs). Paired with
 /// [`WIFI_ONLY_SESSION_GAP`] so the loop's `select!` never actually races a
 /// completed `next_fix()` against the gap timer in practice.
 struct InertGps;
 
 #[async_trait]
-impl GpsSource for InertGps {
+impl LocationSource for InertGps {
     async fn next_fix(&mut self) -> Option<GpsFix> {
         std::future::pending().await
     }
 }
 
-/// Adapts an owned `Box<dyn GpsSource + Send>` back into a plain
-/// `GpsSource` impl, since `SessionManager::open<G: GpsSource + Send +
+/// Adapts an owned `Box<dyn LocationSource + Send>` back into a plain
+/// `LocationSource` impl, since `SessionManager::open<G: LocationSource + Send +
 /// 'static>` needs a concrete-enough `G` to be generic over, not a bare
-/// trait object (there's no blanket `impl GpsSource for Box<dyn GpsSource +
+/// trait object (there's no blanket `impl LocationSource for Box<dyn LocationSource +
 /// Send>` in `fluxfang_capture`, which otherwise has no reason to know
 /// about boxed trait objects at all).
-struct BoxedGps(Box<dyn GpsSource + Send>);
+struct BoxedGps(Box<dyn LocationSource + Send>);
 
 #[async_trait]
-impl GpsSource for BoxedGps {
+impl LocationSource for BoxedGps {
     async fn next_fix(&mut self) -> Option<GpsFix> {
         self.0.next_fix().await
     }
@@ -527,7 +527,7 @@ enum RunningHandle {
         capturer: Box<dyn Capturer>,
         reader: JoinHandle<()>,
     },
-    /// A running gps source has nothing of its own to stop: its `GpsSource`
+    /// A running gps source has nothing of its own to stop: its `LocationSource`
     /// was consumed by the shared `SessionManager` when the session opened
     /// (or, per the module docs' known limitation, wasn't wired in at all
     /// if a session was already open). Its presence in the running map is
@@ -536,7 +536,7 @@ enum RunningHandle {
 }
 
 /// Whether the currently-open session (if any) is backed by a real
-/// `GpsSource` (opened for a gps-kind start) or [`InertGps`] (opened for a
+/// `LocationSource` (opened for a gps-kind start) or [`InertGps`] (opened for a
 /// wifi-kind start with no gps running yet). See module docs.
 struct SharedSession {
     manager: Arc<SessionManager>,
@@ -701,13 +701,13 @@ impl CaptureSupervisor {
     /// Rejects starting a gps source if a session is *already* open,
     /// whether backed by another real gps source (concurrent gps sources
     /// aren't supported — a `SessionManager` can only be fed by one
-    /// `GpsSource`) or by [`InertGps`] (an already-running wifi-only
+    /// `LocationSource`) or by [`InertGps`] (an already-running wifi-only
     /// session can't be rewired onto a real gps source after the fact
     /// without reopening — and losing the continuity of — the session).
     /// Both are documented, deliberate limitations for this slice (see
     /// module docs); the caller (`start`) surfaces the rejection as this
     /// data source's `status = 'error'` + `last_error`, not a crash.
-    async fn ensure_gps_session(&self, gps: Box<dyn GpsSource + Send>) -> anyhow::Result<()> {
+    async fn ensure_gps_session(&self, gps: Box<dyn LocationSource + Send>) -> anyhow::Result<()> {
         let mut guard = self.session.lock().await;
         if let Some(shared) = guard.as_ref() {
             // Rejected here, `gps` is simply never wired into anything and
@@ -798,7 +798,7 @@ impl CaptureSupervisor {
         Ok(RunningHandle::Wifi { capturer, reader })
     }
 
-    async fn start_gps(&self, gps: Box<dyn GpsSource + Send>) -> anyhow::Result<RunningHandle> {
+    async fn start_gps(&self, gps: Box<dyn LocationSource + Send>) -> anyhow::Result<RunningHandle> {
         // No rollback needed here, unlike `start_wifi`: `ensure_gps_session`
         // only ever sets `self.session` *after* `SessionManager::open`
         // already succeeded, and there is no further fallible step in this

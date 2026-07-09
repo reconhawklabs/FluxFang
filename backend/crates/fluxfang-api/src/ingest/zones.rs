@@ -320,7 +320,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use chrono::TimeZone;
-    use fluxfang_capture::{GpsSource, RawObservation};
+    use fluxfang_capture::{LocationSource, RawObservation};
     use fluxfang_db::models::{
         NewAlertMethod, NewAlertRule, NewDataSource, NewEmitter, NewEntity, NewZone,
     };
@@ -341,7 +341,7 @@ mod tests {
     struct ChannelGps(mpsc::UnboundedReceiver<GpsFix>);
 
     #[async_trait]
-    impl GpsSource for ChannelGps {
+    impl LocationSource for ChannelGps {
         async fn next_fix(&mut self) -> Option<GpsFix> {
             self.0.recv().await
         }

@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::{Capturer, GpsFix, GpsSource, RawObservation};
+use crate::{Capturer, GpsFix, LocationSource, RawObservation};
 
 /// Replays a fixed, caller-supplied set of [`RawObservation`]s to the
 /// channel at a fixed cadence.
@@ -184,7 +184,7 @@ impl MockGps {
 }
 
 #[async_trait]
-impl GpsSource for MockGps {
+impl LocationSource for MockGps {
     async fn next_fix(&mut self) -> Option<GpsFix> {
         if self.index >= self.fixes.len() {
             if self.loop_playback && !self.fixes.is_empty() {

@@ -19,7 +19,7 @@ use chrono::Utc;
 use tokio::sync::mpsc;
 
 use super::nmea::parse_nmea;
-use crate::{GpsFix, GpsSource};
+use crate::{GpsFix, LocationSource};
 
 /// Baud rates this source accepts. Anything else is rejected by
 /// [`SerialGpsSource::open`] before touching the device, rather than
@@ -44,7 +44,7 @@ const READ_TIMEOUT: Duration = Duration::from_millis(500);
 /// tokio task - `serialport`'s blocking read is not async-aware) that loops:
 /// blocking-read a line, run [`parse_nmea`] against it (stamped with
 /// `Utc::now().date_naive()` - see below), and on a successful parse, push
-/// the resulting [`GpsFix`] onto an internal channel. [`GpsSource::next_fix`]
+/// the resulting [`GpsFix`] onto an internal channel. [`LocationSource::next_fix`]
 /// just awaits that channel.
 ///
 /// ## Where the clock is read
@@ -119,7 +119,7 @@ impl SerialGpsSource {
 }
 
 #[async_trait]
-impl GpsSource for SerialGpsSource {
+impl LocationSource for SerialGpsSource {
     async fn next_fix(&mut self) -> Option<GpsFix> {
         self.rx.recv().await
     }

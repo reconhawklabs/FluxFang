@@ -17,7 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::OwnedReadHalf;
 use tokio::net::TcpStream;
 
-use crate::{GpsFix, GpsSource};
+use crate::{GpsFix, LocationSource};
 
 /// gpsd's `?WATCH=...;` command, sent once on connect to ask the daemon to
 /// start streaming JSON reports (rather than requiring a client to poll).
@@ -62,7 +62,7 @@ impl GpsdSource {
 }
 
 #[async_trait]
-impl GpsSource for GpsdSource {
+impl LocationSource for GpsdSource {
     async fn next_fix(&mut self) -> Option<GpsFix> {
         loop {
             let mut line = String::new();

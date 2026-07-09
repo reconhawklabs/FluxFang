@@ -70,11 +70,11 @@ pub struct GpsFix {
     pub quality: i32,
 }
 
-/// A source of GPS fixes, yielded one at a time.
+/// A source of location fixes, yielded one at a time.
 ///
 /// Returns `None` once the source is exhausted (e.g. hardware disconnected,
 /// or a mock track has finished and isn't set to loop).
 #[async_trait]
-pub trait GpsSource: Send {
+pub trait LocationSource: Send {
     async fn next_fix(&mut self) -> Option<GpsFix>;
 }

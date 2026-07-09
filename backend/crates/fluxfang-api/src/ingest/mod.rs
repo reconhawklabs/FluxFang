@@ -448,14 +448,14 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{Duration as ChronoDuration, TimeZone, Utc};
     use fluxfang_capture::mock::MockGps;
-    use fluxfang_capture::{GpsFix, GpsSource};
+    use fluxfang_capture::{GpsFix, LocationSource};
     use fluxfang_db::models::{NewDataSource, NewEmitter};
     use fluxfang_db::DataSourceRepo;
     use session::{no_op_hook, SessionManagerConfig};
     use std::time::Duration;
     use tokio::sync::mpsc;
 
-    /// A `GpsSource` backed by a channel, letting tests control exactly
+    /// A `LocationSource` backed by a channel, letting tests control exactly
     /// when a fix arrives without racing the source's own exhaustion (a
     /// finite `MockGps` track would close the session as soon as it drains,
     /// which every test here needs to stay open through). Duplicated from
@@ -464,7 +464,7 @@ mod tests {
     struct ChannelGps(mpsc::UnboundedReceiver<GpsFix>);
 
     #[async_trait]
-    impl GpsSource for ChannelGps {
+    impl LocationSource for ChannelGps {
         async fn next_fix(&mut self) -> Option<GpsFix> {
             self.0.recv().await
         }
