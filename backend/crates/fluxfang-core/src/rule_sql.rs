@@ -161,7 +161,7 @@ pub fn conditions_to_sql(
     mode: MatchMode,
     next_bind: usize,
 ) -> (String, Vec<Value>) {
-    build(conds, mode, next_bind, None)
+    build(conds, mode, next_bind, None, "payload")
 }
 
 /// Like [`conditions_to_sql`], but additionally validates each
@@ -177,6 +177,29 @@ pub fn conditions_to_sql_checked(
     next_bind: usize,
     catalog: &[FieldDef],
 ) -> Result<(String, Vec<Value>), RuleSqlError> {
+    validate_conditions(conds, catalog)?;
+    Ok(build(conds, mode, next_bind, Some(catalog), "payload"))
+}
+
+/// Like [`conditions_to_sql_checked`] but targets an explicit JSONB base
+/// column (`"payload"` or `"attributes"`). `base_column` is an internal
+/// constant, never user input.
+pub fn conditions_to_sql_checked_on(
+    conds: &[Condition],
+    mode: MatchMode,
+    next_bind: usize,
+    catalog: &[FieldDef],
+    base_column: &str,
+) -> Result<(String, Vec<Value>), RuleSqlError> {
+    validate_conditions(conds, catalog)?;
+    Ok(build(conds, mode, next_bind, Some(catalog), base_column))
+}
+
+/// Shared validation for the `_checked*` variants: every condition's field
+/// must be catalog-known and allow-list-safe, its operator must be valid
+/// for that field, and its value must match the field's declared type.
+/// See [`conditions_to_sql_checked`]'s doc comment for the full rationale.
+fn validate_conditions(conds: &[Condition], catalog: &[FieldDef]) -> Result<(), RuleSqlError> {
     for c in conds {
         // Belt-and-suspenders (Fix 4): require the character allow-list
         // *and* catalog membership, so a hypothetical future catalog
@@ -222,7 +245,7 @@ pub fn conditions_to_sql_checked(
             });
         }
     }
-    Ok(build(conds, mode, next_bind, Some(catalog)))
+    Ok(())
 }
 
 /// Does `value`'s JSON type match what `ty` expects a `condition.value` (or
@@ -248,6 +271,7 @@ fn build(
     mode: MatchMode,
     next_bind: usize,
     catalog: Option<&[FieldDef]>,
+    base_column: &str,
 ) -> (String, Vec<Value>) {
     if conds.is_empty() {
         // Mirrors `eval`'s vacuous-truth semantics: an empty `All` has
@@ -278,7 +302,7 @@ fn build(
             continue;
         }
 
-        let (clause, mut condition_binds) = condition_clause(c, &mut bind_idx);
+        let (clause, mut condition_binds) = condition_clause(c, &mut bind_idx, base_column);
         clauses.push(clause);
         binds.append(&mut condition_binds);
     }
@@ -305,8 +329,12 @@ fn is_safe_field_name(field: &str) -> bool {
 /// Build the SQL clause + binds for a single condition. `bind_idx` is the
 /// next positional-parameter index to hand out; it is advanced by however
 /// many params this condition consumes.
-fn condition_clause(condition: &Condition, bind_idx: &mut usize) -> (String, Vec<Value>) {
-    let path = format!("payload->>'{}'", condition.field);
+fn condition_clause(
+    condition: &Condition,
+    bind_idx: &mut usize,
+    base_column: &str,
+) -> (String, Vec<Value>) {
+    let path = format!("{base_column}->>'{}'", condition.field);
 
     match condition.op {
         Op::Eq => {
@@ -826,5 +854,45 @@ mod tests {
         // numerically in SQL as `eval`'s `f64` comparison does.
         assert_eq!(binds[1], json!("6"));
         assert!(sql.contains("(payload->>'channel')::numeric >= $2::numeric"));
+    }
+
+    #[test]
+    fn checked_on_targets_the_given_base_column() {
+        let conds = vec![Condition {
+            field: "security".into(),
+            op: Op::Matches,
+            value: json!("WPA2"),
+        }];
+        let catalog = crate::catalog::emitter_attribute_catalog("wifi_access_point");
+        let (sql, binds) =
+            conditions_to_sql_checked_on(&conds, MatchMode::All, 1, &catalog, "attributes")
+                .unwrap();
+        assert_eq!(sql, "(attributes->>'security' ~ $1)");
+        assert_eq!(binds, vec![json!("WPA2")]);
+    }
+
+    #[test]
+    fn checked_on_still_validates_fields_and_types() {
+        let catalog = crate::catalog::emitter_attribute_catalog("bluetooth_device");
+        // Unknown field for this emitter type.
+        let bad = vec![Condition {
+            field: "ssid".into(),
+            op: Op::Eq,
+            value: json!("x"),
+        }];
+        assert!(matches!(
+            conditions_to_sql_checked_on(&bad, MatchMode::All, 1, &catalog, "attributes"),
+            Err(RuleSqlError::UnknownField(_))
+        ));
+        // company_id is Number: a string value is rejected.
+        let mistyped = vec![Condition {
+            field: "company_id".into(),
+            op: Op::Eq,
+            value: json!("76"),
+        }];
+        assert!(matches!(
+            conditions_to_sql_checked_on(&mistyped, MatchMode::All, 1, &catalog, "attributes"),
+            Err(RuleSqlError::InvalidValueType { .. })
+        ));
     }
 }
