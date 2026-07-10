@@ -50,7 +50,11 @@ const EMITTER: Emitter = {
     match: "all",
     conditions: [{ field: "bssid", op: "eq", value: "aa:bb:cc:dd:ee:ff" }],
   },
-  attributes: { bssid: "aa:bb:cc:dd:ee:ff", ssid: "KitchenNet" },
+  attributes: {
+    bssid: "aa:bb:cc:dd:ee:ff",
+    ssid: "KitchenNet",
+    security_label: "WPA2-PSK (CCMP)",
+  },
   first_seen_at: "2026-07-06T00:00:00Z",
   last_seen_at: "2026-07-06T01:00:00Z",
 } as unknown as Emitter;
@@ -178,10 +182,12 @@ test("renders the emitter's name, identity and last-known coords", async () => {
   ).toBeInTheDocument();
   const summary = screen.getByText("Identity").closest("dl");
   expect(summary).not.toBeNull();
-  expect(
-    within(summary as HTMLElement).getByText("aa:bb:cc:dd:ee:ff"),
-  ).toBeInTheDocument();
+  const withinSummary = within(summary as HTMLElement);
+  expect(withinSummary.getByText("aa:bb:cc:dd:ee:ff")).toBeInTheDocument();
   expect(screen.getByText(/39\.5/)).toBeInTheDocument(); // last-known lat
+  // AP security label surfaces as its own summary row.
+  expect(withinSummary.getByText("Security")).toBeInTheDocument();
+  expect(withinSummary.getByText("WPA2-PSK (CCMP)")).toBeInTheDocument();
 });
 
 test("shows not-found on a 404", async () => {

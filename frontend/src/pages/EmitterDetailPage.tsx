@@ -352,6 +352,14 @@ export default function EmitterDetailPage() {
             </dd>
           </>
         )}
+        {attributeText(emitter.attributes, "security_label") && (
+          <>
+            <dt className="text-slate-500">Security</dt>
+            <dd className="text-slate-300">
+              {attributeText(emitter.attributes, "security_label")}
+            </dd>
+          </>
+        )}
         <dt className="text-slate-500">First seen</dt>
         <dd className="text-slate-300">
           {formatTimestamp(emitter.first_seen_at)}
