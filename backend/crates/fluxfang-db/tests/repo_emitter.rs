@@ -725,6 +725,100 @@ async fn merge_client_attributes_merges_on_client_and_noops_on_other_types() {
 }
 
 // ---------------------------------------------------------------------
+// Task 5: EmitterRepo::merge_ap_attributes — conditional, wifi_access_point-
+// guarded merge that only writes when security_label changed (backfill +
+// reconfig, no per-beacon churn).
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn merge_ap_attributes_is_conditional_on_label_change() {
+    let pool = fresh_pool().await;
+    // Create a wifi_access_point emitter with an initial security label.
+    let emitter = EmitterRepo::get_or_create_by_identity(
+        &pool,
+        NewEmitter {
+            name: "AP".into(),
+            type_: Some("WiFi AP".into()),
+            entity_id: None,
+            match_criteria: serde_json::json!({}),
+            emitter_type: Some("wifi_access_point".into()),
+            attributes: serde_json::json!({"security_label": "WPA2-PSK (CCMP)"}),
+            match_enabled: true,
+            identity_key: Some("wifi_access_point:bssid:aa:bb:cc:dd:ee:ff".into()),
+        },
+    )
+    .await
+    .unwrap()
+    .0;
+
+    // Same label -> no write (cipher patch must be ignored).
+    EmitterRepo::merge_ap_attributes(
+        &pool,
+        emitter.id,
+        &serde_json::json!({"cipher": ["SHOULD_NOT_APPEAR"], "security_label": "WPA2-PSK (CCMP)"}),
+        "WPA2-PSK (CCMP)",
+    )
+    .await
+    .unwrap();
+    let after_same = EmitterRepo::get(&pool, emitter.id).await.unwrap().unwrap();
+    assert!(
+        after_same.attributes.get("cipher").is_none(),
+        "unchanged label must skip the write"
+    );
+
+    // Different label -> write applies.
+    EmitterRepo::merge_ap_attributes(
+        &pool,
+        emitter.id,
+        &serde_json::json!({"security_label": "WPA3-SAE (CCMP)", "security": ["WPA3"]}),
+        "WPA3-SAE (CCMP)",
+    )
+    .await
+    .unwrap();
+    let after_diff = EmitterRepo::get(&pool, emitter.id).await.unwrap().unwrap();
+    assert_eq!(after_diff.attributes["security_label"], "WPA3-SAE (CCMP)");
+    assert_eq!(
+        after_diff.attributes["security"],
+        serde_json::json!(["WPA3"])
+    );
+}
+
+#[tokio::test]
+async fn merge_ap_attributes_is_a_noop_for_non_ap_emitter_types() {
+    let pool = fresh_pool().await;
+    let client = EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            name: "WiFi Client".to_string(),
+            type_: None,
+            entity_id: None,
+            match_criteria: serde_json::json!({}),
+            emitter_type: Some("wifi_client".to_string()),
+            attributes: serde_json::json!({"src_mac": "3a:de:ad:be:ef:00"}),
+            match_enabled: true,
+            identity_key: Some("wifi_client:3a:de:ad:be:ef:00".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+
+    EmitterRepo::merge_ap_attributes(
+        &pool,
+        client.id,
+        &serde_json::json!({"security_label": "WPA3-SAE (CCMP)"}),
+        "WPA3-SAE (CCMP)",
+    )
+    .await
+    .unwrap();
+
+    let got = EmitterRepo::get(&pool, client.id).await.unwrap().unwrap();
+    assert!(
+        got.attributes.get("security_label").is_none(),
+        "a wifi_client emitter must be left untouched by merge_ap_attributes"
+    );
+}
+
+// ---------------------------------------------------------------------
 // Phase 1b: create_with_entity's backfill consistency fix (drop the
 // `emitter_id IS NULL` guard so it reassigns ALL matching emissions, same
 // as attach_emissions_matching/count_matching).

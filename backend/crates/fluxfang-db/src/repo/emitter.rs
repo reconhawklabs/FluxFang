@@ -374,6 +374,31 @@ impl EmitterRepo {
         Ok(())
     }
 
+    /// Shallow-merge `patch` into a **wifi_access_point** emitter's
+    /// `attributes`, but only when the stored `security_label` differs from
+    /// `new_label` (or is absent). Backfills existing AP emitters and catches
+    /// reconfigs while staying a no-op for the steady state — so repeated
+    /// identical beacons don't churn the row. Type-guarded in SQL like
+    /// [`Self::merge_client_attributes`].
+    pub async fn merge_ap_attributes(
+        pool: &PgPool,
+        id: Uuid,
+        patch: &serde_json::Value,
+        new_label: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE emitter SET attributes = attributes || $2 \
+             WHERE id = $1 AND emitter_type = 'wifi_access_point' \
+               AND (attributes->>'security_label') IS DISTINCT FROM $3",
+        )
+        .bind(id)
+        .bind(patch)
+        .bind(new_label)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn list(pool: &PgPool) -> Result<Vec<Emitter>, sqlx::Error> {
         let sql = format!("SELECT {EMITTER_COLUMNS} FROM emitter ORDER BY created_at ASC");
         sqlx::query_as::<_, Emitter>(&sql).fetch_all(pool).await

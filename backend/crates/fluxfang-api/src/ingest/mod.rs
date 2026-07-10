@@ -279,6 +279,7 @@ pub async fn ingest(
     // attached to a wifi_client emitter, record the AP it connected to on that
     // emitter (latest-wins). Self-contained, like alerts/zones below.
     maybe_enrich_connected_ap(ctx, &emission).await;
+    maybe_enrich_ap_security(ctx, &emission).await;
 
     alerts::evaluate_alerts(ctx, &emission).await;
     zones::update_target_zones(ctx, &emission).await;
@@ -450,6 +451,51 @@ async fn maybe_enrich_connected_ap(ctx: &IngestCtx, emission: &Emission) {
     let _ = EmitterRepo::merge_client_attributes(&ctx.pool, emitter_id, &patch).await;
 }
 
+/// If `emission` is a beacon carrying parsed AP security and it attached to an
+/// emitter, merge the security fields onto that emitter (conditional on the
+/// `security_label` having changed). [`EmitterRepo::merge_ap_attributes`] is
+/// type-guarded to `wifi_access_point`, so this is a no-op for other emitter
+/// types. Self-contained: a DB error here is swallowed, never failing ingest.
+async fn maybe_enrich_ap_security(ctx: &IngestCtx, emission: &Emission) {
+    let Some(emitter_id) = emission.emitter_id else {
+        return;
+    };
+    if emission
+        .payload
+        .get("frame_type")
+        .and_then(serde_json::Value::as_str)
+        != Some("beacon")
+    {
+        return;
+    }
+    let Some(label) = emission
+        .payload
+        .get("security_label")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return;
+    };
+    let mut patch = serde_json::Map::new();
+    for key in [
+        "security",
+        "auth",
+        "cipher",
+        "transition_mode",
+        "security_label",
+    ] {
+        if let Some(v) = emission.payload.get(key) {
+            patch.insert(key.to_string(), v.clone());
+        }
+    }
+    let _ = EmitterRepo::merge_ap_attributes(
+        &ctx.pool,
+        emitter_id,
+        &serde_json::Value::Object(patch),
+        label,
+    )
+    .await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -542,6 +588,34 @@ mod tests {
                 "ssid": ssid,
                 "frame_type": "beacon",
                 "channel": 6,
+            }),
+        }
+    }
+
+    /// A secured AP beacon observation -- like [`beacon_obs`] but also
+    /// carrying the parsed security fields `fluxfang_core::classify` seeds
+    /// onto a `wifi_access_point` emitter's `attributes` (Task 4) and that
+    /// [`maybe_enrich_ap_security`] (Task 5) merges onto an existing one.
+    fn secured_beacon_obs(
+        bssid: &str,
+        ssid: &str,
+        security_label: &str,
+        observed_at: chrono::DateTime<Utc>,
+    ) -> RawObservation {
+        RawObservation {
+            kind: "wifi".to_string(),
+            observed_at,
+            signal_strength: Some(-55),
+            payload: serde_json::json!({
+                "bssid": bssid,
+                "ssid": ssid,
+                "frame_type": "beacon",
+                "channel": 6,
+                "security": ["WPA2"],
+                "auth": ["PSK"],
+                "cipher": ["CCMP"],
+                "transition_mode": false,
+                "security_label": security_label,
             }),
         }
     }
@@ -961,6 +1035,103 @@ mod tests {
             all.len(),
             1,
             "no duplicate emitter should have been created"
+        );
+    }
+
+    /// Task 5: a secured beacon's auto-created `wifi_access_point` emitter
+    /// carries `attributes.security_label` (seeded by the Task-4 classifier
+    /// on auto-create), and a SECOND beacon for the SAME bssid but with
+    /// DIFFERENT security updates that emitter's `security_label` via
+    /// `maybe_enrich_ap_security` -> `EmitterRepo::merge_ap_attributes` --
+    /// the conditional merge-on-change (backfill + reconfig) this task adds.
+    #[tokio::test]
+    async fn ingest_merges_ap_security_onto_emitter_on_change() {
+        let pool = fresh_pool().await;
+        let ds =
+            seed_wifi_source_with_config(&pool, serde_json::json!({"auto_create_emitters": true}))
+                .await;
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let (manager, provider) = session_with_fix(pool.clone(), a_fix(base)).await;
+
+        let (events_tx, _rx) = broadcast::channel(8);
+        let ctx = IngestCtx {
+            pool: pool.clone(),
+            sessions: Some(Arc::new(manager)),
+            location: provider.clone(),
+            events: events_tx,
+            secret_key: [0x11u8; 32],
+        };
+
+        let bssid = "aa:bb:cc:dd:ee:ff";
+
+        // First beacon: WPA2-PSK (CCMP). Auto-creates the emitter, whose
+        // attributes must already carry the seeded security_label (Task 4).
+        let first = ingest(
+            &ctx,
+            ds,
+            secured_beacon_obs(bssid, "HomeNet", "WPA2-PSK (CCMP)", base),
+        )
+        .await
+        .expect("first ingest should succeed");
+        let emitter_id = first
+            .emitter_id
+            .expect("beacon should auto-create and attach an emitter");
+
+        let after_first = EmitterRepo::get(&pool, emitter_id).await.unwrap().unwrap();
+        assert_eq!(
+            after_first.attributes["security_label"], "WPA2-PSK (CCMP)",
+            "auto-create must seed the classifier's security_label onto the new emitter"
+        );
+
+        // Second beacon, same bssid, DIFFERENT security -- must dedupe to the
+        // same emitter (auto-attach, not auto-create) and update its
+        // security_label via the conditional merge.
+        let second_at = base + ChronoDuration::seconds(10);
+        let second_payload = serde_json::json!({
+            "bssid": bssid,
+            "ssid": "HomeNet",
+            "frame_type": "beacon",
+            "channel": 6,
+            "security": ["WPA3"],
+            "auth": ["SAE"],
+            "cipher": ["CCMP"],
+            "transition_mode": false,
+            "security_label": "WPA3-SAE (CCMP)",
+        });
+        let second = ingest(
+            &ctx,
+            ds,
+            RawObservation {
+                kind: "wifi".to_string(),
+                observed_at: second_at,
+                signal_strength: Some(-55),
+                payload: second_payload,
+            },
+        )
+        .await
+        .expect("second ingest should succeed");
+        assert_eq!(
+            second.emitter_id,
+            Some(emitter_id),
+            "same bssid must dedupe/auto-attach to the same emitter, not create a second one"
+        );
+
+        let after_second = EmitterRepo::get(&pool, emitter_id).await.unwrap().unwrap();
+        assert_eq!(
+            after_second.attributes["security_label"], "WPA3-SAE (CCMP)",
+            "a reconfigured beacon must update the emitter's security_label via the merge"
+        );
+        assert_eq!(
+            after_second.attributes["auth"],
+            serde_json::json!(["SAE"]),
+            "the rest of the security patch must merge in alongside the changed label"
+        );
+
+        let all = EmitterRepo::list(&pool).await.unwrap();
+        assert_eq!(
+            all.len(),
+            1,
+            "no duplicate emitter should have been created by the second (reconfigured) beacon"
         );
     }
 
