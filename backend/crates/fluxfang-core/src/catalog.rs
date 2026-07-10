@@ -55,6 +55,10 @@ fn wifi_catalog() -> Vec<FieldDef> {
             ]),
         ),
         field("channel", "Channel", FieldType::Number),
+        field("security", "Security", FieldType::Text),
+        field("auth", "Authentication", FieldType::Text),
+        field("cipher", "Cipher", FieldType::Text),
+        field("security_label", "Security (label)", FieldType::Text),
         field("signal_strength", "Signal strength", FieldType::Number),
     ]
 }

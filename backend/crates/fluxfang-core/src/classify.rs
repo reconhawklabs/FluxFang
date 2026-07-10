@@ -98,16 +98,29 @@ fn classify_wifi_beacon(payload: &Value) -> Option<Classification> {
     let bssid = non_empty_str(payload, "bssid")?;
     let ssid = non_empty_str(payload, "ssid");
     let ssid_label = ssid.as_deref().unwrap_or("Hidden");
+    let mut attributes = serde_json::json!({
+        "bssid": bssid,
+        "ssid": ssid,
+    });
+    let attr_obj = attributes.as_object_mut().expect("object");
+    for key in [
+        "security",
+        "auth",
+        "cipher",
+        "transition_mode",
+        "security_label",
+    ] {
+        if let Some(v) = payload.get(key) {
+            attr_obj.insert(key.to_string(), v.clone());
+        }
+    }
     Some(Classification {
         emitter_type: "wifi_access_point".to_string(),
         category: "wifi".to_string(),
         identity_field: "bssid".to_string(),
         identity_value: bssid.clone(),
         name: format!("WiFi AP \"{ssid_label}\" ({bssid})"),
-        attributes: serde_json::json!({
-            "bssid": bssid,
-            "ssid": ssid,
-        }),
+        attributes,
         match_criteria: None,
     })
 }
@@ -481,6 +494,25 @@ mod tests {
 
         let empty_bssid = serde_json::json!({"frame_type": "beacon", "bssid": ""});
         assert!(classify("wifi", &empty_bssid).is_none());
+    }
+
+    #[test]
+    fn wifi_beacon_classification_carries_security_attributes() {
+        let payload = serde_json::json!({
+            "bssid": "aa:bb:cc:dd:ee:ff",
+            "ssid": "SecureNet",
+            "frame_type": "beacon",
+            "security": ["WPA2"],
+            "auth": ["PSK"],
+            "cipher": ["CCMP"],
+            "transition_mode": false,
+            "security_label": "WPA2-PSK (CCMP)"
+        });
+        let c = classify("wifi", &payload).unwrap();
+        assert_eq!(c.emitter_type, "wifi_access_point");
+        assert_eq!(c.attributes["security_label"], "WPA2-PSK (CCMP)");
+        assert_eq!(c.attributes["security"], serde_json::json!(["WPA2"]));
+        assert_eq!(c.attributes["auth"], serde_json::json!(["PSK"]));
     }
 
     // -- classify: probe_request --------------------------------------------
