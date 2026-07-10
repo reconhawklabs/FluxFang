@@ -29,6 +29,7 @@ use chrono::Utc;
 use tokio::sync::mpsc;
 
 use super::parse::{freq_to_channel, WifiObservation};
+use super::security::{self, AkmSuite, CipherSuite, RsnInfo, WpaInfo};
 use crate::{Capturer, RawObservation};
 
 /// Default time between successive `iw dev <if> scan` runs. Active
@@ -176,10 +177,43 @@ struct PartialBss {
     ssid: Option<String>,
     freq: Option<u16>,
     signal: Option<i32>,
+    privacy: bool,
+    rsn_pairwise: Vec<CipherSuite>,
+    rsn_akm: Vec<AkmSuite>,
+    wpa_pairwise: Vec<CipherSuite>,
+    wpa_akm: Vec<AkmSuite>,
+    /// Which security block the walker is currently inside (RSN vs WPA), so
+    /// an indented `Pairwise ciphers:`/`Authentication suites:` line is
+    /// attributed to the right block.
+    block: SecBlock,
+}
+
+#[derive(PartialEq)]
+enum SecBlock {
+    None,
+    Rsn,
+    Wpa,
 }
 
 impl PartialBss {
     fn into_observation(self) -> WifiObservation {
+        let rsn = if self.rsn_pairwise.is_empty() && self.rsn_akm.is_empty() {
+            None
+        } else {
+            Some(RsnInfo {
+                pairwise: self.rsn_pairwise,
+                akm: self.rsn_akm,
+            })
+        };
+        let wpa = if self.wpa_pairwise.is_empty() && self.wpa_akm.is_empty() {
+            None
+        } else {
+            Some(WpaInfo {
+                pairwise: self.wpa_pairwise,
+                akm: self.wpa_akm,
+            })
+        };
+        let security = Some(security::normalize(self.privacy, rsn, wpa));
         WifiObservation {
             bssid: Some(self.bssid),
             // `iw scan` only ever surfaces APs (see the `frame_type` comment
@@ -199,7 +233,7 @@ impl PartialBss {
             frame_type: "beacon".to_string(),
             channel: self.freq.and_then(freq_to_channel),
             signal_strength: self.signal,
-            security: None,
+            security,
         }
     }
 }
@@ -260,6 +294,12 @@ pub fn parse_iw_scan(output: &str) -> Vec<WifiObservation> {
                     ssid: None,
                     freq: None,
                     signal: None,
+                    privacy: false,
+                    rsn_pairwise: Vec::new(),
+                    rsn_akm: Vec::new(),
+                    wpa_pairwise: Vec::new(),
+                    wpa_akm: Vec::new(),
+                    block: SecBlock::None,
                 })
             } else {
                 // Malformed BSS header - skip this block's fields too
@@ -294,6 +334,30 @@ pub fn parse_iw_scan(output: &str) -> Vec<WifiObservation> {
             } else {
                 Some(ssid.to_string())
             };
+        } else if trimmed.starts_with("RSN:") {
+            bss.block = SecBlock::Rsn;
+        } else if trimmed.starts_with("WPA:") {
+            bss.block = SecBlock::Wpa;
+        } else if let Some(rest) = trimmed.strip_prefix("* Pairwise ciphers:") {
+            let ciphers: Vec<CipherSuite> =
+                rest.split_whitespace().map(security::cipher_from_iw).collect();
+            match bss.block {
+                SecBlock::Rsn => bss.rsn_pairwise = ciphers,
+                SecBlock::Wpa => bss.wpa_pairwise = ciphers,
+                SecBlock::None => {}
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("* Authentication suites:") {
+            let akms: Vec<AkmSuite> =
+                rest.split_whitespace().map(security::akm_from_iw).collect();
+            match bss.block {
+                SecBlock::Rsn => bss.rsn_akm = akms,
+                SecBlock::Wpa => bss.wpa_akm = akms,
+                SecBlock::None => {}
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("capability:") {
+            if rest.contains("Privacy") {
+                bss.privacy = true;
+            }
         }
     }
 
@@ -330,5 +394,42 @@ mod tests {
             parse_iw_scan("not an iw scan at all\nfreq: 2437\n"),
             Vec::new()
         );
+    }
+
+    #[test]
+    fn parses_rsn_wpa2_psk_from_iw_block() {
+        let input = "\
+BSS aa:bb:cc:dd:ee:ff(on wlan0)
+\tfreq: 2437
+\tsignal: -42.00 dBm
+\tSSID: SecureNet
+\tcapability: ESS Privacy (0x0411)
+\tRSN:\t * Version: 1
+\t\t * Group cipher: CCMP
+\t\t * Pairwise ciphers: CCMP
+\t\t * Authentication suites: PSK
+";
+        let obs = parse_iw_scan(input);
+        assert_eq!(obs.len(), 1);
+        let raw = obs.into_iter().next().unwrap().into_raw_observation(Utc::now());
+        assert_eq!(raw.payload["security_label"], "WPA2-PSK (CCMP)");
+        assert_eq!(raw.payload["security"], serde_json::json!(["WPA2"]));
+    }
+
+    #[test]
+    fn open_ap_from_iw_has_open_security() {
+        let input = "\
+BSS 11:22:33:44:55:66(on wlan0)
+\tfreq: 2412
+\tsignal: -50.00 dBm
+\tSSID: OpenNet
+\tcapability: ESS (0x0401)
+";
+        let raw = parse_iw_scan(input)
+            .into_iter()
+            .next()
+            .unwrap()
+            .into_raw_observation(Utc::now());
+        assert_eq!(raw.payload["security_label"], "Open");
     }
 }
