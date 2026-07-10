@@ -110,7 +110,10 @@
 use std::fmt;
 
 use chrono::{DateTime, Utc};
-use fluxfang_core::{catalog_for, conditions_to_sql_checked, Rule, RuleSqlError};
+use fluxfang_core::rule_sql::conditions_to_sql_checked_on;
+use fluxfang_core::{
+    catalog_for, conditions_to_sql_checked, Condition, MatchMode, Rule, RuleSqlError,
+};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -136,11 +139,26 @@ pub struct EmitterRepo;
 /// column (e.g. `"wifi_access_point"`) — the Emitters page's Type-filter
 /// dropdown. A `NULL` (unclassified) `emitter_type` never matches, same as a
 /// plain SQL `=` comparison against `NULL`.
+///
+/// `field_conditions` (Task 3), when non-empty, is a set of attribute
+/// predicates evaluated over the `attributes` JSONB column, validated against
+/// the selected `emitter_type`'s attribute catalog
+/// ([`fluxfang_core::catalog::emitter_attribute_catalog`]) via
+/// [`fluxfang_core::rule_sql::conditions_to_sql_checked_on`] — the mirror of
+/// `EmissionFilter::field_conditions` (which filters emission *payload*). An
+/// unknown/mistyped field surfaces as [`EmitterQueryError::Rule`] rather than
+/// being silently dropped. `match_mode` ANDs (`All`) or ORs (`Any`) them
+/// together, then the whole set is ANDed with `search`/`entity_id`/
+/// `emitter_type`. Attribute filtering is type-specific: because an empty
+/// catalog rejects every field, callers with non-empty `field_conditions`
+/// must set `emitter_type` (the API layer enforces this up front with a 400).
 #[derive(Debug, Clone)]
 pub struct EmitterListFilter {
     pub search: Option<String>,
     pub entity_id: Option<Uuid>,
     pub emitter_type: Option<String>,
+    pub field_conditions: Vec<Condition>,
+    pub match_mode: MatchMode,
     pub limit: i64,
     pub offset: i64,
     pub sort: Option<String>,
@@ -153,11 +171,47 @@ impl Default for EmitterListFilter {
             search: None,
             entity_id: None,
             emitter_type: None,
+            field_conditions: Vec::new(),
+            match_mode: MatchMode::All,
             limit: 50,
             offset: 0,
             sort: None,
             dir: None,
         }
+    }
+}
+
+/// Error from [`EmitterRepo::query`]: either a DB error, or the
+/// `field_conditions` translator rejecting a condition (unknown field, an op
+/// the field doesn't declare, or a value whose JSON type doesn't match the
+/// field's catalog type). Mirrors
+/// [`crate::repo::emission::EmissionQueryError`].
+#[derive(Debug)]
+pub enum EmitterQueryError {
+    Sql(sqlx::Error),
+    Rule(RuleSqlError),
+}
+
+impl fmt::Display for EmitterQueryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EmitterQueryError::Sql(e) => write!(f, "database error: {e}"),
+            EmitterQueryError::Rule(e) => write!(f, "invalid field_conditions: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for EmitterQueryError {}
+
+impl From<sqlx::Error> for EmitterQueryError {
+    fn from(e: sqlx::Error) -> Self {
+        EmitterQueryError::Sql(e)
+    }
+}
+
+impl From<RuleSqlError> for EmitterQueryError {
+    fn from(e: RuleSqlError) -> Self {
+        EmitterQueryError::Rule(e)
     }
 }
 
@@ -460,7 +514,7 @@ impl EmitterRepo {
     pub async fn query(
         pool: &PgPool,
         filter: EmitterListFilter,
-    ) -> Result<(Vec<(Emitter, i64)>, i64), sqlx::Error> {
+    ) -> Result<(Vec<(Emitter, i64)>, i64), EmitterQueryError> {
         let mut clauses: Vec<String> = vec!["TRUE".to_string()];
         let mut next_bind = 1usize;
 
@@ -481,9 +535,41 @@ impl EmitterRepo {
             next_bind += 1;
         }
 
+        // Attribute conditions over the `attributes` JSONB column, validated
+        // against the selected emitter type's catalog. Translated *last* (like
+        // `EmissionRepo::query`'s `field_conditions`), with `next_bind` at its
+        // current value so the translator's `$n` placeholders continue after
+        // every shared clause's binds; its returned binds are appended, in
+        // order, right after the shared binds and before `limit`/`offset`.
+        // Non-empty conditions require an `emitter_type` (enforced at the API
+        // layer); if it's `None` here we validate against an empty catalog,
+        // which rejects any field (surfaced as `EmitterQueryError::Rule`).
+        let mut attr_binds: Vec<serde_json::Value> = Vec::new();
+        if !filter.field_conditions.is_empty() {
+            let catalog = fluxfang_core::catalog::emitter_attribute_catalog(
+                filter.emitter_type.as_deref().unwrap_or(""),
+            );
+            let (attr_sql, binds) = conditions_to_sql_checked_on(
+                &filter.field_conditions,
+                filter.match_mode,
+                next_bind,
+                &catalog,
+                "attributes",
+            )?;
+            clauses.push(attr_sql);
+            next_bind += binds.len();
+            attr_binds = binds;
+        }
+
         let where_sql = clauses.join(" AND ");
 
-        macro_rules! bind_shared {
+        // Binds every shared clause's parameter *and* the attribute binds, in
+        // the same order their `$n` placeholders were numbered. Attribute
+        // binds are all `Value::String` (`conditions_to_sql_checked_on`
+        // text-coerces every value); each is bound as plain text, uniformly,
+        // exactly as `EmissionRepo::query` does — see that module's docs on
+        // why re-deriving a bind's "type" from the conditions is unsafe.
+        macro_rules! bind_all {
             ($q:expr) => {{
                 let mut q = $q;
                 if let Some(ref search) = filter.search {
@@ -495,12 +581,19 @@ impl EmitterRepo {
                 if let Some(ref emitter_type) = filter.emitter_type {
                     q = q.bind(emitter_type.clone());
                 }
+                for v in &attr_binds {
+                    let text = match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    q = q.bind(text);
+                }
                 q
             }};
         }
 
         let count_sql = format!("SELECT COUNT(*) FROM emitter WHERE {where_sql}");
-        let count_q = bind_shared!(sqlx::query_as::<_, (i64,)>(&count_sql));
+        let count_q = bind_all!(sqlx::query_as::<_, (i64,)>(&count_sql));
         let (total,) = count_q.fetch_one(pool).await?;
 
         let limit_idx = next_bind;
@@ -519,7 +612,7 @@ impl EmitterRepo {
              FROM emitter WHERE {where_sql} \
              ORDER BY {order_by} LIMIT ${limit_idx} OFFSET ${offset_idx}"
         );
-        let data_q = bind_shared!(sqlx::query_as::<_, EmitterListRow>(&data_sql))
+        let data_q = bind_all!(sqlx::query_as::<_, EmitterListRow>(&data_sql))
             .bind(filter.limit)
             .bind(filter.offset);
         let rows = data_q.fetch_all(pool).await?;

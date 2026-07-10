@@ -96,7 +96,7 @@
 //! `emission.emitter_id` `ON DELETE SET NULL` cascade as the existing
 //! single-row delete applies to every emitter removed this way.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, RawQuery, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -110,7 +110,9 @@ use fluxfang_core::{
     RuleSqlError,
 };
 use fluxfang_db::models::{NewEmitter, NewEntity};
-use fluxfang_db::repo::emitter::{EmitterListFilter, EmitterRuleError, EmitterWithEntity};
+use fluxfang_db::repo::emitter::{
+    EmitterListFilter, EmitterQueryError, EmitterRuleError, EmitterWithEntity,
+};
 use fluxfang_db::{EmissionRepo, EmitterAssociationRepo, EmitterRepo};
 
 use crate::dto::{EmitterDto, EntityDto, InUseEmitterTypeDto};
@@ -235,14 +237,63 @@ struct EmittersPageDto {
     total: i64,
 }
 
+/// Task 3: alongside the scalar `ListEmittersQuery` params, `GET
+/// /api/emitters` accepts repeated `cond=field:op:valueJson` params plus an
+/// optional `match=all|any`, exactly like `GET /api/emissions` — attribute
+/// filters over the emitter's `attributes` JSONB, validated against the
+/// selected type's catalog. Because `axum::extract::Query` can't collect
+/// repeated keys, `cond`/`match` are pulled from `RawQuery` with
+/// `form_urlencoded::parse` (reusing `emissions::parse_condition`/
+/// `parse_match_mode`), while the scalar params still come from
+/// `Query<ListEmittersQuery>` (which simply ignores the repeated `cond`
+/// key). Attribute filtering is type-specific: `cond` without an
+/// `emitter_type` is a 400, since an empty catalog rejects every field.
 async fn list_emitters(
     State(state): State<AppState>,
     Query(q): Query<ListEmittersQuery>,
+    RawQuery(raw): RawQuery,
 ) -> Result<Json<EmittersPageDto>, ApiError> {
+    // Collect repeated `cond` params + optional `match` from the raw query.
+    let mut cond_raw: Vec<String> = Vec::new();
+    let mut match_mode = MatchMode::All;
+    for (key, value) in form_urlencoded::parse(raw.as_deref().unwrap_or("").as_bytes()) {
+        match key.as_ref() {
+            "cond" => cond_raw.push(value.into_owned()),
+            "match" => {
+                match_mode = crate::emissions::parse_match_mode(&value).map_err(ApiError::BadRequest)?
+            }
+            _ => {}
+        }
+    }
+
+    if cond_raw.len() > crate::emissions::MAX_CONDITIONS {
+        return Err(ApiError::BadRequest(format!(
+            "too many cond params: {} (max {})",
+            cond_raw.len(),
+            crate::emissions::MAX_CONDITIONS
+        )));
+    }
+
+    let field_conditions = cond_raw
+        .iter()
+        .map(|c| crate::emissions::parse_condition(c).map_err(ApiError::BadRequest))
+        .collect::<Result<Vec<Condition>, ApiError>>()?;
+
+    // Attribute filtering is type-specific: `cond` params validate against
+    // the selected type's catalog, so they require an `emitter_type` (an
+    // empty catalog would reject every field as unknown -> a confusing 400).
+    if !field_conditions.is_empty() && q.emitter_type.is_none() {
+        return Err(ApiError::BadRequest(
+            "attribute filters (cond) require selecting an emitter_type".to_string(),
+        ));
+    }
+
     let filter = EmitterListFilter {
         search: q.search,
         entity_id: q.entity_id,
         emitter_type: q.emitter_type,
+        field_conditions,
+        match_mode,
         limit: q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT),
         offset: q.offset.unwrap_or(0).max(0),
         sort: q.sort,
@@ -750,6 +801,22 @@ impl From<EmitterRuleError> for ApiError {
         match err {
             EmitterRuleError::Rule(e) => ApiError::BadRequest(e.to_string()),
             EmitterRuleError::Sql(e) => {
+                eprintln!("fluxfang-api: db error in emitters route: {e}");
+                ApiError::Internal
+            }
+        }
+    }
+}
+
+/// Task 3: `EmitterRepo::query`'s error, mirroring the `EmissionQueryError`
+/// mapping — a rejected attribute condition (unknown field, invalid op, or a
+/// mistyped value: all caller mistakes) is a `400`, an actual DB failure a
+/// `500`.
+impl From<EmitterQueryError> for ApiError {
+    fn from(err: EmitterQueryError) -> Self {
+        match err {
+            EmitterQueryError::Rule(e) => ApiError::BadRequest(e.to_string()),
+            EmitterQueryError::Sql(e) => {
                 eprintln!("fluxfang-api: db error in emitters route: {e}");
                 ApiError::Internal
             }

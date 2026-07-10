@@ -936,6 +936,223 @@ async fn list_emitters_supports_emitter_type_filter() {
 }
 
 // ---------------------------------------------------------------------
+// Task 3: GET /api/emitters attribute filtering via `cond` params.
+// ---------------------------------------------------------------------
+
+/// `cond=security:matches:"WPA2"` (+ `emitter_type=wifi_access_point`)
+/// returns only the AP whose `attributes.security` array contains `WPA2`,
+/// not the `WPA3` one — non-vacuous: both APs exist, so `total == 1` proves
+/// the attribute predicate actually filtered.
+#[tokio::test]
+async fn list_emitters_filters_by_security_matches() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    EmitterRepoInsertHelper::insert_classified(
+        &pool,
+        "WPA2 AP",
+        "wifi_access_point",
+        json!({"bssid": "aa:aa:aa:aa:aa:aa", "ssid": "Net2", "security": ["WPA2"]}),
+    )
+    .await;
+    EmitterRepoInsertHelper::insert_classified(
+        &pool,
+        "WPA3 AP",
+        "wifi_access_point",
+        json!({"bssid": "bb:bb:bb:bb:bb:bb", "ssid": "Net3", "security": ["WPA3"]}),
+    )
+    .await;
+
+    // Sanity: without the cond, both APs of this type are returned.
+    let resp =
+        get_with_cookie(&app, "/api/emitters?emitter_type=wifi_access_point", &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    assert_eq!(body_json(resp).await["total"], 2);
+
+    let uri = format!(
+        "/api/emitters?emitter_type=wifi_access_point&cond=security:matches:{}",
+        urlencoding_encode("\"WPA2\"")
+    );
+    let resp = get_with_cookie(&app, &uri, &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["total"], 1, "body: {body}");
+    assert_eq!(body["items"][0]["name"], "WPA2 AP", "body: {body}");
+}
+
+/// A numeric attribute predicate respects the `gte` boundary:
+/// `company_id:gte:76` matches a `bluetooth_device` with `company_id = 76`,
+/// but `company_id:gte:77` does not — bare (unquoted) values parse as JSON
+/// numbers, exercising the `(attributes->>'company_id')::numeric` path.
+#[tokio::test]
+async fn list_emitters_filters_by_numeric_gte_boundary() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    EmitterRepoInsertHelper::insert_classified(
+        &pool,
+        "BT 76",
+        "bluetooth_device",
+        json!({"address": "aa:bb:cc:dd:ee:ff", "company_id": 76}),
+    )
+    .await;
+
+    // gte:76 -> included (boundary is inclusive).
+    let resp = get_with_cookie(
+        &app,
+        "/api/emitters?emitter_type=bluetooth_device&cond=company_id:gte:76",
+        &cookie,
+    )
+    .await;
+    assert_status(&resp, StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["total"], 1, "body: {body}");
+    assert_eq!(body["items"][0]["name"], "BT 76", "body: {body}");
+
+    // gte:77 -> excluded.
+    let resp = get_with_cookie(
+        &app,
+        "/api/emitters?emitter_type=bluetooth_device&cond=company_id:gte:77",
+        &cookie,
+    )
+    .await;
+    assert_status(&resp, StatusCode::OK);
+    assert_eq!(body_json(resp).await["total"], 0);
+}
+
+/// `randomized_mac:eq:"true"` matches a `wifi_client` whose attribute is the
+/// JSON boolean `true` (stored, read back via `attributes->>'randomized_mac'`
+/// as the text `"true"`), and not one that's `false`. The value must be
+/// quoted (`"true"`) so it parses as the JSON string `"true"` the
+/// `Enum(["true","false"])` field expects — a bare `true` would be a JSON
+/// boolean and rejected as a type mismatch.
+#[tokio::test]
+async fn list_emitters_filters_by_boolean_randomized_mac() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    EmitterRepoInsertHelper::insert_classified(
+        &pool,
+        "Randomized Client",
+        "wifi_client",
+        json!({"src_mac": "aa:bb:cc:dd:ee:ff", "randomized_mac": true}),
+    )
+    .await;
+    EmitterRepoInsertHelper::insert_classified(
+        &pool,
+        "Stable Client",
+        "wifi_client",
+        json!({"src_mac": "11:22:33:44:55:66", "randomized_mac": false}),
+    )
+    .await;
+
+    let uri = format!(
+        "/api/emitters?emitter_type=wifi_client&cond=randomized_mac:eq:{}",
+        urlencoding_encode("\"true\"")
+    );
+    let resp = get_with_cookie(&app, &uri, &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["total"], 1, "body: {body}");
+    assert_eq!(body["items"][0]["name"], "Randomized Client", "body: {body}");
+}
+
+/// An attribute `cond` ANDs with the scalar `search` and `emitter_type`
+/// filters: of two WPA2 APs and one WPA3 AP, only the WPA2 AP whose name also
+/// matches `search=Home` comes back.
+#[tokio::test]
+async fn list_emitters_cond_ands_with_search_and_type() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    EmitterRepoInsertHelper::insert_classified(
+        &pool,
+        "Home WPA2",
+        "wifi_access_point",
+        json!({"bssid": "aa:aa:aa:aa:aa:01", "security": ["WPA2"]}),
+    )
+    .await;
+    EmitterRepoInsertHelper::insert_classified(
+        &pool,
+        "Cafe WPA2",
+        "wifi_access_point",
+        json!({"bssid": "aa:aa:aa:aa:aa:02", "security": ["WPA2"]}),
+    )
+    .await;
+    EmitterRepoInsertHelper::insert_classified(
+        &pool,
+        "Home WPA3",
+        "wifi_access_point",
+        json!({"bssid": "aa:aa:aa:aa:aa:03", "security": ["WPA3"]}),
+    )
+    .await;
+
+    let uri = format!(
+        "/api/emitters?emitter_type=wifi_access_point&search=Home&cond=security:matches:{}",
+        urlencoding_encode("\"WPA2\"")
+    );
+    let resp = get_with_cookie(&app, &uri, &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["total"], 1, "body: {body}");
+    assert_eq!(body["items"][0]["name"], "Home WPA2", "body: {body}");
+}
+
+/// `cond` without an `emitter_type` is a `400`: attribute filtering is
+/// type-specific (an empty catalog can't validate any field), so the API
+/// rejects it up front rather than translating against an empty catalog.
+#[tokio::test]
+async fn list_emitters_cond_without_emitter_type_is_bad_request() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+    EmitterRepoInsertHelper::insert_classified(
+        &pool,
+        "Some AP",
+        "wifi_access_point",
+        json!({"security": ["WPA2"]}),
+    )
+    .await;
+
+    let uri = format!(
+        "/api/emitters?cond=security:matches:{}",
+        urlencoding_encode("\"WPA2\"")
+    );
+    let resp = get_with_cookie(&app, &uri, &cookie).await;
+    assert_status(&resp, StatusCode::BAD_REQUEST);
+}
+
+/// An unknown attribute field for the selected type is a `400`
+/// (`RuleSqlError::UnknownField` surfaced via `EmitterQueryError::Rule`).
+#[tokio::test]
+async fn list_emitters_cond_unknown_field_is_bad_request() {
+    let (app, _pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    let uri = format!(
+        "/api/emitters?emitter_type=wifi_access_point&cond=not_a_field:eq:{}",
+        urlencoding_encode("\"x\"")
+    );
+    let resp = get_with_cookie(&app, &uri, &cookie).await;
+    assert_status(&resp, StatusCode::BAD_REQUEST);
+}
+
+/// A value whose JSON type doesn't match the field's catalog type is a `400`:
+/// `company_id` is numeric, so a quoted string value (`"76"`) is rejected as
+/// a type mismatch (`RuleSqlError::InvalidValueType`).
+#[tokio::test]
+async fn list_emitters_cond_mistyped_value_is_bad_request() {
+    let (app, _pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    let uri = format!(
+        "/api/emitters?emitter_type=bluetooth_device&cond=company_id:gte:{}",
+        urlencoding_encode("\"76\"")
+    );
+    let resp = get_with_cookie(&app, &uri, &cookie).await;
+    assert_status(&resp, StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------
 // Phase 1c: POST /api/emitters/bulk-delete and POST /api/emitters/clear.
 // ---------------------------------------------------------------------
 

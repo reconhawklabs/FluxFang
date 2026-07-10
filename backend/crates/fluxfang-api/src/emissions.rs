@@ -126,7 +126,9 @@ const DEFAULT_LIMIT: i64 = 50;
 /// Hard ceiling `limit` is clamped to, regardless of what's requested.
 const MAX_LIMIT: i64 = 500;
 /// Maximum number of `cond` params accepted per request (see module docs).
-const MAX_CONDITIONS: usize = 20;
+/// `pub(crate)` so `emitters.rs` can enforce the same cap on its own reused
+/// `cond` parsing (Task 3).
+pub(crate) const MAX_CONDITIONS: usize = 20;
 /// Maximum number of elements in a single `cond`'s `in` array (see module
 /// docs on the Postgres bind-count ceiling).
 const MAX_IN_ELEMENTS: usize = 1000;
@@ -243,7 +245,7 @@ fn parse_filter(raw: &str) -> Result<EmissionFilter, ApiError> {
             "bbox" => bbox = Some(parse_bbox(&value)?),
             "kind" => kind = Some(value.into_owned()),
             "q" => text = Some(value.into_owned()),
-            "match" => match_mode = parse_match_mode(&value)?,
+            "match" => match_mode = parse_match_mode(&value).map_err(ApiError::BadRequest)?,
             "limit" => limit = parse_limit(&value)?,
             "offset" => offset = parse_offset(&value)?,
             "cond" => cond_raw.push(value.into_owned()),
@@ -264,7 +266,7 @@ fn parse_filter(raw: &str) -> Result<EmissionFilter, ApiError> {
 
     let field_conditions = cond_raw
         .iter()
-        .map(|c| parse_condition(c))
+        .map(|c| parse_condition(c).map_err(ApiError::BadRequest))
         .collect::<Result<Vec<Condition>, ApiError>>()?;
 
     Ok(EmissionFilter {
@@ -329,13 +331,14 @@ fn parse_bbox(raw: &str) -> Result<(f64, f64, f64, f64), ApiError> {
     ))
 }
 
-fn parse_match_mode(raw: &str) -> Result<MatchMode, ApiError> {
+/// Returns the human-readable error message on failure (rather than an
+/// `ApiError`) so `emitters.rs` can reuse it and wrap it in its own
+/// `ApiError` — see Task 3. Callers here wrap with `ApiError::BadRequest`.
+pub(crate) fn parse_match_mode(raw: &str) -> Result<MatchMode, String> {
     match raw {
         "all" => Ok(MatchMode::All),
         "any" => Ok(MatchMode::Any),
-        _ => Err(ApiError::BadRequest(format!(
-            "invalid match: {raw:?} (expected all/any)"
-        ))),
+        _ => Err(format!("invalid match: {raw:?} (expected all/any)")),
     }
 }
 
@@ -355,24 +358,27 @@ fn parse_offset(raw: &str) -> Result<i64, ApiError> {
 
 /// Parse one `cond=field:op:valueJson` param into a [`Condition`]. See the
 /// module docs for the exact `value` parse rule and the `in`-size cap.
-fn parse_condition(raw: &str) -> Result<Condition, ApiError> {
+///
+/// Returns the human-readable error message on failure (rather than an
+/// `ApiError`) so `emitters.rs` can reuse this same parser and wrap the
+/// message in its own `ApiError` (Task 3). Callers here wrap the `Err` with
+/// `ApiError::BadRequest`.
+pub(crate) fn parse_condition(raw: &str) -> Result<Condition, String> {
     let mut parts = raw.splitn(3, ':');
     let field = parts.next().unwrap_or("");
-    let op_str = parts.next().ok_or_else(|| {
-        ApiError::BadRequest(format!("malformed cond {raw:?} (expected field:op:value)"))
-    })?;
-    let value_str = parts.next().ok_or_else(|| {
-        ApiError::BadRequest(format!("malformed cond {raw:?} (expected field:op:value)"))
-    })?;
+    let op_str = parts
+        .next()
+        .ok_or_else(|| format!("malformed cond {raw:?} (expected field:op:value)"))?;
+    let value_str = parts
+        .next()
+        .ok_or_else(|| format!("malformed cond {raw:?} (expected field:op:value)"))?;
 
     if field.is_empty() {
-        return Err(ApiError::BadRequest(format!(
-            "malformed cond {raw:?}: field must not be empty"
-        )));
+        return Err(format!("malformed cond {raw:?}: field must not be empty"));
     }
 
     let op: Op = serde_json::from_value(serde_json::Value::String(op_str.to_string()))
-        .map_err(|_| ApiError::BadRequest(format!("cond {raw:?}: unknown operator {op_str:?}")))?;
+        .map_err(|_| format!("cond {raw:?}: unknown operator {op_str:?}"))?;
 
     // Parse-JSON-first, string-fallback (see module docs): lets bare
     // numbers/arrays/literals be written without caller-side JSON quoting,
@@ -383,10 +389,10 @@ fn parse_condition(raw: &str) -> Result<Condition, ApiError> {
     if op == Op::In {
         if let Some(items) = value.as_array() {
             if items.len() > MAX_IN_ELEMENTS {
-                return Err(ApiError::BadRequest(format!(
+                return Err(format!(
                     "cond {raw:?}: `in` array has {} elements (max {MAX_IN_ELEMENTS})",
                     items.len()
-                )));
+                ));
             }
         }
     }
