@@ -29,14 +29,27 @@ import { isCompleteCondition, newConditionFor } from './conditionUtils';
 
 export interface StackedFilterBuilderProps {
   /** Data source kind whose catalog (`GET /api/catalog/:kind`) drives the
-   * field/operator/value dropdowns, e.g. `"wifi"`. */
+   * field/operator/value dropdowns, e.g. `"wifi"`. When `catalogSource` is
+   * `"emitter"`, this is instead an `emitter_type` key resolved against
+   * `GET /api/emitter-catalog/:kind`. */
   kind: string;
+  /** Which catalog `kind` resolves against. `"datasource"` (default) →
+   * `/api/catalog/:kind` (emission fields, e.g. `kind="wifi"`); `"emitter"`
+   * → the emitter attribute catalog (Tasks 1-3 backend) for `kind` = an
+   * `emitter_type` (e.g. `"wifi_access_point"`) — the Emitters page's
+   * advanced attribute filter (Task 4). */
+  catalogSource?: 'datasource' | 'emitter';
   value: Condition[];
   onChange: (next: Condition[]) => void;
 }
 
-export default function StackedFilterBuilder({ kind, value, onChange }: StackedFilterBuilderProps) {
-  const { data: fields, isLoading, isError } = useCatalog(kind);
+export default function StackedFilterBuilder({
+  kind,
+  catalogSource = 'datasource',
+  value,
+  onChange,
+}: StackedFilterBuilderProps) {
+  const { data: fields, isLoading, isError } = useCatalog(kind, catalogSource);
 
   const effectiveConditions: Condition[] =
     value.length > 0 ? value : fields && fields.length > 0 ? [newConditionFor(fields[0])] : [];

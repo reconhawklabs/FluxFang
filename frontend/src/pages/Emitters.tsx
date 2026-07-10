@@ -45,8 +45,11 @@ import type { Emitter, ListEmittersParams } from "../api/emitters";
 import Pagination from "../components/Pagination";
 import SearchBar from "../components/SearchBar";
 import SelectionToolbar from "../components/SelectionToolbar";
+import StackedFilterBuilder from "../components/StackedFilterBuilder";
+import { conditionsToCondParams } from "../components/filterState";
 import { SortableTh, type SortDir } from "../components/SortableTh";
 import { useRowSelection } from "../hooks/useRowSelection";
+import type { Condition } from "../types/rule";
 import {
   MacIdentityCell,
   TypeBadge,
@@ -72,6 +75,11 @@ export default function Emitters() {
   const [q, setQ] = useState("");
   const [entityId, setEntityId] = useState("");
   const [emitterType, setEmitterType] = useState(ALL_TYPES_VALUE);
+  // Attribute conditions from the advanced filter builder below (Task 4),
+  // scoped to whatever `emitterType` is currently selected — its fields are
+  // type-specific, so a type change drops these (see
+  // `handleTypeFilterChange`).
+  const [conditions, setConditions] = useState<Condition[]>([]);
   const [limit, setLimit] = useState(DEFAULT_LIMIT);
   const [offset, setOffset] = useState(0);
   const [sortKey, setSortKey] = useState<string>("last_seen");
@@ -83,10 +91,13 @@ export default function Emitters() {
     if (trimmedQ.length > 0) params.search = trimmedQ;
     if (entityId.length > 0) params.entity_id = entityId;
     if (emitterType.length > 0) params.emitter_type = emitterType;
+    if (emitterType.length > 0 && conditions.length > 0) {
+      params.cond = conditionsToCondParams(conditions);
+    }
     params.sort = sortKey;
     params.dir = sortDir;
     return params;
-  }, [q, entityId, emitterType, limit, offset, sortKey, sortDir]);
+  }, [q, entityId, emitterType, conditions, limit, offset, sortKey, sortDir]);
 
   const emittersQuery = useQuery({
     queryKey: [...queryKeys.emitters, JSON.stringify(queryParams)],
@@ -149,6 +160,12 @@ export default function Emitters() {
 
   function handleTypeFilterChange(next: string): void {
     setEmitterType(next);
+    setConditions([]); // fields are type-specific — drop stale conditions
+    resetToFirstPage();
+  }
+
+  function handleConditionsChange(next: Condition[]): void {
+    setConditions(next);
     resetToFirstPage();
   }
 
@@ -301,6 +318,15 @@ export default function Emitters() {
           ))}
         </select>
       </div>
+
+      {emitterType.length > 0 && (
+        <StackedFilterBuilder
+          kind={emitterType}
+          catalogSource="emitter"
+          value={conditions}
+          onChange={handleConditionsChange}
+        />
+      )}
 
       <div className="flex items-center justify-between">
         <SelectionToolbar

@@ -129,6 +129,11 @@ export interface ListEmittersParams {
    * `"wifi_access_point"`), backing the Emitters page's Type-filter
    * dropdown. ANDed with `search`/`entity_id` server-side. */
   emitter_type?: string;
+  /** Repeated `cond=field:op:value` tokens (Task 4's `StackedFilterBuilder`,
+   * via `conditionsToCondParams`) — attribute conditions against the
+   * selected `emitter_type`'s catalog. Backend validates each against that
+   * type's `FieldDef[]`; requires `emitter_type` to be set (400 otherwise). */
+  cond?: string[];
   limit?: number;
   offset?: number;
   sort?: string;
@@ -159,6 +164,7 @@ export function listEmitters(
   if (params.entity_id !== undefined) query.set("entity_id", params.entity_id);
   if (params.emitter_type !== undefined)
     query.set("emitter_type", params.emitter_type);
+  for (const c of params.cond ?? []) query.append("cond", c);
   if (params.limit !== undefined) query.set("limit", String(params.limit));
   if (params.offset !== undefined) query.set("offset", String(params.offset));
   if (params.sort !== undefined) query.set("sort", params.sort);

@@ -159,6 +159,191 @@ const ENTITY_1: Entity = {
   created_at: "2026-06-01T00:00:00Z",
 };
 
+/** The `wifi_access_point` emitter attribute catalog (Tasks 1-3 backend,
+ * `GET /api/emitter-catalog/:emitter_type`) — used to exercise Task 4's
+ * advanced attribute filter, scoped to the selected type. */
+const WIFI_AP_ATTRIBUTE_CATALOG = [
+  {
+    key: "security",
+    label: "Security",
+    type: "text",
+    ops: [{ code: "matches", label: "matches" }],
+  },
+];
+
+const TYPE_OPTIONS = [
+  { key: "wifi_client", label: "WiFi Client" },
+  { key: "wifi_access_point", label: "WiFi Access Point" },
+];
+
+// --- Task 4: advanced attribute filter on the Emitters page ---
+
+test("with a specific emitter_type selected, the attribute builder renders that type's fields", async () => {
+  const fetchMock = mockRoutes(
+    baseRoutes({
+      "GET /api/emitters": () => ({
+        items: [EMITTER_AP],
+        total: 1,
+      }),
+      "GET /api/emitters/types": () => TYPE_OPTIONS,
+      "GET /api/emitter-catalog/wifi_access_point": () =>
+        WIFI_AP_ATTRIBUTE_CATALOG,
+    }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<Emitters />, { wrapper });
+  await waitFor(() =>
+    expect(screen.getByTestId("emitter-row-emitter-4")).toBeInTheDocument(),
+  );
+
+  // Not shown for "All types" (the initial state).
+  expect(screen.queryByTestId("condition-row-0")).not.toBeInTheDocument();
+
+  fireEvent.change(screen.getByLabelText("Filter by type"), {
+    target: { value: "wifi_access_point" },
+  });
+
+  const row = await screen.findByTestId("condition-row-0");
+  expect(
+    within(row).getByRole("option", { name: "Security" }),
+  ).toBeInTheDocument();
+});
+
+test('with "All types" selected, the attribute builder is not rendered', async () => {
+  const fetchMock = mockRoutes(
+    baseRoutes({
+      "GET /api/emitters": () => ({ items: [EMITTER_AP], total: 1 }),
+      "GET /api/emitters/types": () => TYPE_OPTIONS,
+    }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<Emitters />, { wrapper });
+  await waitFor(() =>
+    expect(screen.getByTestId("emitter-row-emitter-4")).toBeInTheDocument(),
+  );
+
+  expect(screen.queryByTestId("condition-row-0")).not.toBeInTheDocument();
+});
+
+test("selecting a type then completing a field/op/value condition issues a listEmitters request carrying the cond param", async () => {
+  const fetchMock = mockRoutes(
+    baseRoutes({
+      "GET /api/emitters": () => ({ items: [EMITTER_AP], total: 1 }),
+      "GET /api/emitters/types": () => TYPE_OPTIONS,
+      "GET /api/emitter-catalog/wifi_access_point": () =>
+        WIFI_AP_ATTRIBUTE_CATALOG,
+    }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<Emitters />, { wrapper });
+  await waitFor(() =>
+    expect(screen.getByTestId("emitter-row-emitter-4")).toBeInTheDocument(),
+  );
+
+  fireEvent.change(screen.getByLabelText("Filter by type"), {
+    target: { value: "wifi_access_point" },
+  });
+
+  const row = await screen.findByTestId("condition-row-0");
+  const valueInput = row.querySelector(
+    'input[id$="-value"]',
+  ) as HTMLInputElement;
+  fireEvent.change(valueInput, { target: { value: "WPA2" } });
+
+  await waitFor(() => {
+    const call = fetchMock.mock.calls.find(([input]) => {
+      const url = new URL(String(input), "http://localhost");
+      return (
+        url.pathname === "/api/emitters" &&
+        url.searchParams.getAll("cond").includes("security:matches:\"WPA2\"")
+      );
+    });
+    expect(call).toBeDefined();
+  });
+});
+
+test("changing the type clears existing conditions", async () => {
+  const fetchMock = mockRoutes(
+    baseRoutes({
+      "GET /api/emitters": () => ({
+        items: [EMITTER_AP, EMITTER_CLIENT],
+        total: 2,
+      }),
+      "GET /api/emitters/types": () => TYPE_OPTIONS,
+      "GET /api/emitter-catalog/wifi_access_point": () =>
+        WIFI_AP_ATTRIBUTE_CATALOG,
+      "GET /api/emitter-catalog/wifi_client": () => [
+        {
+          key: "src_mac",
+          label: "Source MAC",
+          type: "mac",
+          ops: [{ code: "eq", label: "is exactly" }],
+        },
+      ],
+    }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<Emitters />, { wrapper });
+  await waitFor(() =>
+    expect(screen.getByTestId("emitter-row-emitter-4")).toBeInTheDocument(),
+  );
+
+  fireEvent.change(screen.getByLabelText("Filter by type"), {
+    target: { value: "wifi_access_point" },
+  });
+
+  const row = await screen.findByTestId("condition-row-0");
+  const valueInput = row.querySelector(
+    'input[id$="-value"]',
+  ) as HTMLInputElement;
+  fireEvent.change(valueInput, { target: { value: "WPA2" } });
+
+  await waitFor(() => {
+    const call = fetchMock.mock.calls.find(([input]) => {
+      const url = new URL(String(input), "http://localhost");
+      return (
+        url.pathname === "/api/emitters" &&
+        url.searchParams.getAll("cond").length > 0
+      );
+    });
+    expect(call).toBeDefined();
+  });
+
+  // Switch types — the stale "security" condition must not survive onto the
+  // new type's (unrelated) catalog, and no `cond` param should carry over.
+  fireEvent.change(screen.getByLabelText("Filter by type"), {
+    target: { value: "wifi_client" },
+  });
+
+  const newRow = await screen.findByTestId("condition-row-0");
+  expect(
+    within(newRow).getByRole("option", { name: "Source MAC" }),
+  ).toBeInTheDocument();
+  const newValueInput = newRow.querySelector(
+    'input[id$="-value"]',
+  ) as HTMLInputElement;
+  expect(newValueInput.value).toBe("");
+
+  await waitFor(() => {
+    const calls = fetchMock.mock.calls.filter(([input]) => {
+      const url = new URL(String(input), "http://localhost");
+      return (
+        url.pathname === "/api/emitters" &&
+        url.searchParams.get("emitter_type") === "wifi_client"
+      );
+    });
+    expect(calls.length).toBeGreaterThan(0);
+    for (const [input] of calls) {
+      const url = new URL(String(input), "http://localhost");
+      expect(url.searchParams.getAll("cond")).toEqual([]);
+    }
+  });
+});
+
 // --- Phase 3: compact one-row rows ---
 
 test("a randomized-MAC client emitter renders name/type/MAC/randomized-badge all within a single one-line row", async () => {
