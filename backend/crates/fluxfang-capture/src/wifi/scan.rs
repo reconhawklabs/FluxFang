@@ -199,6 +199,7 @@ impl PartialBss {
             frame_type: "beacon".to_string(),
             channel: self.freq.and_then(freq_to_channel),
             signal_strength: self.signal,
+            security: None,
         }
     }
 }

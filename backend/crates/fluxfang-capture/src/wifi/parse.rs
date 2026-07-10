@@ -56,9 +56,17 @@
 //! frame with *no* SSID tag at all (e.g. truncated before reaching one)
 //! yields `None`.
 
+use crate::wifi::security::{self, WifiSecurity};
 use crate::RawObservation;
 use chrono::{DateTime, Utc};
 use serde_json::json;
+
+/// RSN information element tag id.
+const TAG_RSN: u8 = 48;
+/// Vendor-specific information element tag id (carries the WPA IE).
+const TAG_VENDOR: u8 = 221;
+/// Beacon capability-info `Privacy` bit (bit 4).
+const CAP_PRIVACY: u16 = 0x0010;
 
 /// A single WiFi management-frame observation extracted by [`parse_frame`].
 #[derive(Debug, Clone, PartialEq)]
@@ -92,6 +100,10 @@ pub struct WifiObservation {
     pub channel: Option<u16>,
     /// Antenna signal in dBm from the radiotap header, if present.
     pub signal_strength: Option<i32>,
+    /// AP security parsed from the beacon's RSN/WPA IEs + Privacy bit.
+    /// `None` for non-beacon frames (probe/association) and for beacons where
+    /// no security info could be parsed.
+    pub security: Option<WifiSecurity>,
 }
 
 impl WifiObservation {
@@ -131,6 +143,11 @@ impl WifiObservation {
         }
         if let Some(target_ssid) = self.target_ssid {
             obj.insert("target_ssid".to_string(), json!(target_ssid));
+        }
+        if let Some(sec) = &self.security {
+            for (k, v) in sec.to_json_fields() {
+                obj.insert(k, v);
+            }
         }
         RawObservation {
             kind: "wifi".to_string(),
@@ -232,6 +249,11 @@ pub fn parse_frame(bytes: &[u8]) -> Option<WifiObservation> {
         _ => (parsed_ssid, None),
     };
 
+    let security = match frame_type {
+        "beacon" => parse_beacon_security(dot11),
+        _ => None,
+    };
+
     Some(WifiObservation {
         bssid,
         src_mac,
@@ -241,6 +263,7 @@ pub fn parse_frame(bytes: &[u8]) -> Option<WifiObservation> {
         frame_type: frame_type.to_string(),
         channel,
         signal_strength,
+        security,
     })
 }
 
@@ -297,4 +320,114 @@ fn parse_ssid_tag(dot11: &[u8], start: usize) -> Option<String> {
         idx = value_end;
     }
     None
+}
+
+/// Parse AP security from a beacon's 802.11 frame body: the Privacy
+/// capability bit (in the 12-byte fixed body) plus the RSN IE (tag 48) and
+/// vendor WPA IE (tag 221) in the tagged parameters. Returns `None` if the
+/// frame is too short to hold the fixed body. Never panics / indexes out of
+/// bounds on malformed input.
+pub fn parse_beacon_security(dot11: &[u8]) -> Option<WifiSecurity> {
+    let cap_off = MAC_HEADER_LEN + 10; // timestamp(8) + interval(2)
+    let capability =
+        dot11.get(cap_off).copied()? as u16 | ((*dot11.get(cap_off + 1)? as u16) << 8);
+    let privacy = capability & CAP_PRIVACY != 0;
+
+    let mut rsn = None;
+    let mut wpa = None;
+    let mut idx = MAC_HEADER_LEN + BEACON_FIXED_BODY_LEN;
+    while idx + 2 <= dot11.len() {
+        let tag_id = dot11[idx];
+        let tag_len = dot11[idx + 1] as usize;
+        let value_start = idx + 2;
+        let value_end = value_start + tag_len;
+        if value_end > dot11.len() {
+            break;
+        }
+        let value = &dot11[value_start..value_end];
+        match tag_id {
+            TAG_RSN => rsn = security::parse_rsn_ie(value),
+            TAG_VENDOR => {
+                if let Some(info) = security::parse_wpa_ie(value) {
+                    wpa = Some(info);
+                }
+            }
+            _ => {}
+        }
+        idx = value_end;
+    }
+    Some(security::normalize(privacy, rsn, wpa))
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    // A minimal beacon dot11 frame: 24-byte MAC header (all zero except
+    // frame-control byte 0 = 0x80), 12-byte fixed body with capability info
+    // Privacy bit set, then SSID tag + RSN IE (WPA2-PSK-CCMP).
+    fn beacon_with_rsn() -> Vec<u8> {
+        let mut f = vec![0u8; MAC_HEADER_LEN];
+        f[0] = FC_BEACON;
+        // fixed body: timestamp(8) + interval(2) + capability(2, Privacy=0x0010)
+        f.extend_from_slice(&[0u8; 8]);
+        f.extend_from_slice(&[0x64, 0x00]); // beacon interval
+        f.extend_from_slice(&[0x10, 0x00]); // capability: Privacy bit set
+        // SSID tag (id 0, len 4, "Test")
+        f.extend_from_slice(&[0, 4, b'T', b'e', b's', b't']);
+        // RSN IE (id 48): version1, group CCMP, pairwise CCMP, AKM PSK
+        let rsn = [
+            0x01, 0x00, 0x00, 0x0f, 0xac, 4, 0x01, 0x00, 0x00, 0x0f, 0xac, 4, 0x01, 0x00, 0x00,
+            0x0f, 0xac, 2, 0x00, 0x00,
+        ];
+        f.push(48);
+        f.push(rsn.len() as u8);
+        f.extend_from_slice(&rsn);
+        f
+    }
+
+    #[test]
+    fn beacon_security_parsed_from_rsn() {
+        let sec = parse_beacon_security(&beacon_with_rsn()).unwrap();
+        assert_eq!(sec.label, "WPA2-PSK (CCMP)");
+        assert_eq!(sec.security, vec!["WPA2"]);
+    }
+
+    #[test]
+    fn open_beacon_has_open_security() {
+        let mut f = vec![0u8; MAC_HEADER_LEN];
+        f[0] = FC_BEACON;
+        f.extend_from_slice(&[0u8; 8]);
+        f.extend_from_slice(&[0x64, 0x00]);
+        f.extend_from_slice(&[0x00, 0x00]); // capability: no Privacy
+        f.extend_from_slice(&[0, 4, b'O', b'p', b'e', b'n']); // SSID
+        let sec = parse_beacon_security(&f).unwrap();
+        assert_eq!(sec.label, "Open");
+    }
+
+    #[test]
+    fn security_fields_injected_into_beacon_payload() {
+        let obs = WifiObservation {
+            bssid: Some("aa:bb:cc:dd:ee:ff".into()),
+            src_mac: None,
+            ssid: Some("Test".into()),
+            target_bssid: None,
+            target_ssid: None,
+            frame_type: "beacon".into(),
+            channel: Some(6),
+            signal_strength: Some(-40),
+            security: super::super::security::normalize(
+                true,
+                super::super::security::parse_rsn_ie(&[
+                    0x01, 0x00, 0x00, 0x0f, 0xac, 4, 0x01, 0x00, 0x00, 0x0f, 0xac, 4, 0x01, 0x00,
+                    0x00, 0x0f, 0xac, 2, 0x00, 0x00,
+                ]),
+                None,
+            )
+            .into(),
+        };
+        let raw = obs.into_raw_observation(chrono::Utc::now());
+        assert_eq!(raw.payload["security_label"], "WPA2-PSK (CCMP)");
+        assert_eq!(raw.payload["auth"], serde_json::json!(["PSK"]));
+    }
 }
