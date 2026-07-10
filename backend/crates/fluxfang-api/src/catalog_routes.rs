@@ -14,16 +14,23 @@ use axum::extract::Path;
 use axum::routing::get;
 use axum::{Json, Router};
 
-use fluxfang_core::catalog::catalog_for;
+use fluxfang_core::catalog::{catalog_for, emitter_attribute_catalog};
 
 use crate::dto::FieldDefDto;
 use crate::state::AppState;
 
 pub fn protected_routes() -> Router<AppState> {
-    Router::new().route("/api/catalog/:kind", get(catalog))
+    Router::new()
+        .route("/api/catalog/:kind", get(catalog))
+        .route("/api/emitter-catalog/:emitter_type", get(emitter_catalog))
 }
 
 async fn catalog(Path(kind): Path<String>) -> Json<Vec<FieldDefDto>> {
     let fields = catalog_for(&kind);
+    Json(fields.iter().map(FieldDefDto::from).collect())
+}
+
+async fn emitter_catalog(Path(emitter_type): Path<String>) -> Json<Vec<FieldDefDto>> {
+    let fields = emitter_attribute_catalog(&emitter_type);
     Json(fields.iter().map(FieldDefDto::from).collect())
 }

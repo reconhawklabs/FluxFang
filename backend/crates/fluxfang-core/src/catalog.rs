@@ -110,6 +110,60 @@ pub fn catalog_for(kind: &str) -> Vec<FieldDef> {
     }
 }
 
+/// Field catalog for an **emitter type**'s `attributes` bag (distinct from
+/// [`catalog_for`], which describes emission *payload* fields for a data
+/// source `kind`). Drives the emitters page's advanced attribute filter.
+/// Unknown/user-made types (`emitter_type = None`) → empty catalog.
+///
+/// Array-valued attributes (`security`/`auth`/`cipher`) are `Text` so the
+/// `matches` operator does substring membership over the array's text form.
+/// Boolean attributes (`randomized_mac`) are `Enum(["true","false"])` so
+/// `attributes->>'field'` (text `"true"`/`"false"`) compares cleanly.
+pub fn emitter_attribute_catalog(emitter_type: &str) -> Vec<FieldDef> {
+    match emitter_type {
+        "wifi_access_point" => vec![
+            field("bssid", "BSSID", FieldType::Mac),
+            field("ssid", "SSID", FieldType::Text),
+            field("security", "Security", FieldType::Text),
+            field("auth", "Authentication", FieldType::Text),
+            field("cipher", "Cipher", FieldType::Text),
+            field("security_label", "Security (label)", FieldType::Text),
+        ],
+        "wifi_client" => vec![
+            field("src_mac", "Source MAC", FieldType::Mac),
+            field(
+                "randomized_mac",
+                "Randomized MAC",
+                FieldType::Enum(vec!["true".to_string(), "false".to_string()]),
+            ),
+            field("connected_bssid", "Connected BSSID", FieldType::Mac),
+            field("connected_ssid", "Connected SSID", FieldType::Text),
+        ],
+        "bluetooth_device" => vec![
+            field("address", "Address", FieldType::Mac),
+            field(
+                "address_type",
+                "Address type",
+                FieldType::Enum(vec!["public".to_string(), "random".to_string()]),
+            ),
+            field(
+                "randomized_mac",
+                "Randomized MAC",
+                FieldType::Enum(vec!["true".to_string(), "false".to_string()]),
+            ),
+            field("name", "Local name", FieldType::Text),
+            field("vendor", "Vendor", FieldType::Text),
+            field("device_type", "Device type", FieldType::Text),
+            field("company_id", "Company ID", FieldType::Number),
+        ],
+        "tpms_sensor" => vec![
+            field("sensor_id", "Sensor ID", FieldType::Text),
+            field("model", "Model", FieldType::Text),
+        ],
+        _ => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +232,37 @@ mod tests {
         let pressure = c.iter().find(|f| f.key == "pressure_PSI").unwrap();
         assert_eq!(pressure.ty, FieldType::Number);
         assert!(pressure.ops.contains(&Op::Gte)); // numeric → ordered
+    }
+
+    #[test]
+    fn emitter_catalog_ap_has_security_fields() {
+        let fields = emitter_attribute_catalog("wifi_access_point");
+        assert!(fields.iter().any(|f| f.key == "security"));
+        assert!(fields
+            .iter()
+            .any(|f| f.key == "bssid" && f.ty == crate::catalog::FieldType::Mac));
+    }
+
+    #[test]
+    fn emitter_catalog_bluetooth_company_id_is_number() {
+        let f = emitter_attribute_catalog("bluetooth_device");
+        let company = f.iter().find(|f| f.key == "company_id").unwrap();
+        assert_eq!(company.ty, crate::catalog::FieldType::Number);
+    }
+
+    #[test]
+    fn emitter_catalog_randomized_mac_is_bool_enum() {
+        let f = emitter_attribute_catalog("wifi_client");
+        let r = f.iter().find(|f| f.key == "randomized_mac").unwrap();
+        assert_eq!(
+            r.ty,
+            crate::catalog::FieldType::Enum(vec!["true".to_string(), "false".to_string()])
+        );
+    }
+
+    #[test]
+    fn emitter_catalog_unknown_type_is_empty() {
+        assert!(emitter_attribute_catalog("nope").is_empty());
+        assert!(emitter_attribute_catalog("").is_empty());
     }
 }
