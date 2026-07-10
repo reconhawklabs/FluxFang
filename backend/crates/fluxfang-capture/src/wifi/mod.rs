@@ -13,6 +13,7 @@
 pub mod monitor;
 pub mod parse;
 pub mod scan;
+pub mod security;
 
 pub use monitor::WifiMonitorCapturer;
 pub use parse::{parse_frame, WifiObservation};
