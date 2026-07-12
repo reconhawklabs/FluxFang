@@ -11,6 +11,7 @@ pub mod bluetooth;
 pub mod catalog;
 pub mod classify;
 pub mod correlate;
+pub mod cotravel;
 pub mod rule;
 pub mod rule_sql;
 pub mod secrets;
@@ -22,6 +23,7 @@ pub use classify::{
     catalog_kind_for, classify, emitter_category, emitter_type_label, emitter_types_for_kind,
     is_known_emitter_type, is_randomized_mac, Classification, EmitterTypeInfo,
 };
+pub use cotravel::{score as cotravel_score, CoTravelMetrics, CoTravelScore, Tier as CoTravelTier};
 pub use rule::{Condition, MatchMode, Op, Rule};
 pub use rule_sql::{conditions_to_sql, conditions_to_sql_checked, RuleSqlError};
 pub use secrets::{decrypt, encrypt, key_from_base64, SecretError};
