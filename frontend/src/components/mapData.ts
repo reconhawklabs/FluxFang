@@ -68,6 +68,34 @@ export function emissionPointsToHeatmapGeoJSON(
   };
 }
 
+/** A located detection carrying its signal strength — the Co-Travel Details
+ * map plots one circle per point, colored by `signal_strength`. */
+export interface SightingPoint {
+  lon: number;
+  lat: number;
+  signal_strength: number | null;
+}
+
+export interface SightingPointProperties {
+  rssi: number | null;
+}
+
+/** `points` -> a GeoJSON `FeatureCollection<Point>` whose features each carry
+ * an `rssi` property, so a MapLibre circle layer can color each detection by
+ * signal strength. No filtering (callers pass already-located points). */
+export function sightingPointsToGeoJSON(
+  points: SightingPoint[],
+): FeatureCollection<Point, SightingPointProperties> {
+  return {
+    type: 'FeatureCollection',
+    features: points.map((p) => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [p.lon, p.lat] },
+      properties: { rssi: p.signal_strength },
+    })),
+  };
+}
+
 /** One entity's last known location — the caller (`MapView`) derives this
  * per entity from `GET /api/entities/:id`'s `recent_detections` (see that
  * component's doc comment for exactly how "last" is chosen), so this module
