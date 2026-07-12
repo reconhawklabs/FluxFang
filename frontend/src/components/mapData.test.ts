@@ -3,12 +3,13 @@
 // (a closed polygon whose ring sits ~`radius_m` from the center). These are
 // tested here instead of GL rendering — see `mapData.ts`'s module doc comment
 // for why (jsdom has no WebGL context).
-import { expect, test } from 'vitest';
+import { describe, expect, it, test } from 'vitest';
 import {
   emissionPointsToHeatmapGeoJSON,
   emitterMarkersFromEmissions,
   entitiesToMarkerFeatures,
   pointsToHeatmapGeoJSON,
+  sightingPointsToGeoJSON,
   zoneToCircleFeature,
   zonesToCircleGeoJSON,
 } from './mapData';
@@ -183,4 +184,18 @@ test('zonesToCircleGeoJSON wraps one closed polygon feature per zone', () => {
   expect(collection.type).toBe('FeatureCollection');
   expect(collection.features).toHaveLength(2);
   expect(collection.features.map((f) => f.properties.name)).toEqual(['Home', 'Office']);
+});
+
+describe('sightingPointsToGeoJSON', () => {
+  it('maps points to features carrying the rssi property', () => {
+    const fc = sightingPointsToGeoJSON([
+      { lon: -84.5, lat: 37.7, signal_strength: -70 },
+      { lon: -84.4, lat: 37.6, signal_strength: null },
+    ]);
+    expect(fc.type).toBe('FeatureCollection');
+    expect(fc.features).toHaveLength(2);
+    expect(fc.features[0].geometry.coordinates).toEqual([-84.5, 37.7]);
+    expect(fc.features[0].properties.rssi).toBe(-70);
+    expect(fc.features[1].properties.rssi).toBeNull();
+  });
 });
