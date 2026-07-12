@@ -1,11 +1,12 @@
 //! `CoTravelRepo`: the Co-Travel Detection page's read model.
 //!
 //! This module owns two things: the per-emitter co-travel aggregate query
-//! (`candidates`, added in a later task) and the `cotravel_ignore` list CRUD
-//! (`ignore`/`unignore`/`list_ignored`). Scoring/tiering is deliberately NOT
-//! here — that's `fluxfang_core::cotravel::score`, a pure function the API
-//! layer applies to each `CoTravelCandidate` this repo returns.
+//! (`candidates`) and the `cotravel_ignore` list CRUD (`ignore`/`unignore`/
+//! `list_ignored`). Scoring/tiering is deliberately NOT here — that's
+//! `fluxfang_core::cotravel::score`, a pure function the API layer applies
+//! to each `CoTravelCandidate` this repo returns.
 
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -58,4 +59,115 @@ impl CoTravelRepo {
         .fetch_all(pool)
         .await
     }
+
+    /// Safety cap on how many qualifying emitters one request materializes
+    /// (the API scores/sorts/paginates the returned set in-process). Far above
+    /// any realistic qualifying count even at the loosest slider settings.
+    pub const MAX_CANDIDATES: i64 = 5000;
+
+    /// Per-emitter co-travel metrics for every emitter that clears the gate
+    /// (`spread >= min_distance_m AND span >= min_time_s`), excluding ignored
+    /// emitters and rows with no location. Ordered by spread descending and
+    /// capped at [`Self::MAX_CANDIDATES`]. See the design doc §4/§6.
+    ///
+    /// Points are counted by snapping each sighting to a grid whose cell size
+    /// is `min_distance_m` (converted to degrees via a flat ~111320 m/degree
+    /// approximation — adequate for a discrete point count; the gate itself
+    /// uses true geodesic `ST_Distance`, so accuracy lives where it matters).
+    pub async fn candidates(
+        pool: &PgPool,
+        filter: &CoTravelFilter,
+    ) -> Result<Vec<CoTravelCandidate>, sqlx::Error> {
+        // $1 time_from (nullable), $2 time_to (nullable), $3 cell size (deg),
+        // $4 min_distance_m, $5 min_time_s.
+        let sql = "
+            WITH snapped AS (
+                SELECT e.emitter_id,
+                       e.observed_at,
+                       ST_X(e.location::geometry) AS lon,
+                       ST_Y(e.location::geometry) AS lat,
+                       ST_SnapToGrid(e.location::geometry, $3, $3) AS cell
+                FROM emission e
+                WHERE e.location IS NOT NULL
+                  AND e.emitter_id IS NOT NULL
+                  AND ($1::timestamptz IS NULL OR e.observed_at >= $1)
+                  AND ($2::timestamptz IS NULL OR e.observed_at <= $2)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM cotravel_ignore ci WHERE ci.emitter_id = e.emitter_id
+                  )
+            ),
+            agg AS (
+                SELECT emitter_id,
+                       COUNT(*)::bigint AS hits,
+                       COUNT(DISTINCT cell)::bigint AS points,
+                       EXTRACT(EPOCH FROM (MAX(observed_at) - MIN(observed_at)))::double precision AS span_s,
+                       MIN(observed_at) AS first_seen,
+                       MAX(observed_at) AS last_seen,
+                       ST_Distance(
+                           ST_SetSRID(ST_MakePoint(MIN(lon), MIN(lat)), 4326)::geography,
+                           ST_SetSRID(ST_MakePoint(MAX(lon), MAX(lat)), 4326)::geography
+                       )::double precision AS spread_m
+                FROM snapped
+                GROUP BY emitter_id
+            )
+            SELECT a.emitter_id,
+                   e.name,
+                   e.emitter_type,
+                   e.identity_key,
+                   e.attributes,
+                   a.hits,
+                   a.points,
+                   a.span_s,
+                   a.spread_m,
+                   a.first_seen,
+                   a.last_seen
+            FROM agg a
+            JOIN emitter e ON e.id = a.emitter_id
+            WHERE a.spread_m >= $4
+              AND a.span_s >= $5
+              AND a.points >= 2
+            ORDER BY a.spread_m DESC
+            LIMIT $6
+        ";
+
+        let cell_deg = filter.min_distance_m / 111_320.0;
+        sqlx::query_as::<_, CoTravelCandidate>(sql)
+            .bind(filter.time_from)
+            .bind(filter.time_to)
+            .bind(cell_deg)
+            .bind(filter.min_distance_m)
+            .bind(filter.min_time_s)
+            .bind(Self::MAX_CANDIDATES)
+            .fetch_all(pool)
+            .await
+    }
+}
+
+/// Filter for [`CoTravelRepo::candidates`]. `min_distance_m` is used both as
+/// the gate threshold (an emitter's sighting spread must be at least this far)
+/// AND as the grid cell size for counting separated "points" (see design doc
+/// §4's slider dual-role).
+#[derive(Debug, Clone)]
+pub struct CoTravelFilter {
+    pub time_from: Option<DateTime<Utc>>,
+    pub time_to: Option<DateTime<Utc>>,
+    pub min_distance_m: f64,
+    pub min_time_s: f64,
+}
+
+/// One emitter's raw co-travel metrics over the window (pre-scoring). The API
+/// layer maps these through `fluxfang_core::cotravel::score`.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct CoTravelCandidate {
+    pub emitter_id: Uuid,
+    pub name: String,
+    pub emitter_type: Option<String>,
+    pub identity_key: Option<String>,
+    pub attributes: serde_json::Value,
+    pub hits: i64,
+    pub points: i64,
+    pub span_s: f64,
+    pub spread_m: f64,
+    pub first_seen: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
 }

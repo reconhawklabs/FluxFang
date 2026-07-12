@@ -1,10 +1,12 @@
-//! Round-trip tests for `CoTravelRepo`'s ignore list.
+//! Round-trip tests for `CoTravelRepo`'s ignore list and candidate query.
 
 mod common;
 
-use common::fresh_pool;
-use fluxfang_db::models::NewEmitter;
-use fluxfang_db::{CoTravelRepo, EmitterRepo};
+use chrono::{Duration, Utc};
+use common::{fresh_pool, seed_session, seed_wifi_source};
+use fluxfang_db::models::{NewEmission, NewEmitter};
+use fluxfang_db::repo::cotravel::CoTravelFilter;
+use fluxfang_db::{CoTravelRepo, EmissionRepo, EmitterRepo};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -62,4 +64,101 @@ async fn unignore_unknown_id_is_zero() {
     let pool = fresh_pool().await;
     let removed = CoTravelRepo::unignore(&pool, Uuid::new_v4()).await.unwrap();
     assert_eq!(removed, 0);
+}
+
+/// Insert a located wifi emission for `emitter_id` at (lon,lat), `t`.
+async fn insert_located(
+    pool: &PgPool,
+    ds: Uuid,
+    session: Uuid,
+    emitter_id: Uuid,
+    lon: f64,
+    lat: f64,
+    t: chrono::DateTime<Utc>,
+) {
+    let mut new = NewEmission::wifi(ds, session, serde_json::json!({"bssid": "x"}));
+    new.emitter_id = Some(emitter_id);
+    new.location = Some((lon, lat));
+    new.observed_at = t;
+    new.location_quality = "fresh".to_string();
+    EmissionRepo::insert(pool, new).await.unwrap();
+}
+
+#[tokio::test]
+async fn candidate_gate_and_metrics() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+    let now = Utc::now();
+
+    // Mover: two sightings ~1.5 km apart, 10 min apart -> clears a 402 m / 30 s gate.
+    let mover = seed_emitter(&pool, "mover").await;
+    insert_located(&pool, ds, session, mover, -84.500, 37.700, now).await;
+    insert_located(&pool, ds, session, mover, -84.483, 37.700, now + Duration::minutes(10)).await;
+
+    // Stationary: two sightings at the same point -> spread 0, fails the gate.
+    let fixed = seed_emitter(&pool, "fixed").await;
+    insert_located(&pool, ds, session, fixed, -84.400, 37.600, now).await;
+    insert_located(&pool, ds, session, fixed, -84.400, 37.600, now + Duration::minutes(10)).await;
+
+    let filter = CoTravelFilter {
+        time_from: None,
+        time_to: None,
+        min_distance_m: 402.336,
+        min_time_s: 30.0,
+    };
+    let rows = CoTravelRepo::candidates(&pool, &filter).await.unwrap();
+
+    assert_eq!(rows.len(), 1, "only the mover should clear the gate");
+    let r = &rows[0];
+    assert_eq!(r.emitter_id, mover);
+    assert!(r.spread_m > 1000.0 && r.spread_m < 2000.0, "spread was {}", r.spread_m);
+    assert!(r.span_s >= 599.0, "span was {}", r.span_s);
+    assert_eq!(r.hits, 2);
+    assert!(r.points >= 2);
+}
+
+#[tokio::test]
+async fn candidate_excludes_ignored() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+    let now = Utc::now();
+
+    let mover = seed_emitter(&pool, "mover").await;
+    insert_located(&pool, ds, session, mover, -84.500, 37.700, now).await;
+    insert_located(&pool, ds, session, mover, -84.483, 37.700, now + Duration::minutes(10)).await;
+
+    CoTravelRepo::ignore(&pool, mover).await.unwrap();
+
+    let filter = CoTravelFilter {
+        time_from: None,
+        time_to: None,
+        min_distance_m: 402.336,
+        min_time_s: 30.0,
+    };
+    let rows = CoTravelRepo::candidates(&pool, &filter).await.unwrap();
+    assert!(rows.is_empty(), "ignored emitter must not appear");
+}
+
+#[tokio::test]
+async fn candidate_time_window_filters() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+    let now = Utc::now();
+
+    let mover = seed_emitter(&pool, "mover").await;
+    insert_located(&pool, ds, session, mover, -84.500, 37.700, now).await;
+    insert_located(&pool, ds, session, mover, -84.483, 37.700, now + Duration::minutes(10)).await;
+
+    // Window ending before the second sighting leaves only one point -> no gate.
+    let filter = CoTravelFilter {
+        time_from: None,
+        time_to: Some(now + Duration::minutes(1)),
+        min_distance_m: 402.336,
+        min_time_s: 30.0,
+    };
+    let rows = CoTravelRepo::candidates(&pool, &filter).await.unwrap();
+    assert!(rows.is_empty());
 }

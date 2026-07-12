@@ -35,7 +35,7 @@ pub mod zone_membership;
 pub use alert_method::AlertMethodRepo;
 pub use alert_rule::AlertRuleRepo;
 pub use app_config::AppConfigRepo;
-pub use cotravel::{CoTravelRepo, IgnoredEmitter};
+pub use cotravel::{CoTravelCandidate, CoTravelFilter, CoTravelRepo, IgnoredEmitter};
 pub use data_source::DataSourceRepo;
 pub use emission::EmissionRepo;
 pub use emitter::EmitterRepo;
