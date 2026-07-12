@@ -115,7 +115,44 @@ async fn candidate_gate_and_metrics() {
     assert!(r.spread_m > 1000.0 && r.spread_m < 2000.0, "spread was {}", r.spread_m);
     assert!(r.span_s >= 599.0, "span was {}", r.span_s);
     assert_eq!(r.hits, 2);
-    assert!(r.points >= 2);
+    assert_eq!(r.points, 2);
+}
+
+/// A bounding-box diagonal (MIN/MAX corner-to-corner) over-reports spread for
+/// 3+-point emitters versus the true max pairwise (convex-hull diameter)
+/// distance. Seed a bent path where the bbox diagonal (~123 km) is
+/// meaningfully larger than the true farthest pair (~114 km, A-C), and assert
+/// the query reports the true value.
+#[tokio::test]
+async fn candidate_spread_is_true_max_pairwise_not_bbox() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+    let now = Utc::now();
+
+    let bent = seed_emitter(&pool, "bent").await;
+    // A
+    insert_located(&pool, ds, session, bent, -84.60, 37.00, now).await;
+    // B
+    insert_located(&pool, ds, session, bent, -84.00, 37.00, now + Duration::minutes(5)).await;
+    // C
+    insert_located(&pool, ds, session, bent, -84.30, 38.00, now + Duration::minutes(10)).await;
+
+    let filter = CoTravelFilter {
+        time_from: None,
+        time_to: None,
+        min_distance_m: 402.336,
+        min_time_s: 30.0,
+    };
+    let rows = CoTravelRepo::candidates(&pool, &filter).await.unwrap();
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].points, 3);
+    assert!(
+        rows[0].spread_m > 108_000.0 && rows[0].spread_m < 118_000.0,
+        "spread was {}",
+        rows[0].spread_m
+    );
 }
 
 #[tokio::test]

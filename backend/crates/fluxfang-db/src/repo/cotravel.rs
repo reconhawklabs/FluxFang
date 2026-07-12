@@ -72,8 +72,9 @@ impl CoTravelRepo {
     ///
     /// Points are counted by snapping each sighting to a grid whose cell size
     /// is `min_distance_m` (converted to degrees via a flat ~111320 m/degree
-    /// approximation — adequate for a discrete point count; the gate itself
-    /// uses true geodesic `ST_Distance`, so accuracy lives where it matters).
+    /// approximation — adequate for a discrete point count). `spread_m` is the
+    /// true geodesic max distance between sighting points (convex-hull
+    /// diameter), so 3+-point emitters are not over-reported.
     pub async fn candidates(
         pool: &PgPool,
         filter: &CoTravelFilter,
@@ -103,30 +104,35 @@ impl CoTravelRepo {
                        EXTRACT(EPOCH FROM (MAX(observed_at) - MIN(observed_at)))::double precision AS span_s,
                        MIN(observed_at) AS first_seen,
                        MAX(observed_at) AS last_seen,
-                       ST_Distance(
-                           ST_SetSRID(ST_MakePoint(MIN(lon), MIN(lat)), 4326)::geography,
-                           ST_SetSRID(ST_MakePoint(MAX(lon), MAX(lat)), 4326)::geography
-                       )::double precision AS spread_m
+                       ST_ConvexHull(ST_Collect(ST_SetSRID(ST_MakePoint(lon, lat), 4326))) AS hull
                 FROM snapped
                 GROUP BY emitter_id
+            ),
+            metrics AS (
+                SELECT emitter_id, hits, points, span_s, first_seen, last_seen,
+                       COALESCE(
+                           ST_Length(ST_LongestLine(hull, hull)::geography),
+                           0
+                       )::double precision AS spread_m
+                FROM agg
             )
-            SELECT a.emitter_id,
+            SELECT m.emitter_id,
                    e.name,
                    e.emitter_type,
                    e.identity_key,
                    e.attributes,
-                   a.hits,
-                   a.points,
-                   a.span_s,
-                   a.spread_m,
-                   a.first_seen,
-                   a.last_seen
-            FROM agg a
-            JOIN emitter e ON e.id = a.emitter_id
-            WHERE a.spread_m >= $4
-              AND a.span_s >= $5
-              AND a.points >= 2
-            ORDER BY a.spread_m DESC
+                   m.hits,
+                   m.points,
+                   m.span_s,
+                   m.spread_m,
+                   m.first_seen,
+                   m.last_seen
+            FROM metrics m
+            JOIN emitter e ON e.id = m.emitter_id
+            WHERE m.spread_m >= $4
+              AND m.span_s >= $5
+              AND m.points >= 2
+            ORDER BY m.spread_m DESC
             LIMIT $6
         ";
 
