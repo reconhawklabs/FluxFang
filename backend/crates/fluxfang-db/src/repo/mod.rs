@@ -20,6 +20,7 @@
 pub mod alert_method;
 pub mod alert_rule;
 pub mod app_config;
+pub mod cotravel;
 pub mod data_source;
 pub mod emission;
 pub mod emitter;
@@ -34,6 +35,7 @@ pub mod zone_membership;
 pub use alert_method::AlertMethodRepo;
 pub use alert_rule::AlertRuleRepo;
 pub use app_config::AppConfigRepo;
+pub use cotravel::{CoTravelRepo, IgnoredEmitter};
 pub use data_source::DataSourceRepo;
 pub use emission::EmissionRepo;
 pub use emitter::EmitterRepo;
