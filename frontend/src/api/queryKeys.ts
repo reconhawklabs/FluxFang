@@ -48,6 +48,8 @@ export const queryKeys = {
   alertRules: ['alertRules'] as const,
   notifications: ['notifications'] as const,
   gpsStatus: ['gpsStatus'] as const,
+  coTravel: ['coTravel'] as const,
+  coTravelIgnored: ['coTravelIgnored'] as const,
   catalog: (kind: string) => ['catalog', kind] as const,
   emitterTypes: (kind: string) => ['emitterTypes', kind] as const,
 };
