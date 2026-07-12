@@ -157,13 +157,29 @@ async fn co_travel_ranks_mover_and_ignore_hides_it() {
     assert_eq!(ignored[0]["id"], emitter_id.to_string(), "body: {ignored}");
 }
 
-/// A non-numeric `min_distance_m` is rejected with `400`.
+/// A non-numeric `min_distance_m` is rejected with `400`, and so is every
+/// other malformed query param the endpoint parses.
 #[tokio::test]
 async fn co_travel_rejects_bad_params() {
     let (app, _pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
     let cookie = login(&app).await;
 
     let resp = get_with_cookie(&app, "/api/co-travel?min_distance_m=notanumber", &cookie).await;
+    assert_status(&resp, StatusCode::BAD_REQUEST);
+
+    let resp = get_with_cookie(&app, "/api/co-travel?min_time_s=notanumber", &cookie).await;
+    assert_status(&resp, StatusCode::BAD_REQUEST);
+
+    let resp = get_with_cookie(&app, "/api/co-travel?limit=notanumber", &cookie).await;
+    assert_status(&resp, StatusCode::BAD_REQUEST);
+
+    let resp = get_with_cookie(&app, "/api/co-travel?offset=notanumber", &cookie).await;
+    assert_status(&resp, StatusCode::BAD_REQUEST);
+
+    let resp = get_with_cookie(&app, "/api/co-travel?from=notadate", &cookie).await;
+    assert_status(&resp, StatusCode::BAD_REQUEST);
+
+    let resp = get_with_cookie(&app, "/api/co-travel?to=notadate", &cookie).await;
     assert_status(&resp, StatusCode::BAD_REQUEST);
 }
 

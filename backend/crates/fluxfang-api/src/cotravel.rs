@@ -172,13 +172,13 @@ fn parse_params(raw: &str) -> Result<Params, ApiError> {
             "limit" => {
                 limit = value
                     .parse::<i64>()
-                    .map_err(|_| ApiError::BadRequest(format!("invalid limit: {value:?}")))?
+                    .map_err(|_| ApiError::BadRequest(format!("invalid limit: {value:?} (expected an integer)")))?
                     .clamp(1, MAX_LIMIT)
             }
             "offset" => {
                 offset = value
                     .parse::<i64>()
-                    .map_err(|_| ApiError::BadRequest(format!("invalid offset: {value:?}")))?
+                    .map_err(|_| ApiError::BadRequest(format!("invalid offset: {value:?} (expected an integer)")))?
                     .max(0)
             }
             _ => {}

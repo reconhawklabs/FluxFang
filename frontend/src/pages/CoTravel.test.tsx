@@ -50,4 +50,11 @@ describe('CoTravel page', () => {
     fireEvent.click(screen.getByRole('button', { name: /ignore/i }));
     await waitFor(() => expect(coTravelApi.ignoreEmitter).toHaveBeenCalledWith('e1'));
   });
+
+  it('shows a "top N of total" note when results are capped', async () => {
+    vi.mocked(coTravelApi.listCoTravel).mockResolvedValue({ items: [item], total: 750 });
+    renderPage();
+    await waitFor(() => expect(screen.getByText('wifi_client:aa:bb')).toBeInTheDocument());
+    expect(screen.getByText(/showing top 1 of 750 emitters/i)).toBeInTheDocument();
+  });
 });

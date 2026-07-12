@@ -110,6 +110,11 @@ impl CoTravelRepo {
             ),
             metrics AS (
                 SELECT emitter_id, hits, points, span_s, first_seen, last_seen,
+                       -- Farthest vertex pair on the hull is picked in planar
+                       -- (lon/lat degree) space, then that pair's distance is
+                       -- measured geodesically via ::geography — exact, since
+                       -- picking the max-distance pair is invariant to the
+                       -- monotonic degree->meter mapping at these latitudes/spans.
                        COALESCE(
                            ST_Length(ST_LongestLine(hull, hull)::geography),
                            0

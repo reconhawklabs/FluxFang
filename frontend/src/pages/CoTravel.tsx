@@ -92,6 +92,8 @@ export default function CoTravel() {
   }, [query.data]);
 
   const total = query.data?.total ?? 0;
+  const fetchedCount = query.data?.items.length ?? 0;
+  const isCapped = total > fetchedCount;
 
   return (
     <div className="space-y-6">
@@ -119,7 +121,11 @@ export default function CoTravel() {
       </div>
 
       <div className="text-sm text-slate-400">
-        {query.isLoading ? 'Analyzing…' : `${total} emitter${total === 1 ? '' : 's'}`}
+        {query.isLoading
+          ? 'Analyzing…'
+          : isCapped
+            ? `showing top ${fetchedCount} of ${total} emitters`
+            : `${total} emitter${total === 1 ? '' : 's'}`}
       </div>
 
       {query.isError && (
