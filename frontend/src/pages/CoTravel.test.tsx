@@ -6,6 +6,29 @@ import * as coTravelApi from '../api/coTravel';
 
 vi.mock('../api/coTravel');
 
+// CoTravelRow -> CoTravelDetails -> SightingPointsMap transitively imports
+// maplibre-gl. Rows aren't expanded in these tests so no map instantiates,
+// but this keeps the import inert (same fake used in SightingPointsMap.test.tsx).
+vi.mock('maplibre-gl', () => ({
+  default: {
+    Map: class {
+      constructor() {}
+      addControl() {}
+      on(_e: string, cb: () => void) {
+        if (_e === 'load') cb();
+      }
+      remove() {}
+      addSource() {}
+      addLayer() {}
+      getSource() {
+        return { setData() {} };
+      }
+      fitBounds() {}
+    },
+    NavigationControl: class {},
+  },
+}));
+
 function renderPage() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
@@ -47,7 +70,8 @@ describe('CoTravel page', () => {
   it('calls ignoreEmitter when Ignore is clicked', async () => {
     renderPage();
     await waitFor(() => expect(screen.getByText('wifi_client:aa:bb')).toBeInTheDocument());
-    fireEvent.click(screen.getByRole('button', { name: /ignore/i }));
+    // Exact match: the header's new "Ignored (N)" link also matches /ignore/i.
+    fireEvent.click(screen.getByRole('button', { name: 'Ignore' }));
     await waitFor(() => expect(coTravelApi.ignoreEmitter).toHaveBeenCalledWith('e1'));
   });
 
@@ -56,5 +80,32 @@ describe('CoTravel page', () => {
     renderPage();
     await waitFor(() => expect(screen.getByText('wifi_client:aa:bb')).toBeInTheDocument());
     expect(screen.getByText(/showing top 1 of 750 emitters/i)).toBeInTheDocument();
+  });
+
+  it('sends from/to (RFC3339) to listCoTravel when the date window is set', async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByText('wifi_client:aa:bb')).toBeInTheDocument());
+    const fromInput = screen.getByLabelText(/from/i);
+    fireEvent.change(fromInput, { target: { value: '2026-07-11T10:00' } });
+    await waitFor(() => {
+      // Timezone-robust: a `datetime-local` -> `toISOString()` conversion
+      // shifts local->UTC, so the calendar date can roll over depending on
+      // the test runner's timezone. Assert an RFC3339 `from` was sent at
+      // all, not a hard-coded calendar date.
+      const calledWithFrom = vi
+        .mocked(coTravelApi.listCoTravel)
+        .mock.calls.some(([p]) => typeof p?.from === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(p.from));
+      expect(calledWithFrom).toBe(true);
+    });
+  });
+
+  it('opens the ignored drawer from the header link', async () => {
+    vi.mocked(coTravelApi.listIgnored).mockResolvedValue([
+      { id: 'e9', name: 'X', emitter_type: 'wifi_client', identity_key: 'wifi_client:zz', attributes: {} },
+    ]);
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /ignored/i }));
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument());
+    expect(screen.getByText('wifi_client:zz')).toBeInTheDocument();
   });
 });

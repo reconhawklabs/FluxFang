@@ -1,15 +1,19 @@
 // Co-Travel Detection: ranks emitters by how strongly they behave like they
 // followed you (seen at different places + times), grouped into tiers, with a
-// per-row Ignore. Two snap sliders drive both the gate and the score
-// resolution server-side (see design doc §4). Defaults to all data; a future
-// iteration adds the from/to window inputs.
+// per-row Ignore/Details (map + sparkline). Two snap sliders drive both the
+// gate and the score resolution server-side (see design doc §4). An optional
+// from/to date window (converted from local `datetime-local` inputs to RFC3339
+// UTC) narrows both the ranking query and each row's expanded detections.
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import RangeSlider from '../components/RangeSlider';
+import CoTravelRow from '../components/CoTravelRow';
+import IgnoredDrawer from '../components/IgnoredDrawer';
 import { queryKeys } from '../api/queryKeys';
 import {
   ignoreEmitter,
   listCoTravel,
+  listIgnored,
   type CoTravelItem,
   type CoTravelTier,
 } from '../api/coTravel';
@@ -50,16 +54,12 @@ const TIERS: ReadonlyArray<{ key: CoTravelTier; label: string; dot: string }> = 
   { key: 'minimal', label: 'MINIMAL', dot: 'bg-slate-500' },
 ];
 
-function miles(m: number): string {
-  return `${(m / 1609.34).toFixed(1)} mi`;
-}
-function minutes(s: number): string {
-  return `${(s / 60).toFixed(1)} min`;
-}
-
 export default function CoTravel() {
   const [distanceIndex, setDistanceIndex] = useState(DEFAULT_DISTANCE_INDEX);
   const [timeIndex, setTimeIndex] = useState(DEFAULT_TIME_INDEX);
+  const [fromLocal, setFromLocal] = useState('');
+  const [toLocal, setToLocal] = useState('');
+  const [drawerOpen, setDrawerOpen] = useState(false);
 
   const minDistanceM = DISTANCE_STOPS[distanceIndex].meters;
   const minTimeS = TIME_STOPS[timeIndex].seconds;
@@ -68,11 +68,27 @@ export default function CoTravel() {
   const debouncedDistance = useDebouncedValue(minDistanceM, 300);
   const debouncedTime = useDebouncedValue(minTimeS, 300);
 
-  const params = { min_distance_m: debouncedDistance, min_time_s: debouncedTime, limit: 500 };
+  // datetime-local (local time, no zone) -> RFC3339 UTC; empty -> undefined.
+  const fromRfc = fromLocal ? new Date(fromLocal).toISOString() : undefined;
+  const toRfc = toLocal ? new Date(toLocal).toISOString() : undefined;
+
+  const params = {
+    min_distance_m: debouncedDistance,
+    min_time_s: debouncedTime,
+    from: fromRfc,
+    to: toRfc,
+    limit: 500,
+  };
   const query = useQuery({
     queryKey: [...queryKeys.coTravel, params],
     queryFn: () => listCoTravel(params),
   });
+
+  const ignoredCountQuery = useQuery({
+    queryKey: queryKeys.coTravelIgnored,
+    queryFn: listIgnored,
+  });
+  const ignoredCount = ignoredCountQuery.data?.length ?? 0;
 
   const qc = useQueryClient();
   const ignore = useMutation({
@@ -97,12 +113,21 @@ export default function CoTravel() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-lg font-semibold text-slate-100">Co-Travel Detection</h1>
-        <p className="text-sm text-slate-400">
-          Emitters seen at different places and times, ranked by how strongly they behave like they
-          followed you.
-        </p>
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="text-lg font-semibold text-slate-100">Co-Travel Detection</h1>
+          <p className="text-sm text-slate-400">
+            Emitters seen at different places and times, ranked by how strongly they behave like they
+            followed you.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setDrawerOpen(true)}
+          className="shrink-0 rounded border border-slate-700 px-3 py-1.5 text-xs text-slate-300 transition hover:border-slate-500 hover:text-slate-100"
+        >
+          Ignored ({ignoredCount})
+        </button>
       </div>
 
       <div className="grid max-w-xl grid-cols-1 gap-4 rounded border border-slate-800 bg-slate-900/40 p-4 sm:grid-cols-2">
@@ -118,6 +143,41 @@ export default function CoTravel() {
           value={timeIndex}
           onChange={setTimeIndex}
         />
+      </div>
+
+      <div className="flex max-w-xl flex-wrap items-end gap-3 rounded border border-slate-800 bg-slate-900/40 p-4">
+        <label className="flex flex-col gap-1 text-xs text-slate-400">
+          From
+          <input
+            type="datetime-local"
+            aria-label="From"
+            value={fromLocal}
+            onChange={(e) => setFromLocal(e.target.value)}
+            className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-200"
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-xs text-slate-400">
+          To
+          <input
+            type="datetime-local"
+            aria-label="To"
+            value={toLocal}
+            onChange={(e) => setToLocal(e.target.value)}
+            className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-200"
+          />
+        </label>
+        {(fromLocal || toLocal) && (
+          <button
+            type="button"
+            onClick={() => {
+              setFromLocal('');
+              setToLocal('');
+            }}
+            className="rounded border border-slate-700 px-3 py-1.5 text-xs text-slate-300 transition hover:border-slate-500 hover:text-slate-100"
+          >
+            Clear
+          </button>
+        )}
       </div>
 
       <div className="text-sm text-slate-400">
@@ -146,31 +206,22 @@ export default function CoTravel() {
               </header>
               <ul className="divide-y divide-slate-800">
                 {rows.map((it) => (
-                  <li key={it.emitter_id} className="flex items-center justify-between gap-4 px-4 py-3">
-                    <div className="min-w-0">
-                      <div className="truncate text-sm text-slate-100">
-                        {it.emitter_type ?? 'emitter'} · <span>{it.identity_key ?? it.name}</span>
-                      </div>
-                      <div className="text-xs text-slate-400">
-                        {miles(it.spread_m)} spread · {it.points} points · {minutes(it.span_s)} ·{' '}
-                        {it.hits} hits · score {it.score}
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => ignore.mutate(it.emitter_id)}
-                      disabled={ignore.isPending}
-                      className="shrink-0 rounded border border-slate-700 px-3 py-1 text-xs text-slate-300 transition hover:border-slate-500 hover:text-slate-100 disabled:opacity-50"
-                    >
-                      Ignore
-                    </button>
-                  </li>
+                  <CoTravelRow
+                    key={it.emitter_id}
+                    item={it}
+                    from={fromRfc}
+                    to={toRfc}
+                    onIgnore={ignore.mutate}
+                    ignoring={ignore.isPending}
+                  />
                 ))}
               </ul>
             </section>
           );
         })}
       </div>
+
+      <IgnoredDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
     </div>
   );
 }
