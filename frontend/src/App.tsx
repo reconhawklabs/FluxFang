@@ -19,6 +19,7 @@ import DataSources from "./pages/DataSources";
 import Emissions from "./pages/Emissions";
 import Emitters from "./pages/Emitters";
 import EmitterDetailPage from "./pages/EmitterDetailPage";
+import CoTravel from "./pages/CoTravel";
 import Entities from "./pages/Entities";
 import EntityDetailPage from "./pages/EntityDetailPage";
 import Zones from "./pages/Zones";
@@ -69,6 +70,7 @@ export default function App() {
         <Route path="emissions" element={<Emissions />} />
         <Route path="emitters" element={<Emitters />} />
         <Route path="emitters/:id" element={<EmitterDetailPage />} />
+        <Route path="co-travel" element={<CoTravel />} />
         <Route path="entities" element={<Entities />} />
         <Route path="entities/:id" element={<EntityDetailPage />} />
         <Route path="zones" element={<Zones />} />
