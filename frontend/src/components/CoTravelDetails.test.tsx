@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ReactNode } from 'react';
 import CoTravelDetails from './CoTravelDetails';
 import * as emissionsApi from '../api/emissions';
 
@@ -13,7 +14,7 @@ vi.mock('./SightingPointsMap', () => ({
   ),
 }));
 
-function wrap(ui: React.ReactNode) {
+function wrap(ui: ReactNode) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return <QueryClientProvider client={qc}>{ui}</QueryClientProvider>;
 }

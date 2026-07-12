@@ -124,6 +124,7 @@ export default function CoTravel() {
         <button
           type="button"
           onClick={() => setDrawerOpen(true)}
+          aria-label="View ignored emitters"
           className="shrink-0 rounded border border-slate-700 px-3 py-1.5 text-xs text-slate-300 transition hover:border-slate-500 hover:text-slate-100"
         >
           Ignored ({ignoredCount})

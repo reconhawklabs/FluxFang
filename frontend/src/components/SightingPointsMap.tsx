@@ -99,6 +99,8 @@ export default function SightingPointsMap({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- recreate only on empty<->non-empty transition.
   }, [hasPoints]);
 
+  const pointsSignature = points.map((p) => `${p.lon},${p.lat}`).join('|');
+
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !styleLoaded) return;
@@ -106,7 +108,8 @@ export default function SightingPointsMap({
     source?.setData(sightingPointsToGeoJSON(points));
     const bounds = boundsFor(points);
     if (bounds) map.fitBounds(bounds, { padding: 40, maxZoom: 16, duration: 0 });
-  }, [styleLoaded, points]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- re-fit only when the point coordinates change, not on every render.
+  }, [styleLoaded, pointsSignature]);
 
   if (!hasPoints) {
     return (
