@@ -24,6 +24,7 @@ import {
   listDataSources,
   startDataSource,
   stopDataSource,
+  updateDataSource,
 } from '../api/dataSources';
 import type {
   BaudRate,
@@ -758,9 +759,100 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
   );
 }
 
+interface EditManualModalProps {
+  source: DataSource;
+  onClose: () => void;
+  onSave: (lat: number, lon: number) => void;
+  saving: boolean;
+}
+
+/** Edit affordance for a stopped `gps`+`manual` source (Task 8): a small
+ * lat/lon form that PATCHes the source's static location via
+ * `updateDataSource`. Mirrors the Add form's manual lat/lon inputs
+ * (`inputClassName`/`labelClassName`) and validation range so the two entry
+ * points stay visually and behaviorally consistent. */
+function EditManualModal({ source, onClose, onSave, saving }: EditManualModalProps) {
+  const cfg = source.config as { lat?: number; lon?: number };
+  const [lat, setLat] = useState(cfg.lat != null ? String(cfg.lat) : '');
+  const [lon, setLon] = useState(cfg.lon != null ? String(cfg.lon) : '');
+
+  const latNum = Number(lat);
+  const lonNum = Number(lon);
+  const valid =
+    lat.trim() !== '' &&
+    lon.trim() !== '' &&
+    Number.isFinite(latNum) &&
+    Number.isFinite(lonNum) &&
+    latNum >= -90 &&
+    latNum <= 90 &&
+    lonNum >= -180 &&
+    lonNum <= 180;
+
+  return (
+    <div className="fixed inset-0 z-10 flex items-center justify-center bg-slate-950/70 px-4">
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (valid) onSave(latNum, lonNum);
+        }}
+        className="w-full max-w-sm space-y-4 rounded-lg border border-slate-800 bg-slate-900 p-6 shadow-xl"
+      >
+        <h2 className="text-lg font-semibold text-slate-100">Edit Manual Location</h2>
+        <div className="grid grid-cols-2 gap-3">
+          <div className="space-y-1">
+            <label htmlFor="edit-lat" className={labelClassName}>
+              Latitude
+            </label>
+            <input
+              id="edit-lat"
+              type="number"
+              step="any"
+              inputMode="decimal"
+              value={lat}
+              onChange={(event) => setLat(event.target.value)}
+              className={`font-mono ${inputClassName}`}
+            />
+          </div>
+          <div className="space-y-1">
+            <label htmlFor="edit-lon" className={labelClassName}>
+              Longitude
+            </label>
+            <input
+              id="edit-lon"
+              type="number"
+              step="any"
+              inputMode="decimal"
+              value={lon}
+              onChange={(event) => setLon(event.target.value)}
+              className={`font-mono ${inputClassName}`}
+            />
+          </div>
+        </div>
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded border border-slate-700 px-3 py-1.5 text-sm text-slate-300 transition hover:border-slate-500 hover:text-slate-100"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={!valid || saving}
+            className="rounded bg-amber-500 px-3 py-1.5 text-sm font-semibold text-slate-950 transition hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 export default function DataSources() {
   const queryClient = useQueryClient();
   const [showAddForm, setShowAddForm] = useState(false);
+  const [editing, setEditing] = useState<DataSource | null>(null);
 
   const sourcesQuery = useQuery({
     queryKey: queryKeys.dataSources,
@@ -793,6 +885,15 @@ export default function DataSources() {
   const deleteMutation = useMutation({
     mutationFn: deleteDataSource,
     onSuccess: invalidate,
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: ({ id, lat, lon }: { id: string; lat: number; lon: number }) =>
+      updateDataSource(id, { mode: 'manual', config: { lat, lon } }),
+    onSuccess: () => {
+      invalidate();
+      setEditing(null);
+    },
   });
 
   function handleDelete(id: string): void {
@@ -846,7 +947,9 @@ export default function DataSources() {
               const startPending = startMutation.isPending && startMutation.variables === source.id;
               const stopPending = stopMutation.isPending && stopMutation.variables === source.id;
               const deletePending = deleteMutation.isPending && deleteMutation.variables === source.id;
-              const rowBusy = startPending || stopPending || deletePending;
+              const updatePending =
+                updateMutation.isPending && updateMutation.variables?.id === source.id;
+              const rowBusy = startPending || stopPending || deletePending || updatePending;
 
               return (
                 <tr
@@ -890,6 +993,18 @@ export default function DataSources() {
                           {stopPending ? 'Stopping…' : 'Stop'}
                         </button>
                       )}
+                      {source.kind === 'gps' &&
+                        source.mode === 'manual' &&
+                        source.status !== 'running' && (
+                          <button
+                            type="button"
+                            disabled={rowBusy}
+                            onClick={() => setEditing(source)}
+                            className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 transition hover:border-amber-500 hover:text-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            Edit
+                          </button>
+                        )}
                       <button
                         type="button"
                         disabled={rowBusy}
@@ -916,6 +1031,15 @@ export default function DataSources() {
           onSubmit={(input) => createMutation.mutate(input)}
           submitting={createMutation.isPending}
           errorMessage={createErrorMessage}
+        />
+      )}
+
+      {editing && (
+        <EditManualModal
+          source={editing}
+          onClose={() => setEditing(null)}
+          onSave={(lat, lon) => updateMutation.mutate({ id: editing.id, lat, lon })}
+          saving={updateMutation.isPending}
         />
       )}
     </div>
