@@ -12,10 +12,10 @@
 //   - gps  + gpsd     -> `config: { host, port }`
 //   - gps  + serial   -> `config: { device, baud }`, `baud` one of
 //     `BAUD_RATES` (the backend's `ALLOWED_BAUD_RATES`)
-import { del, get, post } from "./client";
+import { del, get, patch, post } from "./client";
 
 export type DataSourceKind = "wifi" | "gps" | "bluetooth" | "rtl_sdr";
-export type DataSourceMode = "monitor" | "scan" | "gpsd" | "serial" | "tpms";
+export type DataSourceMode = "monitor" | "scan" | "gpsd" | "serial" | "tpms" | "manual";
 export type DataSourceStatus = "stopped" | "starting" | "running" | "error";
 
 /** The backend's `ALLOWED_BAUD_RATES` (`fluxfang-api::capture`) — the only
@@ -33,6 +33,14 @@ export interface GpsdConfig {
 export interface SerialConfig {
   device: string;
   baud: BaudRate;
+}
+
+/** gps `manual` mode's `config` — an operator-typed static location served as
+ * the host position while the source runs. `lat ∈ [-90,90]`, `lon ∈
+ * [-180,180]` (validated by the backend's `validate_data_source`). */
+export interface ManualConfig {
+  lat: number;
+  lon: number;
 }
 
 /** wifi's `config` — the interface lives on the top-level `interface` field
@@ -76,7 +84,13 @@ export interface RtlSdrConfig {
 }
 
 export type DataSourceConfig =
-  WifiConfig | BtConfig | RtlSdrConfig | GpsdConfig | SerialConfig | Record<string, never>;
+  | WifiConfig
+  | BtConfig
+  | RtlSdrConfig
+  | GpsdConfig
+  | SerialConfig
+  | ManualConfig
+  | Record<string, never>;
 
 /** Mirrors `fluxfang_db::models::DataSource` exactly. */
 export interface DataSource {
@@ -109,6 +123,14 @@ export interface CreateDataSourceInput {
   config: DataSourceConfig;
 }
 
+/** `PATCH /api/data-sources/:id` body — mirrors the backend's
+ * `UpdateDataSourceRequest` (`kind` is immutable and omitted). */
+export interface UpdateDataSourceInput {
+  mode: DataSourceMode;
+  interface?: string;
+  config: DataSourceConfig;
+}
+
 export function listDataSources(): Promise<DataSource[]> {
   return get<DataSource[]>("/api/data-sources");
 }
@@ -117,6 +139,13 @@ export function createDataSource(
   input: CreateDataSourceInput,
 ): Promise<DataSource> {
   return post<DataSource>("/api/data-sources", input);
+}
+
+export function updateDataSource(
+  id: string,
+  input: UpdateDataSourceInput,
+): Promise<DataSource> {
+  return patch<DataSource>(`/api/data-sources/${encodeURIComponent(id)}`, input);
 }
 
 export function startDataSource(id: string): Promise<DataSource> {
