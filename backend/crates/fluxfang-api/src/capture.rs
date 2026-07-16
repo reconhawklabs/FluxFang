@@ -167,6 +167,21 @@ impl CapturerFactory for RealCapturerFactory {
                     let gps = fluxfang_capture::gps::SerialGpsSource::open(device, baud)?;
                     Ok(BuiltCapture::Location(Box::new(gps)))
                 }
+                "manual" => {
+                    let lat = source
+                        .config
+                        .get("lat")
+                        .and_then(|v| v.as_f64())
+                        .ok_or_else(|| anyhow!("gps manual config missing 'lat'"))?;
+                    let lon = source
+                        .config
+                        .get("lon")
+                        .and_then(|v| v.as_f64())
+                        .ok_or_else(|| anyhow!("gps manual config missing 'lon'"))?;
+                    Ok(BuiltCapture::Location(Box::new(
+                        fluxfang_capture::gps::ManualGpsSource::new(lat, lon),
+                    )))
+                }
                 other => Err(anyhow!("unsupported gps mode '{other}'")),
             },
             "bluetooth" => {
@@ -334,6 +349,21 @@ impl CapturerFactory for MockCapturerFactory {
                 Ok(BuiltCapture::Wifi(Box::new(capturer)))
             }
             "gps" => {
+                if source.mode == "manual" {
+                    let lat = source
+                        .config
+                        .get("lat")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let lon = source
+                        .config
+                        .get("lon")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    return Ok(BuiltCapture::Location(Box::new(
+                        fluxfang_capture::gps::ManualGpsSource::new(lat, lon),
+                    )));
+                }
                 let fixes = self.gps_fixes.lock().expect("mutex poisoned").clone();
                 let mut gps = MockGps::new(fixes);
                 if self.loop_gps.load(std::sync::atomic::Ordering::SeqCst) {
@@ -434,8 +464,29 @@ pub(crate) fn validate_data_source(
                 }
                 Ok(())
             }
+            "manual" => {
+                let lat = config.get("lat").and_then(|v| v.as_f64());
+                match lat {
+                    Some(lat) if (-90.0..=90.0).contains(&lat) => {}
+                    Some(_) => {
+                        return Err("gps manual config 'lat' must be between -90 and 90".to_string())
+                    }
+                    None => return Err("gps manual config requires a numeric 'lat'".to_string()),
+                }
+                let lon = config.get("lon").and_then(|v| v.as_f64());
+                match lon {
+                    Some(lon) if (-180.0..=180.0).contains(&lon) => {}
+                    Some(_) => {
+                        return Err(
+                            "gps manual config 'lon' must be between -180 and 180".to_string()
+                        )
+                    }
+                    None => return Err("gps manual config requires a numeric 'lon'".to_string()),
+                }
+                Ok(())
+            }
             other => Err(format!(
-                "unknown gps mode '{other}'; expected 'gpsd' or 'serial'"
+                "unknown gps mode '{other}'; expected 'gpsd', 'serial', or 'manual'"
             )),
         },
         "bluetooth" => {
@@ -1072,6 +1123,39 @@ mod validate_data_source_tests {
         )
         .unwrap_err();
         assert!(err.contains("device_serial"), "got: {err}");
+    }
+
+    #[test]
+    fn gps_manual_with_valid_coords_is_ok() {
+        assert!(
+            validate_data_source("gps", "manual", None, &json!({"lat": 37.7, "lon": -122.4}))
+                .is_ok()
+        );
+        // Boundary values are inclusive.
+        assert!(
+            validate_data_source("gps", "manual", None, &json!({"lat": -90.0, "lon": 180.0}))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn gps_manual_rejects_out_of_range_lat() {
+        let err = validate_data_source("gps", "manual", None, &json!({"lat": 91.0, "lon": 0.0}))
+            .unwrap_err();
+        assert!(err.contains("lat"), "message should mention lat: {err}");
+    }
+
+    #[test]
+    fn gps_manual_rejects_out_of_range_lon() {
+        let err = validate_data_source("gps", "manual", None, &json!({"lat": 0.0, "lon": 181.0}))
+            .unwrap_err();
+        assert!(err.contains("lon"), "message should mention lon: {err}");
+    }
+
+    #[test]
+    fn gps_manual_rejects_missing_coord() {
+        let err = validate_data_source("gps", "manual", None, &json!({"lat": 37.7})).unwrap_err();
+        assert!(err.contains("lon"), "message should mention lon: {err}");
     }
 }
 

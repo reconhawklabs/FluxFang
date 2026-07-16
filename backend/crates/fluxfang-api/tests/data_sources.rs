@@ -1060,3 +1060,203 @@ async fn stop_leaves_a_non_running_source_untouched() {
     assert_eq!(row.status, "error");
     assert_eq!(row.last_error.as_deref(), Some("boom"));
 }
+
+/// Starting a `manual` gps source while another gps source is already running
+/// is rejected — only one location source may run at a time.
+#[tokio::test]
+async fn manual_gps_source_rejected_while_another_gps_running() {
+    let now = chrono::Utc::now();
+    let fixes = vec![fluxfang_capture::GpsFix {
+        at: now,
+        lon: -122.0,
+        lat: 37.0,
+        altitude: None,
+        speed: None,
+        heading: None,
+        quality: 1,
+    }];
+    let factory = Arc::new(MockCapturerFactory::with_gps_fixes(fixes).looping_gps());
+    let (app, _pool) = test_app_with_factory(factory).await;
+    let cookie = login(&app).await;
+
+    // First gps source (gpsd) — start and confirm running.
+    let resp = post_json_with_cookie(
+        &app,
+        "/api/data-sources",
+        r#"{"kind":"gps","mode":"gpsd","config":{"host":"127.0.0.1","port":2947}}"#,
+        &cookie,
+    )
+    .await;
+    let first = body_json(resp).await;
+    let first_id = first["id"].as_str().unwrap().to_string();
+    let resp = post_with_cookie(
+        &app,
+        &format!("/api/data-sources/{first_id}/start"),
+        &cookie,
+    )
+    .await;
+    let started = body_json(resp).await;
+    assert_eq!(
+        started["status"], "running",
+        "first source should run: {started}"
+    );
+
+    // Second gps source (manual) — start must be rejected as error.
+    let resp = post_json_with_cookie(
+        &app,
+        "/api/data-sources",
+        r#"{"kind":"gps","mode":"manual","config":{"lat":10.0,"lon":20.0}}"#,
+        &cookie,
+    )
+    .await;
+    let second = body_json(resp).await;
+    let second_id = second["id"].as_str().unwrap().to_string();
+
+    let resp = post_with_cookie(
+        &app,
+        &format!("/api/data-sources/{second_id}/start"),
+        &cookie,
+    )
+    .await;
+    let body = body_json(resp).await;
+    assert_eq!(
+        body["status"], "error",
+        "manual start should be rejected: {body}"
+    );
+    assert!(
+        body["last_error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("location source"),
+        "last_error should explain the single-location rule: {body}"
+    );
+}
+
+/// PATCHing a `running` data source must be rejected with 400 -- its
+/// capturer is already serving the old config, so mutating the row
+/// underneath it would leave a stale-served location silently in place
+/// (see `data_sources.rs::update_data_source`'s guard). Also confirms the
+/// rejection is enforced *before* the config is persisted: the row's
+/// original coords survive untouched.
+#[tokio::test]
+async fn patch_on_a_running_data_source_is_rejected_with_400() {
+    let (app, _pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    let resp = post_json_with_cookie(
+        &app,
+        "/api/data-sources",
+        r#"{"kind":"gps","mode":"manual","config":{"lat":10.0,"lon":20.0}}"#,
+        &cookie,
+    )
+    .await;
+    assert_status(&resp, StatusCode::CREATED);
+    let created = body_json(resp).await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let resp = post_with_cookie(&app, &format!("/api/data-sources/{id}/start"), &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let started = body_json(resp).await;
+    assert_eq!(started["status"], "running", "body: {started}");
+
+    let resp = patch_json_with_cookie(
+        &app,
+        &format!("/api/data-sources/{id}"),
+        r#"{"mode":"manual","config":{"lat":99.0,"lon":99.0}}"#,
+        &cookie,
+    )
+    .await;
+    assert_status(&resp, StatusCode::BAD_REQUEST);
+
+    // The rejection happened before touching the DB: the original coords
+    // are still there, not the rejected 99.0/99.0 pair.
+    let resp = get_with_cookie(&app, &format!("/api/data-sources/{id}"), &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let fetched = body_json(resp).await;
+    assert_eq!(fetched["config"]["lat"], 10.0, "body: {fetched}");
+    assert_eq!(fetched["config"]["lon"], 20.0, "body: {fetched}");
+}
+
+/// Reverse direction of `manual_gps_source_rejected_while_another_gps_running`:
+/// a `manual` gps source is started first (the real `ManualGpsSource`, which
+/// stays running on its own -- no `looping_gps` needed), then a second
+/// (`gpsd`) gps source is created and started -- it must be the one rejected,
+/// flipping to `error` with a `last_error` explaining the single-location
+/// rule, while the manual source keeps running undisturbed.
+#[tokio::test]
+async fn gpsd_source_rejected_while_manual_gps_already_running() {
+    let now = chrono::Utc::now();
+    let fixes = vec![fluxfang_capture::GpsFix {
+        at: now,
+        lon: -122.0,
+        lat: 37.0,
+        altitude: None,
+        speed: None,
+        heading: None,
+        quality: 1,
+    }];
+    let factory = Arc::new(MockCapturerFactory::with_gps_fixes(fixes));
+    let (app, _pool) = test_app_with_factory(factory).await;
+    let cookie = login(&app).await;
+
+    // First gps source (manual) -- start and confirm running.
+    let resp = post_json_with_cookie(
+        &app,
+        "/api/data-sources",
+        r#"{"kind":"gps","mode":"manual","config":{"lat":10.0,"lon":20.0}}"#,
+        &cookie,
+    )
+    .await;
+    let first = body_json(resp).await;
+    let first_id = first["id"].as_str().unwrap().to_string();
+    let resp = post_with_cookie(
+        &app,
+        &format!("/api/data-sources/{first_id}/start"),
+        &cookie,
+    )
+    .await;
+    let started = body_json(resp).await;
+    assert_eq!(
+        started["status"], "running",
+        "manual source should run: {started}"
+    );
+
+    // Second gps source (gpsd) -- start must be rejected as error.
+    let resp = post_json_with_cookie(
+        &app,
+        "/api/data-sources",
+        r#"{"kind":"gps","mode":"gpsd","config":{"host":"127.0.0.1","port":2947}}"#,
+        &cookie,
+    )
+    .await;
+    let second = body_json(resp).await;
+    let second_id = second["id"].as_str().unwrap().to_string();
+
+    let resp = post_with_cookie(
+        &app,
+        &format!("/api/data-sources/{second_id}/start"),
+        &cookie,
+    )
+    .await;
+    let body = body_json(resp).await;
+    assert_eq!(
+        body["status"], "error",
+        "gpsd start should be rejected: {body}"
+    );
+    assert!(
+        body["last_error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("location source"),
+        "last_error should explain the single-location rule: {body}"
+    );
+
+    // The first (manual) source is undisturbed.
+    let resp = get_with_cookie(&app, &format!("/api/data-sources/{first_id}"), &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let first_after = body_json(resp).await;
+    assert_eq!(
+        first_after["status"], "running",
+        "manual source should still be running: {first_after}"
+    );
+}

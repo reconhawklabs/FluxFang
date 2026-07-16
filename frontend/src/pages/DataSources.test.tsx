@@ -547,6 +547,90 @@ test('add source: gps + serial mode with NO enumerated serial devices shows "No 
   expect(submitButton).toBeDisabled();
 });
 
+test('Edit button appears only for a stopped manual gps source, not a running one', async () => {
+  const manualStopped: DataSource = {
+    id: 'gps-manual-stopped',
+    created_at: '2026-01-01T00:00:00Z',
+    kind: 'gps',
+    mode: 'manual',
+    interface: null,
+    status: 'stopped',
+    config: { lat: 37.7749, lon: -122.4194 },
+    last_error: null,
+    desired_state: 'stopped',
+    last_ok_at: null,
+  };
+  const manualRunning: DataSource = {
+    ...manualStopped,
+    id: 'gps-manual-running',
+    status: 'running',
+    desired_state: 'running',
+  };
+  const fetchMock = mockMethodRoutes({
+    'GET /api/data-sources': () => [manualStopped, manualRunning],
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<DataSources />, { wrapper });
+  await waitFor(() => expect(screen.getByTestId('source-row-gps-manual-stopped')).toBeInTheDocument());
+
+  expect(
+    within(screen.getByTestId('source-row-gps-manual-stopped')).getByRole('button', { name: /^edit$/i }),
+  ).toBeInTheDocument();
+  expect(
+    within(screen.getByTestId('source-row-gps-manual-running')).queryByRole('button', { name: /^edit$/i }),
+  ).not.toBeInTheDocument();
+});
+
+test('Edit modal pre-fills lat/lon and PATCHes the source with the new values on save', async () => {
+  const manual: DataSource = {
+    id: 'gps-manual-1',
+    created_at: '2026-01-01T00:00:00Z',
+    kind: 'gps',
+    mode: 'manual',
+    interface: null,
+    status: 'stopped',
+    config: { lat: 37.7749, lon: -122.4194 },
+    last_error: null,
+    desired_state: 'stopped',
+    last_ok_at: null,
+  };
+  const updated: DataSource = { ...manual, config: { lat: 40.7128, lon: -74.006 } };
+  const fetchMock = mockMethodRoutes({
+    'GET /api/data-sources': () => [manual],
+    'PATCH /api/data-sources/gps-manual-1': () => updated,
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<DataSources />, { wrapper });
+  await waitFor(() => expect(screen.getByTestId('source-row-gps-manual-1')).toBeInTheDocument());
+
+  fireEvent.click(
+    within(screen.getByTestId('source-row-gps-manual-1')).getByRole('button', { name: /^edit$/i }),
+  );
+
+  const latField = await screen.findByLabelText(/latitude/i);
+  const lonField = screen.getByLabelText(/longitude/i);
+  expect(latField).toHaveValue(37.7749);
+  expect(lonField).toHaveValue(-122.4194);
+
+  fireEvent.change(latField, { target: { value: '40.7128' } });
+  fireEvent.change(lonField, { target: { value: '-74.006' } });
+
+  fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
+
+  await waitFor(() => expect(screen.queryByLabelText(/latitude/i)).not.toBeInTheDocument());
+
+  const patchCall = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH');
+  expect(patchCall).toBeDefined();
+  const [url, init] = patchCall as [RequestInfo | URL, RequestInit];
+  expect(String(url)).toBe('/api/data-sources/gps-manual-1');
+  expect(JSON.parse(init.body as string)).toEqual({
+    mode: 'manual',
+    config: { lat: 40.7128, lon: -74.006 },
+  });
+});
+
 test('Start button on a stopped source calls the start endpoint', async () => {
   const stopped = SOURCES[0]; // wifi-1, status stopped
   const started: DataSource = { ...stopped, status: 'starting' };

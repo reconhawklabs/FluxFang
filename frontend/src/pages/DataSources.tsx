@@ -24,6 +24,7 @@ import {
   listDataSources,
   startDataSource,
   stopDataSource,
+  updateDataSource,
 } from '../api/dataSources';
 import type {
   BaudRate,
@@ -112,6 +113,13 @@ function ConfigSummary({ source }: { source: DataSource }) {
       </span>
     );
   }
+  if (source.mode === 'manual' && 'lat' in source.config && 'lon' in source.config) {
+    return (
+      <span className="font-mono text-slate-300">
+        {source.config.lat}, {source.config.lon}
+      </span>
+    );
+  }
   if (source.kind === 'bluetooth') {
     const activeScan = 'active_scan' in source.config && source.config.active_scan === true;
     const autoCreate = 'auto_create_emitters' in source.config && source.config.auto_create_emitters === true;
@@ -148,7 +156,7 @@ function ConfigSummary({ source }: { source: DataSource }) {
 
 type FormKind = 'wifi' | 'gps' | 'bluetooth' | 'rtl_sdr';
 type FormWifiMode = 'monitor' | 'scan';
-type FormGpsMode = 'gpsd' | 'serial';
+type FormGpsMode = 'gpsd' | 'serial' | 'manual';
 
 /** One-line description shown under the WiFi Mode dropdown for whichever
  * mode is currently selected — see backend `fluxfang-api::capture`'s
@@ -198,6 +206,8 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
   const [port, setPort] = useState('2947');
   const [device, setDevice] = useState('');
   const [baud, setBaud] = useState<BaudRate>(9600);
+  const [manualLat, setManualLat] = useState('');
+  const [manualLon, setManualLon] = useState('');
   // RTL-SDR / TPMS state.
   const [rtlFrequency, setRtlFrequency] = useState<RtlFrequency>('315M');
   const [rtlSerial, setRtlSerial] = useState('');
@@ -265,6 +275,15 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
       return;
     }
 
+    if (gpsMode === 'manual') {
+      onSubmit({
+        kind: 'gps',
+        mode: 'manual',
+        config: { lat: Number(manualLat), lon: Number(manualLon) },
+      });
+      return;
+    }
+
     onSubmit({ kind: 'gps', mode: 'serial', config: { device, baud } });
   }
 
@@ -286,6 +305,18 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
       rtlDevices.some((d) => d.serial === rtlSerial);
   } else if (gpsMode === 'serial') {
     canSubmit = !devicesLoading && !devicesErrored && serialDevices.includes(device);
+  } else if (gpsMode === 'manual') {
+    const lat = Number(manualLat);
+    const lon = Number(manualLon);
+    canSubmit =
+      manualLat.trim() !== '' &&
+      manualLon.trim() !== '' &&
+      Number.isFinite(lat) &&
+      Number.isFinite(lon) &&
+      lat >= -90 &&
+      lat <= 90 &&
+      lon >= -180 &&
+      lon <= 180;
   } else {
     canSubmit = host.trim() !== '' && port.trim() !== '';
   }
@@ -582,6 +613,7 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
               >
                 <option value="gpsd">gpsd</option>
                 <option value="serial">serial</option>
+                <option value="manual">manual</option>
               </select>
             </div>
 
@@ -662,6 +694,41 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
                 </div>
               </div>
             )}
+
+            {gpsMode === 'manual' && (
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label htmlFor="ds-lat" className={labelClassName}>
+                    Latitude
+                  </label>
+                  <input
+                    id="ds-lat"
+                    type="number"
+                    step="any"
+                    inputMode="decimal"
+                    placeholder="37.7749"
+                    value={manualLat}
+                    onChange={(event) => setManualLat(event.target.value)}
+                    className={`font-mono ${inputClassName}`}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label htmlFor="ds-lon" className={labelClassName}>
+                    Longitude
+                  </label>
+                  <input
+                    id="ds-lon"
+                    type="number"
+                    step="any"
+                    inputMode="decimal"
+                    placeholder="-122.4194"
+                    value={manualLon}
+                    onChange={(event) => setManualLon(event.target.value)}
+                    className={`font-mono ${inputClassName}`}
+                  />
+                </div>
+              </div>
+            )}
           </>
         )}
 
@@ -692,9 +759,100 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
   );
 }
 
+interface EditManualModalProps {
+  source: DataSource;
+  onClose: () => void;
+  onSave: (lat: number, lon: number) => void;
+  saving: boolean;
+}
+
+/** Edit affordance for a stopped `gps`+`manual` source (Task 8): a small
+ * lat/lon form that PATCHes the source's static location via
+ * `updateDataSource`. Mirrors the Add form's manual lat/lon inputs
+ * (`inputClassName`/`labelClassName`) and validation range so the two entry
+ * points stay visually and behaviorally consistent. */
+function EditManualModal({ source, onClose, onSave, saving }: EditManualModalProps) {
+  const cfg = source.config as { lat?: number; lon?: number };
+  const [lat, setLat] = useState(cfg.lat != null ? String(cfg.lat) : '');
+  const [lon, setLon] = useState(cfg.lon != null ? String(cfg.lon) : '');
+
+  const latNum = Number(lat);
+  const lonNum = Number(lon);
+  const valid =
+    lat.trim() !== '' &&
+    lon.trim() !== '' &&
+    Number.isFinite(latNum) &&
+    Number.isFinite(lonNum) &&
+    latNum >= -90 &&
+    latNum <= 90 &&
+    lonNum >= -180 &&
+    lonNum <= 180;
+
+  return (
+    <div className="fixed inset-0 z-10 flex items-center justify-center bg-slate-950/70 px-4">
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (valid) onSave(latNum, lonNum);
+        }}
+        className="w-full max-w-sm space-y-4 rounded-lg border border-slate-800 bg-slate-900 p-6 shadow-xl"
+      >
+        <h2 className="text-lg font-semibold text-slate-100">Edit Manual Location</h2>
+        <div className="grid grid-cols-2 gap-3">
+          <div className="space-y-1">
+            <label htmlFor="edit-lat" className={labelClassName}>
+              Latitude
+            </label>
+            <input
+              id="edit-lat"
+              type="number"
+              step="any"
+              inputMode="decimal"
+              value={lat}
+              onChange={(event) => setLat(event.target.value)}
+              className={`font-mono ${inputClassName}`}
+            />
+          </div>
+          <div className="space-y-1">
+            <label htmlFor="edit-lon" className={labelClassName}>
+              Longitude
+            </label>
+            <input
+              id="edit-lon"
+              type="number"
+              step="any"
+              inputMode="decimal"
+              value={lon}
+              onChange={(event) => setLon(event.target.value)}
+              className={`font-mono ${inputClassName}`}
+            />
+          </div>
+        </div>
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded border border-slate-700 px-3 py-1.5 text-sm text-slate-300 transition hover:border-slate-500 hover:text-slate-100"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={!valid || saving}
+            className="rounded bg-amber-500 px-3 py-1.5 text-sm font-semibold text-slate-950 transition hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 export default function DataSources() {
   const queryClient = useQueryClient();
   const [showAddForm, setShowAddForm] = useState(false);
+  const [editing, setEditing] = useState<DataSource | null>(null);
 
   const sourcesQuery = useQuery({
     queryKey: queryKeys.dataSources,
@@ -727,6 +885,15 @@ export default function DataSources() {
   const deleteMutation = useMutation({
     mutationFn: deleteDataSource,
     onSuccess: invalidate,
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: ({ id, lat, lon }: { id: string; lat: number; lon: number }) =>
+      updateDataSource(id, { mode: 'manual', config: { lat, lon } }),
+    onSuccess: () => {
+      invalidate();
+      setEditing(null);
+    },
   });
 
   function handleDelete(id: string): void {
@@ -780,7 +947,9 @@ export default function DataSources() {
               const startPending = startMutation.isPending && startMutation.variables === source.id;
               const stopPending = stopMutation.isPending && stopMutation.variables === source.id;
               const deletePending = deleteMutation.isPending && deleteMutation.variables === source.id;
-              const rowBusy = startPending || stopPending || deletePending;
+              const updatePending =
+                updateMutation.isPending && updateMutation.variables?.id === source.id;
+              const rowBusy = startPending || stopPending || deletePending || updatePending;
 
               return (
                 <tr
@@ -824,6 +993,18 @@ export default function DataSources() {
                           {stopPending ? 'Stopping…' : 'Stop'}
                         </button>
                       )}
+                      {source.kind === 'gps' &&
+                        source.mode === 'manual' &&
+                        source.status !== 'running' && (
+                          <button
+                            type="button"
+                            disabled={rowBusy}
+                            onClick={() => setEditing(source)}
+                            className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 transition hover:border-amber-500 hover:text-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            Edit
+                          </button>
+                        )}
                       <button
                         type="button"
                         disabled={rowBusy}
@@ -850,6 +1031,15 @@ export default function DataSources() {
           onSubmit={(input) => createMutation.mutate(input)}
           submitting={createMutation.isPending}
           errorMessage={createErrorMessage}
+        />
+      )}
+
+      {editing && (
+        <EditManualModal
+          source={editing}
+          onClose={() => setEditing(null)}
+          onSave={(lat, lon) => updateMutation.mutate({ id: editing.id, lat, lon })}
+          saving={updateMutation.isPending}
         />
       )}
     </div>

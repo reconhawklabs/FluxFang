@@ -8,9 +8,11 @@
 //! `gpsd` daemon / real serial hardware respectively - see their module docs.
 
 pub mod gpsd;
+pub mod manual;
 pub mod nmea;
 pub mod serial;
 
 pub use gpsd::GpsdSource;
+pub use manual::ManualGpsSource;
 pub use nmea::parse_nmea;
 pub use serial::{SerialGpsSource, ALLOWED_BAUD_RATES};

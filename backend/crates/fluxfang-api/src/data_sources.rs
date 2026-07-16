@@ -141,6 +141,17 @@ async fn update_data_source(
         .await?
         .ok_or(ApiError::NotFound)?;
 
+    // A running source's capturer is already serving the *old* config (e.g.
+    // a manual-GPS host location) -- mutating the row underneath it would
+    // leave the capturer silently stale until stopped/restarted, which is
+    // exactly the wrong failure mode for a counter-surveillance tool. Editing
+    // is only allowed while stopped; stop it first, then edit.
+    if existing.status == "running" {
+        return Err(ApiError::BadRequest(
+            "cannot edit a running data source; stop it first".to_string(),
+        ));
+    }
+
     // `kind` is immutable (see `DataSourceRepo::update`'s own doc comment),
     // so validation is checked against the *existing* row's kind alongside
     // the proposed mode/interface/config.
