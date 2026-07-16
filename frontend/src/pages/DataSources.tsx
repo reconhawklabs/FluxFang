@@ -112,6 +112,13 @@ function ConfigSummary({ source }: { source: DataSource }) {
       </span>
     );
   }
+  if (source.mode === 'manual' && 'lat' in source.config && 'lon' in source.config) {
+    return (
+      <span className="font-mono text-slate-300">
+        {source.config.lat}, {source.config.lon}
+      </span>
+    );
+  }
   if (source.kind === 'bluetooth') {
     const activeScan = 'active_scan' in source.config && source.config.active_scan === true;
     const autoCreate = 'auto_create_emitters' in source.config && source.config.auto_create_emitters === true;
@@ -148,7 +155,7 @@ function ConfigSummary({ source }: { source: DataSource }) {
 
 type FormKind = 'wifi' | 'gps' | 'bluetooth' | 'rtl_sdr';
 type FormWifiMode = 'monitor' | 'scan';
-type FormGpsMode = 'gpsd' | 'serial';
+type FormGpsMode = 'gpsd' | 'serial' | 'manual';
 
 /** One-line description shown under the WiFi Mode dropdown for whichever
  * mode is currently selected — see backend `fluxfang-api::capture`'s
@@ -198,6 +205,8 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
   const [port, setPort] = useState('2947');
   const [device, setDevice] = useState('');
   const [baud, setBaud] = useState<BaudRate>(9600);
+  const [manualLat, setManualLat] = useState('');
+  const [manualLon, setManualLon] = useState('');
   // RTL-SDR / TPMS state.
   const [rtlFrequency, setRtlFrequency] = useState<RtlFrequency>('315M');
   const [rtlSerial, setRtlSerial] = useState('');
@@ -265,6 +274,15 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
       return;
     }
 
+    if (gpsMode === 'manual') {
+      onSubmit({
+        kind: 'gps',
+        mode: 'manual',
+        config: { lat: Number(manualLat), lon: Number(manualLon) },
+      });
+      return;
+    }
+
     onSubmit({ kind: 'gps', mode: 'serial', config: { device, baud } });
   }
 
@@ -286,6 +304,18 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
       rtlDevices.some((d) => d.serial === rtlSerial);
   } else if (gpsMode === 'serial') {
     canSubmit = !devicesLoading && !devicesErrored && serialDevices.includes(device);
+  } else if (gpsMode === 'manual') {
+    const lat = Number(manualLat);
+    const lon = Number(manualLon);
+    canSubmit =
+      manualLat.trim() !== '' &&
+      manualLon.trim() !== '' &&
+      Number.isFinite(lat) &&
+      Number.isFinite(lon) &&
+      lat >= -90 &&
+      lat <= 90 &&
+      lon >= -180 &&
+      lon <= 180;
   } else {
     canSubmit = host.trim() !== '' && port.trim() !== '';
   }
@@ -582,6 +612,7 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
               >
                 <option value="gpsd">gpsd</option>
                 <option value="serial">serial</option>
+                <option value="manual">manual</option>
               </select>
             </div>
 
@@ -659,6 +690,41 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
                       </option>
                     ))}
                   </select>
+                </div>
+              </div>
+            )}
+
+            {gpsMode === 'manual' && (
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label htmlFor="ds-lat" className={labelClassName}>
+                    Latitude
+                  </label>
+                  <input
+                    id="ds-lat"
+                    type="number"
+                    step="any"
+                    inputMode="decimal"
+                    placeholder="37.7749"
+                    value={manualLat}
+                    onChange={(event) => setManualLat(event.target.value)}
+                    className={`font-mono ${inputClassName}`}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label htmlFor="ds-lon" className={labelClassName}>
+                    Longitude
+                  </label>
+                  <input
+                    id="ds-lon"
+                    type="number"
+                    step="any"
+                    inputMode="decimal"
+                    placeholder="-122.4194"
+                    value={manualLon}
+                    onChange={(event) => setManualLon(event.target.value)}
+                    className={`font-mono ${inputClassName}`}
+                  />
                 </div>
               </div>
             )}
