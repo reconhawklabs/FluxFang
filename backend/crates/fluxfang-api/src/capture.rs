@@ -167,6 +167,21 @@ impl CapturerFactory for RealCapturerFactory {
                     let gps = fluxfang_capture::gps::SerialGpsSource::open(device, baud)?;
                     Ok(BuiltCapture::Location(Box::new(gps)))
                 }
+                "manual" => {
+                    let lat = source
+                        .config
+                        .get("lat")
+                        .and_then(|v| v.as_f64())
+                        .ok_or_else(|| anyhow!("gps manual config missing 'lat'"))?;
+                    let lon = source
+                        .config
+                        .get("lon")
+                        .and_then(|v| v.as_f64())
+                        .ok_or_else(|| anyhow!("gps manual config missing 'lon'"))?;
+                    Ok(BuiltCapture::Location(Box::new(
+                        fluxfang_capture::gps::ManualGpsSource::new(lat, lon),
+                    )))
+                }
                 other => Err(anyhow!("unsupported gps mode '{other}'")),
             },
             "bluetooth" => {
@@ -334,6 +349,21 @@ impl CapturerFactory for MockCapturerFactory {
                 Ok(BuiltCapture::Wifi(Box::new(capturer)))
             }
             "gps" => {
+                if source.mode == "manual" {
+                    let lat = source
+                        .config
+                        .get("lat")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let lon = source
+                        .config
+                        .get("lon")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    return Ok(BuiltCapture::Location(Box::new(
+                        fluxfang_capture::gps::ManualGpsSource::new(lat, lon),
+                    )));
+                }
                 let fixes = self.gps_fixes.lock().expect("mutex poisoned").clone();
                 let mut gps = MockGps::new(fixes);
                 if self.loop_gps.load(std::sync::atomic::Ordering::SeqCst) {
