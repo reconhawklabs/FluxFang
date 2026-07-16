@@ -154,3 +154,47 @@ async fn gps_status_requires_auth() {
     let resp = get(&app, "/api/gps/status").await;
     assert_status(&resp, StatusCode::UNAUTHORIZED);
 }
+
+/// A running `manual` gps source serves its operator-set coordinates as an
+/// `active` fix, just like gpsd/serial.
+#[tokio::test]
+async fn running_manual_gps_source_reports_active_with_coords() {
+    let factory = Arc::new(MockCapturerFactory::new());
+    let (app, _pool) = test_app_with_factory(factory).await;
+    let cookie = login(&app).await;
+
+    let resp = post_json_with_cookie(
+        &app,
+        "/api/data-sources",
+        r#"{"kind":"gps","mode":"manual","config":{"lat":37.7,"lon":-122.4}}"#,
+        &cookie,
+    )
+    .await;
+    assert_status(&resp, StatusCode::CREATED);
+    let created = body_json(resp).await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let resp = post_with_cookie(&app, &format!("/api/data-sources/{id}/start"), &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let started = body_json(resp).await;
+    assert_eq!(started["status"], "running", "body: {started}");
+
+    let has_fix = wait_until(Duration::from_secs(5), || {
+        let app = app.clone();
+        let cookie = cookie.clone();
+        async move {
+            let resp = get_with_cookie(&app, "/api/gps/status", &cookie).await;
+            let body = body_json(resp).await;
+            body["has_fix"] == json!(true)
+        }
+    })
+    .await;
+    assert!(has_fix, "expected has_fix to become true");
+
+    let resp = get_with_cookie(&app, "/api/gps/status", &cookie).await;
+    let body = body_json(resp).await;
+    assert_eq!(body["source_running"], true, "body: {body}");
+    assert_eq!(body["status"], "active", "body: {body}");
+    assert_eq!(body["lat"].as_f64(), Some(37.7), "body: {body}");
+    assert_eq!(body["lon"].as_f64(), Some(-122.4), "body: {body}");
+}

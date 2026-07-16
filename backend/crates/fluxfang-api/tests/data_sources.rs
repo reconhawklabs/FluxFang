@@ -1060,3 +1060,74 @@ async fn stop_leaves_a_non_running_source_untouched() {
     assert_eq!(row.status, "error");
     assert_eq!(row.last_error.as_deref(), Some("boom"));
 }
+
+/// Starting a `manual` gps source while another gps source is already running
+/// is rejected — only one location source may run at a time.
+#[tokio::test]
+async fn manual_gps_source_rejected_while_another_gps_running() {
+    let now = chrono::Utc::now();
+    let fixes = vec![fluxfang_capture::GpsFix {
+        at: now,
+        lon: -122.0,
+        lat: 37.0,
+        altitude: None,
+        speed: None,
+        heading: None,
+        quality: 1,
+    }];
+    let factory = Arc::new(MockCapturerFactory::with_gps_fixes(fixes).looping_gps());
+    let (app, _pool) = test_app_with_factory(factory).await;
+    let cookie = login(&app).await;
+
+    // First gps source (gpsd) — start and confirm running.
+    let resp = post_json_with_cookie(
+        &app,
+        "/api/data-sources",
+        r#"{"kind":"gps","mode":"gpsd","config":{"host":"127.0.0.1","port":2947}}"#,
+        &cookie,
+    )
+    .await;
+    let first = body_json(resp).await;
+    let first_id = first["id"].as_str().unwrap().to_string();
+    let resp = post_with_cookie(
+        &app,
+        &format!("/api/data-sources/{first_id}/start"),
+        &cookie,
+    )
+    .await;
+    let started = body_json(resp).await;
+    assert_eq!(
+        started["status"], "running",
+        "first source should run: {started}"
+    );
+
+    // Second gps source (manual) — start must be rejected as error.
+    let resp = post_json_with_cookie(
+        &app,
+        "/api/data-sources",
+        r#"{"kind":"gps","mode":"manual","config":{"lat":10.0,"lon":20.0}}"#,
+        &cookie,
+    )
+    .await;
+    let second = body_json(resp).await;
+    let second_id = second["id"].as_str().unwrap().to_string();
+
+    let resp = post_with_cookie(
+        &app,
+        &format!("/api/data-sources/{second_id}/start"),
+        &cookie,
+    )
+    .await;
+    let body = body_json(resp).await;
+    assert_eq!(
+        body["status"], "error",
+        "manual start should be rejected: {body}"
+    );
+    assert!(
+        body["last_error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("location source"),
+        "last_error should explain the single-location rule: {body}"
+    );
+}
