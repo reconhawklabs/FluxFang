@@ -55,3 +55,14 @@ Rust API), and `frontend` (the React UI served by nginx).
 > **Note:** the `backend` service runs `privileged` with host networking so it
 > can reach physical RF and GPS hardware. Treat it as host-root-equivalent, and
 > don't expose it to untrusted operators.
+
+## Running on Windows (WSL2)
+
+The web stack runs fine under WSL2 (Ubuntu): install Docker and follow the Quick
+start above, then open `http://localhost:8081` from Windows.
+
+RF capture is the catch. WSL2 doesn't expose your PC's built-in radios to Linux.
+USB devices (RTL-SDR, USB-serial GPS) can be passed through with
+[usbipd-win](https://github.com/dorssel/usbipd-win), but monitor-mode WiFi needs
+a custom WSL2 kernel and generally won't work out of the box. For real capture,
+use a native Linux host.
