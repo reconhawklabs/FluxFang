@@ -2,6 +2,13 @@ services:
   db:
     image: postgis/postgis:16-3.4
     restart: unless-stopped
+    # Cap container logs so a long-running deployment can't fill the host disk
+    # with unbounded json-file logs (Docker's default has no rotation).
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       # Creates the application database on first init (matches the DB name in
@@ -23,6 +30,11 @@ services:
     build:
       context: ./backend
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     # Host networking is required so the backend can capture raw wifi/gps
     # traffic on host network interfaces, and so it can reach Postgres at
     # 127.0.0.1:5432 (the `db` service's published port) without relying on
@@ -84,6 +96,15 @@ services:
     volumes:
       - "/run/dbus/system_bus_socket:/run/dbus/system_bus_socket"
       - "/dev/bus/usb:/dev/bus/usb"
+    # Readiness probe against the public /api/health endpoint (host networking,
+    # so the backend listens on 127.0.0.1:8080). Lets `frontend` wait for the
+    # backend to actually be serving, and lets `docker compose ps` report health.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     depends_on:
       db:
         condition: service_healthy
@@ -92,11 +113,17 @@ services:
     build:
       context: ./frontend
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     # Same reasoning as backend: host networking lets nginx proxy /api and /ws
     # to the backend at 127.0.0.1:8080 without depending on Docker DNS.
     network_mode: host
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
 volumes:
   postgres_data:

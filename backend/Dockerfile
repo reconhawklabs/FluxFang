@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     iproute2 \
     rtl-433 \
     rtl-sdr \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/fluxfang-api /usr/local/bin/fluxfang-api
