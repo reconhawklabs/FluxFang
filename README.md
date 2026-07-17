@@ -1,23 +1,24 @@
 # FluxFang
 
-Self-hosted signals-intelligence platform. It captures RF emissions — 802.11
-WiFi frames, Bluetooth devices, and TPMS (tire-pressure sensor) transmissions
-— along with GPS fixes on a Linux host, classifies them, and lets you track
-emitters, entities, zones, and alerts over time — all through a web UI.
+FluxFang is a self-hosted signals-intelligence platform. It listens for RF
+emissions (802.11 WiFi frames, Bluetooth devices, and TPMS tire-pressure
+sensor transmissions) along with GPS fixes on a Linux host, classifies what it
+hears, and lets you track emitters, entities, zones, and alerts over time. You
+drive the whole thing from a web UI.
 
-Runs fully on a built-in mock capturer, so you can bring the whole stack up
-with **no RF/GPS hardware** attached.
+It also runs on a built-in mock capturer, so you can bring the full stack up
+with **no RF or GPS hardware** attached.
 
 ## Requirements
 
-- A **Linux host** (WiFi monitor-mode capture is Linux-specific).
-- **Docker + Docker Compose v2** (`docker compose ...`).
-- *Optional hardware,* any combination, for real capture (add each later from
-  the web UI once the stack is running):
-  - a monitor-mode-capable **WiFi adapter** (802.11 capture)
-  - an **RTL-SDR dongle** (TPMS capture)
-  - a **Bluetooth adapter** (Bluetooth capture)
-  - a **GPS receiver** — serial/USB or a networked `gpsd` — for geotagging
+- A **Linux host**. WiFi monitor-mode capture is Linux-specific.
+- **Docker** and **Docker Compose v2** (the `docker compose ...` command).
+- Optionally, any mix of the hardware below for real capture. You add each one
+  later from the web UI once the stack is running:
+  - a monitor-mode-capable **WiFi adapter** for 802.11 capture
+  - an **RTL-SDR dongle** for TPMS capture
+  - a **Bluetooth adapter** for Bluetooth capture
+  - a **GPS receiver** for geotagging, either serial/USB or a networked `gpsd`
 
 ## Quick start
 
@@ -29,11 +30,12 @@ cp env.example .env
 docker compose up -d --build
 ```
 
-Every value in `env.example` has sane defaults and inline comments — leave
-hardware settings (`WIFI_DEVICE`, `GPS_DEVICE`) unset if you have none.
+Every value in `env.example` ships with a sane default and an inline comment
+explaining it. If you have no hardware yet, just leave the hardware settings
+(`WIFI_DEVICE`, `GPS_DEVICE`) unset.
 
-Once the containers are up, open **`http://<host>:8081`** and complete the
-first-run setup to choose your admin password.
+Once the containers are up, open **`http://<host>:8081`**, complete the
+first-run setup, and choose your admin password.
 
 ## Managing the stack
 
@@ -46,9 +48,9 @@ docker compose down               # stop and remove containers
 docker compose down -v            # also wipe the database volume (destructive)
 ```
 
-Services: `db` (PostgreSQL + PostGIS), `backend` (Rust API), `frontend`
-(React UI served by nginx).
+The stack has three services: `db` (PostgreSQL with PostGIS), `backend` (the
+Rust API), and `frontend` (the React UI served by nginx).
 
 > **Note:** the `backend` service runs `privileged` with host networking so it
-> can access physical RF/GPS hardware. Treat it as host-root-equivalent — don't
-> expose it to untrusted operators.
+> can reach physical RF and GPS hardware. Treat it as host-root-equivalent, and
+> don't expose it to untrusted operators.
