@@ -27,6 +27,52 @@ use crate::{Capturer, RawObservation};
 /// no such device, bad args), short enough not to noticeably delay start.
 const STARTUP_GRACE: Duration = Duration::from_millis(600);
 
+/// Extract the most useful failure reason from a failed `rtl_433`'s captured
+/// output (stderr, plus stdout appended) for surfacing as a data source's
+/// `last_error`.
+///
+/// rtl_433 prints a noisy startup banner — a version line and a long
+/// `Registered N out of M device decoding protocols [ ... ]` line — *before*
+/// it tries to open the SDR, so naively taking the last output line often
+/// shows that banner instead of the actual device-open failure (the confusing
+/// "…exited immediately: Registered 191 out of 223 device decoding protocols"
+/// message operators saw). This keeps only the lines that look like an error
+/// (open failure, no/absent device, busy, permission) and joins them; if none
+/// match it falls back to the last non-empty line, and to `"no output"` when
+/// there was nothing at all.
+fn summarize_rtl_error(captured: &str) -> String {
+    // Substrings (matched case-insensitively) that mark a line as the real
+    // failure reason rather than banner/progress noise.
+    const ERROR_MARKERS: [&str; 9] = [
+        "error",
+        "fail",
+        "no supported",
+        "no matching",
+        "no device",
+        "busy",
+        "permission",
+        "not found",
+        "no such",
+    ];
+    let lines: Vec<&str> = captured
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let error_lines: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            ERROR_MARKERS.iter().any(|marker| lower.contains(marker))
+        })
+        .collect();
+    if !error_lines.is_empty() {
+        return error_lines.join("; ");
+    }
+    lines.last().copied().unwrap_or("no output").to_string()
+}
+
 /// Build the `rtl_433` argument vector (everything after the binary name).
 /// `frequency` is a literal rtl_433 frequency string (`"315M"` / `"433.92M"`).
 /// A non-blank `device_serial` selects the dongle by stable serial via
@@ -92,13 +138,20 @@ impl Capturer for TpmsCapturer {
         // it as this data source's last_error rather than a silent no-op.
         thread::sleep(STARTUP_GRACE);
         if let Ok(Some(status)) = child.try_wait() {
-            let mut err = String::new();
+            // Read stderr AND stdout: the process has exited, so both pipes
+            // are at EOF and fully readable, and rtl_433 doesn't consistently
+            // put its device-open failure on one stream. `summarize_rtl_error`
+            // then picks the real error line out of the startup banner noise.
+            let mut captured = String::new();
             if let Some(mut stderr) = child.stderr.take() {
-                let _ = stderr.read_to_string(&mut err);
+                let _ = stderr.read_to_string(&mut captured);
+            }
+            if let Some(mut stdout) = child.stdout.take() {
+                let _ = stdout.read_to_string(&mut captured);
             }
             bail!(
                 "rtl_433 exited immediately ({status}): {}",
-                err.trim().lines().last().unwrap_or("no output")
+                summarize_rtl_error(&captured)
             );
         }
 
@@ -203,5 +256,58 @@ mod tests {
     fn blank_serial_is_treated_as_absent() {
         let args = rtl_433_args("315M", Some("   "));
         assert!(!args.iter().any(|a| a == "-d"));
+    }
+
+    #[test]
+    fn summarize_error_skips_banner_and_returns_real_failure() {
+        // Realistic rtl_433 startup + device-open failure (the case an
+        // unplug/replug produces): the operative error is NOT the last line's
+        // neighbour but is buried after the long protocols banner.
+        let output = "\
+rtl_433 version 21.12 branch  at ...
+Registered 191 out of 223 device decoding protocols [ 1-4 8 11-12 ... 217-223 ]
+Using device 0: Generic RTL2832U OEM
+usb_open error -4
+Failed to open rtlsdr device #0.
+";
+        let summary = summarize_rtl_error(output);
+        assert!(
+            summary.contains("usb_open error -4"),
+            "should surface the usb_open error: {summary}"
+        );
+        assert!(
+            summary.contains("Failed to open rtlsdr device"),
+            "should surface the open-failure line: {summary}"
+        );
+        assert!(
+            !summary.contains("Registered 191"),
+            "must not surface the protocols banner: {summary}"
+        );
+    }
+
+    #[test]
+    fn summarize_error_catches_no_supported_devices() {
+        let output = "\
+Registered 191 out of 223 device decoding protocols [ ... ]
+No supported devices found.
+";
+        assert_eq!(summarize_rtl_error(output), "No supported devices found.");
+    }
+
+    #[test]
+    fn summarize_error_falls_back_to_last_line_when_no_marker() {
+        // No error-marker line present: fall back to the last non-empty line
+        // rather than dropping the (only) diagnostic we have.
+        let output = "Registered 191 out of 223 device decoding protocols [ ... ]\n";
+        assert_eq!(
+            summarize_rtl_error(output),
+            "Registered 191 out of 223 device decoding protocols [ ... ]"
+        );
+    }
+
+    #[test]
+    fn summarize_error_empty_output_is_no_output() {
+        assert_eq!(summarize_rtl_error(""), "no output");
+        assert_eq!(summarize_rtl_error("   \n  \n"), "no output");
     }
 }
