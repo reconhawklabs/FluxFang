@@ -67,8 +67,23 @@ services:
     # `zbus::Connection::system()` can drive discovery. Requires bluetoothd
     # running on the HOST with the adapter powered (`bluetoothctl power on`).
     # Harmless when no Bluetooth data source is configured.
+    #
+    # USB hotplug (RTL-SDR, USB-serial GPS): bind-mount the host's live USB
+    # device tree. `privileged: true` grants device-cgroup *permission* to all
+    # devices, but the container's /dev is a private tmpfs snapshot taken at
+    # container start -- it does NOT receive host udev hotplug events. So when
+    # an RTL-SDR is unplugged/replugged the host re-enumerates it to a new
+    # /dev/bus/usb/<bus>/<dev> node that the container never sees, leaving a
+    # stale node; rtl_test/rtl_433 then open the wrong node and fail
+    # ("usb_open error", "No RTL-SDR device found") until the container is
+    # restarted. Bind-mounting /dev/bus/usb shares the host's devtmpfs subtree
+    # so newly-enumerated nodes appear live in the container, letting the 10s
+    # capture reconciler auto-recover a replugged dongle without a restart.
+    # (Supersedes the "privileged already covers /dev" note in
+    # docs/superpowers/specs/2026-07-07-rtl-sdr-tpms-datasource-design.md.)
     volumes:
       - "/run/dbus/system_bus_socket:/run/dbus/system_bus_socket"
+      - "/dev/bus/usb:/dev/bus/usb"
     depends_on:
       db:
         condition: service_healthy
