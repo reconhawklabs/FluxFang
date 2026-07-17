@@ -20,10 +20,14 @@ drive the whole thing from a web UI.
 ## Quick start
 
 ```bash
-# 1. Create your environment file from the template
+# 1. Clone the repo and move into it
+git clone https://github.com/reconhawklabs/FluxFang.git
+cd FluxFang
+
+# 2. Create your environment file from the template
 cp env.example .env
 
-# 2. Edit .env and set your secrets, then bring the stack up
+# 3. Edit .env and set your secrets, then bring the stack up
 docker compose up -d --build
 ```
 
