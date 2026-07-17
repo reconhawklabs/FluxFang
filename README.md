@@ -6,9 +6,6 @@ sensor transmissions) along with GPS fixes on a Linux host, classifies what it
 hears, and lets you track emitters, entities, zones, and alerts over time. You
 drive the whole thing from a web UI.
 
-It also runs on a built-in mock capturer, so you can bring the full stack up
-with **no RF or GPS hardware** attached.
-
 ## Requirements
 
 - A **Linux host**. WiFi monitor-mode capture is Linux-specific.
