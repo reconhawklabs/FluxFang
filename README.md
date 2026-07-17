@@ -1,8 +1,9 @@
 # FluxFang
 
-Self-hosted signals-intelligence platform. It captures RF emissions (802.11
-WiFi frames) and GPS fixes on a Linux host, classifies them, and lets you
-track emitters, entities, zones, and alerts over time — all through a web UI.
+Self-hosted signals-intelligence platform. It captures RF emissions — 802.11
+WiFi frames, Bluetooth devices, and TPMS (tire-pressure sensor) transmissions
+— along with GPS fixes on a Linux host, classifies them, and lets you track
+emitters, entities, zones, and alerts over time — all through a web UI.
 
 Runs fully on a built-in mock capturer, so you can bring the whole stack up
 with **no RF/GPS hardware** attached.
@@ -11,8 +12,12 @@ with **no RF/GPS hardware** attached.
 
 - A **Linux host** (WiFi monitor-mode capture is Linux-specific).
 - **Docker + Docker Compose v2** (`docker compose ...`).
-- *Optional:* a monitor-mode WiFi adapter and/or a GPS receiver for real
-  capture. Add these later from the web UI once the stack is running.
+- *Optional hardware,* any combination, for real capture (add each later from
+  the web UI once the stack is running):
+  - a monitor-mode-capable **WiFi adapter** (802.11 capture)
+  - an **RTL-SDR dongle** (TPMS capture)
+  - a **Bluetooth adapter** (Bluetooth capture)
+  - a **GPS receiver** — serial/USB or a networked `gpsd` — for geotagging
 
 ## Quick start
 
@@ -20,20 +25,12 @@ with **no RF/GPS hardware** attached.
 # 1. Create your environment file from the template
 cp env.example .env
 
-# 2. Edit .env and set your secrets (see below), then bring the stack up
+# 2. Edit .env and set your secrets, then bring the stack up
 docker compose up -d --build
 ```
 
-In `.env` you must set at least:
-
-- `POSTGRES_PASSWORD` — and update `DATABASE_URL` to match it.
-- `FLUXFANG_SECRET_KEY` — generate a fresh one (must decode to 32 bytes):
-  ```bash
-  openssl rand -base64 32
-  ```
-
-Every other value in `env.example` has sane defaults and inline comments —
-leave hardware settings (`WIFI_DEVICE`, `GPS_DEVICE`) unset if you have none.
+Every value in `env.example` has sane defaults and inline comments — leave
+hardware settings (`WIFI_DEVICE`, `GPS_DEVICE`) unset if you have none.
 
 Once the containers are up, open **`http://<host>:8081`** and complete the
 first-run setup to choose your admin password.
