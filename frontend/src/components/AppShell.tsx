@@ -15,6 +15,7 @@ const NAV_ITEMS: ReadonlyArray<{ to: string; label: string }> = [
   { to: '/emitters', label: 'Emitters' },
   { to: '/co-travel', label: 'Co-Travel' },
   { to: '/entities', label: 'Entities' },
+  { to: '/ai-audit', label: 'AI Audit Log' },
   { to: '/zones', label: 'Zones' },
   { to: '/map', label: 'Map' },
   { to: '/alerts', label: 'Alerts' },

@@ -47,6 +47,7 @@ export const queryKeys = {
   alertMethods: ['alertMethods'] as const,
   alertRules: ['alertRules'] as const,
   notifications: ['notifications'] as const,
+  aiAudit: ['aiAudit'] as const,
   gpsStatus: ['gpsStatus'] as const,
   coTravel: ['coTravel'] as const,
   coTravelIgnored: ['coTravelIgnored'] as const,
