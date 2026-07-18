@@ -54,6 +54,7 @@ pub mod emitters;
 pub mod entities;
 pub mod gps_status;
 pub mod ingest;
+pub mod mcp;
 pub mod middleware;
 pub mod notifications;
 pub mod notify;
@@ -102,9 +103,15 @@ pub fn app(state: AppState) -> Router {
         .merge(zones::protected_routes())
         .route_layer(axum::middleware::from_fn(middleware::require_auth));
 
+    // `/mcp` is its own group, guarded by `mcp::guard::mcp_guard`
+    // (loopback-only) instead of `require_auth` — it's not part of the
+    // session-cookie auth surface. See `mcp` module docs.
+    let mcp = mcp::routes();
+
     Router::new()
         .merge(public)
         .merge(protected)
+        .merge(mcp)
         .layer(session_layer())
         .with_state(state)
 }
