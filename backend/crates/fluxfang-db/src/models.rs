@@ -466,3 +466,33 @@ pub struct NewNotification {
     pub payload: serde_json::Value,
     pub delivery_status: String,
 }
+
+/// `ai_audit_log`: one row per MCP tool call made by the embedded AI
+/// server, backing the AI Audit Log page. `affected_ids` is a Postgres
+/// `uuid[]` column, which sqlx decodes directly into `Vec<Uuid>`.
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]
+pub struct AiAuditEntry {
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub tool: String,
+    pub action: String,
+    pub summary: String,
+    pub args: serde_json::Value,
+    pub result: Option<serde_json::Value>,
+    pub affected_ids: Vec<Uuid>,
+    pub status: String,
+    pub error: Option<String>,
+}
+
+/// Fields required to create a new `ai_audit_log` row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewAiAudit {
+    pub tool: String,
+    pub action: String,
+    pub summary: String,
+    pub args: serde_json::Value,
+    pub result: Option<serde_json::Value>,
+    pub affected_ids: Vec<Uuid>,
+    pub status: String,
+    pub error: Option<String>,
+}

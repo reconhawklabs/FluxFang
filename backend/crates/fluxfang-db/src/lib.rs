@@ -12,9 +12,9 @@ pub mod repo;
 pub mod sort;
 
 pub use repo::{
-    AlertMethodRepo, AlertRuleRepo, AppConfigRepo, AssociatedEmitter, CoTravelRepo, DataSourceRepo,
-    EmissionRepo, EmitterAssociationRepo, EmitterRepo, EntityRepo, IgnoredEmitter, LocationRepo,
-    NotificationRepo, SessionRepo, ZoneMembershipRepo, ZoneRepo,
+    AiAuditRepo, AlertMethodRepo, AlertRuleRepo, AppConfigRepo, AssociatedEmitter, CoTravelRepo,
+    DataSourceRepo, EmissionRepo, EmitterAssociationRepo, EmitterRepo, EntityRepo, IgnoredEmitter,
+    LocationRepo, NotificationRepo, SessionRepo, ZoneMembershipRepo, ZoneRepo,
 };
 pub use sort::resolve_order_by;
 
