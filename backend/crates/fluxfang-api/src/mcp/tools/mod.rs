@@ -3,6 +3,7 @@ use sqlx::PgPool;
 
 pub mod analysis;
 pub mod reads;
+pub mod writes;
 
 #[derive(Debug, Clone)]
 pub struct ToolSchema {
@@ -126,11 +127,82 @@ pub fn tool_list() -> Vec<ToolSchema> {
                 "time_from":{"type":"string"},"time_to":{"type":"string"},
                 "min_distance_m":{"type":"number"},"min_time_s":{"type":"number"}}}),
         },
+        ToolSchema {
+            name: "create_emitter_from_emissions",
+            description: "Create a new AI-sourced emitter, optionally attaching explicit emission_ids and/or a match_rule (which retroactively claims all currently-matching emissions of the given kind).",
+            input_schema: json!({"type":"object","required":["name"],"properties":{
+                "name":{"type":"string"},"type":{"type":"string"},"emitter_type":{"type":"string"},
+                "kind":{"type":"string","description":"required if match_rule is given (wifi/bluetooth/tpms)"},
+                "attributes":{"type":"object"},
+                "emission_ids":{"type":"array","items":{"type":"string"}},
+                "match_rule":{"type":"object","description":"{match: all|any, conditions: [{field,op,value}]}"}
+            }}),
+        },
+        ToolSchema {
+            name: "set_emitter_match_rule",
+            description: "Replace an emitter's match rule and retroactively claim all currently-matching emissions of the given kind.",
+            input_schema: json!({"type":"object","required":["emitter_id","match_rule","kind"],"properties":{
+                "emitter_id":{"type":"string"},"kind":{"type":"string"},
+                "match_rule":{"type":"object"}
+            }}),
+        },
+        ToolSchema {
+            name: "preview_match_rule",
+            description: "Read-only: count how many emissions of the given kind a match rule would claim, without changing anything.",
+            input_schema: json!({"type":"object","required":["match_rule","kind"],"properties":{
+                "kind":{"type":"string"},"match_rule":{"type":"object"}
+            }}),
+        },
+        ToolSchema {
+            name: "attach_emissions",
+            description: "Attach a list of emission_ids to an emitter.",
+            input_schema: json!({"type":"object","required":["emitter_id","emission_ids"],"properties":{
+                "emitter_id":{"type":"string"},"emission_ids":{"type":"array","items":{"type":"string"}}
+            }}),
+        },
+        ToolSchema {
+            name: "update_emitter",
+            description: "Update an emitter's name/type, and/or shallow-merge new attributes into its existing attributes.",
+            input_schema: json!({"type":"object","required":["emitter_id"],"properties":{
+                "emitter_id":{"type":"string"},"name":{"type":"string"},"type":{"type":"string"},
+                "attributes":{"type":"object"}
+            }}),
+        },
     ]
 }
 
-/// Dispatch a `tools/call` by name. Grows in Phase 3.
+/// Write tools and the audit action they log on the error path. Success rows
+/// are written inside each handler; this covers the complementary case where
+/// a write tool errors out and still needs an `action`-tagged trail. Lists
+/// every write tool name across Tasks 11-13 (some aren't dispatched yet —
+/// harmless, `dispatch_inner` just returns `Unknown` for those until their
+/// task lands). `preview_match_rule` is read-only and intentionally absent
+/// (returns `None`, so no audit row is written for it).
+fn write_action(name: &str) -> Option<&'static str> {
+    match name {
+        "create_emitter_from_emissions" | "set_emitter_match_rule" | "attach_emissions"
+        | "update_emitter" | "create_entity" | "update_entity" | "assign_emitters_to_entity"
+        | "link_emitters" => Some("add"),
+        "detach_emissions" | "unassign_emitters_from_entity" | "unlink_emitters"
+        | "delete_emitter" | "delete_entity" => Some("remove"),
+        _ => None, // read-only / preview tools
+    }
+}
+
+/// Dispatch a `tools/call` by name. Wraps [`dispatch_inner`] with error-path
+/// auditing: if the tool is a write tool (per [`write_action`]) and it
+/// returns `Err`, record an `action`-tagged error row so a failing mutation
+/// still leaves a trail (success rows are written inside the handlers
+/// themselves, since only the handler knows the affected ids/summary).
 pub async fn dispatch(pool: &PgPool, name: &str, args: Value) -> Result<Value, ToolError> {
+    let result = dispatch_inner(pool, name, args.clone()).await;
+    if let (Some(action), Err(e)) = (write_action(name), &result) {
+        crate::mcp::audit::record_error(pool, name, action, &args, &e.message()).await;
+    }
+    result
+}
+
+async fn dispatch_inner(pool: &PgPool, name: &str, args: Value) -> Result<Value, ToolError> {
     match name {
         "list_entities" => reads::list_entities(pool, args).await,
         "list_stray_emissions" => reads::list_stray_emissions(pool, args).await,
@@ -145,6 +217,11 @@ pub async fn dispatch(pool: &PgPool, name: &str, args: Value) -> Result<Value, T
         "collocation_query" => analysis::collocation_query(pool, args).await,
         "suggest_associations" => analysis::suggest_associations(pool, args).await,
         "cotravel_analysis" => analysis::cotravel_analysis(pool, args).await,
+        "create_emitter_from_emissions" => writes::create_emitter_from_emissions(pool, args).await,
+        "set_emitter_match_rule" => writes::set_emitter_match_rule(pool, args).await,
+        "preview_match_rule" => writes::preview_match_rule(pool, args).await,
+        "attach_emissions" => writes::attach_emissions(pool, args).await,
+        "update_emitter" => writes::update_emitter(pool, args).await,
         _ => Err(ToolError::Unknown(name.to_string())),
     }
 }
