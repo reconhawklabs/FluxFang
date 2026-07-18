@@ -127,6 +127,7 @@ async fn get_zone_detail_includes_inside_emitter_excludes_outside_and_gates_enti
         NewEntity {
             name: "In Entity".to_string(),
             notes: None,
+            ..Default::default()
         },
     )
     .await
@@ -136,6 +137,7 @@ async fn get_zone_detail_includes_inside_emitter_excludes_outside_and_gates_enti
         NewEntity {
             name: "Out Entity".to_string(),
             notes: None,
+            ..Default::default()
         },
     )
     .await

@@ -22,6 +22,7 @@ async fn seed_emitter(pool: &PgPool, name: &str) -> Uuid {
             attributes: serde_json::json!({"src_mac": "aa:bb:cc:dd:ee:ff"}),
             match_enabled: true,
             identity_key: Some(format!("wifi_client:{name}")),
+            source: "manual".to_string(),
         },
     )
     .await

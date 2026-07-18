@@ -25,6 +25,7 @@ async fn seed_classified_emitter(pool: &PgPool, name: &str, emitter_type: &str) 
             attributes: serde_json::json!({}),
             match_enabled: true,
             identity_key: None,
+            source: "manual".to_string(),
         },
     )
     .await

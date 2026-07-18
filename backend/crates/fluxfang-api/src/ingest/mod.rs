@@ -389,6 +389,7 @@ async fn auto_create_emitter(ctx: &IngestCtx, data_source_id: Uuid, emission: &m
         attributes: classification.attributes.clone(),
         match_enabled: true,
         identity_key: Some(classification.identity_key()),
+        source: "manual".to_string(),
     };
 
     let Ok((emitter, _created)) =
@@ -1244,6 +1245,7 @@ mod tests {
                 attributes: serde_json::json!({"bssid": bssid, "ssid": "HomeNet"}),
                 match_enabled: false,
                 identity_key: Some(format!("wifi_access_point:{bssid}")),
+                source: "manual".to_string(),
             },
         )
         .await

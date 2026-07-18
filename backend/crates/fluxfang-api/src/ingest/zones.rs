@@ -603,6 +603,7 @@ mod tests {
             NewEntity {
                 name: "Bob's Phone".to_string(),
                 notes: None,
+                ..Default::default()
             },
         )
         .await

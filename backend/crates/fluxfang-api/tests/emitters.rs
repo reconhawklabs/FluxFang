@@ -644,6 +644,7 @@ impl EntityRepoInsertHelper {
             NewEntity {
                 name: name.to_string(),
                 notes: None,
+                ..Default::default()
             },
         )
         .await
@@ -721,6 +722,7 @@ impl EmitterRepoInsertHelper {
                 attributes,
                 match_enabled: true,
                 identity_key: None,
+                source: "manual".to_string(),
             },
         )
         .await

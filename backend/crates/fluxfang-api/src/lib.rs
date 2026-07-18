@@ -39,6 +39,7 @@
 //! security payoff here today. It's left wired up in the environment for
 //! whichever future task adds a persistent, signed/private-cookie store.
 
+pub mod ai_audit;
 pub mod alert_methods;
 pub mod alert_rules;
 pub mod auth_routes;
@@ -54,6 +55,7 @@ pub mod emitters;
 pub mod entities;
 pub mod gps_status;
 pub mod ingest;
+pub mod mcp;
 pub mod middleware;
 pub mod notifications;
 pub mod notify;
@@ -86,6 +88,7 @@ pub fn app(state: AppState) -> Router {
     // other protected route rather than living in the public group.
     let protected = Router::new()
         .merge(auth_routes::protected_routes())
+        .merge(ai_audit::protected_routes())
         .merge(alert_methods::protected_routes())
         .merge(alert_rules::protected_routes())
         .merge(catalog_routes::protected_routes())
@@ -102,9 +105,15 @@ pub fn app(state: AppState) -> Router {
         .merge(zones::protected_routes())
         .route_layer(axum::middleware::from_fn(middleware::require_auth));
 
+    // `/mcp` is its own group, guarded by `mcp::guard::mcp_guard`
+    // (loopback-only) instead of `require_auth` — it's not part of the
+    // session-cookie auth surface. See `mcp` module docs.
+    let mcp = mcp::routes();
+
     Router::new()
         .merge(public)
         .merge(protected)
+        .merge(mcp)
         .layer(session_layer())
         .with_state(state)
 }

@@ -27,6 +27,7 @@ import ZoneDetailPage from "./pages/ZoneDetailPage";
 import Alerts from "./pages/Alerts";
 import Notifications from "./pages/Notifications";
 import MapView from "./pages/MapView";
+import AiAuditLog from "./pages/AiAuditLog";
 
 export default function App() {
   const { needsSetup, authed, loading, refetch } = useAuth();
@@ -78,6 +79,7 @@ export default function App() {
         <Route path="map" element={<MapView />} />
         <Route path="alerts" element={<Alerts />} />
         <Route path="notifications" element={<Notifications />} />
+        <Route path="ai-audit" element={<AiAuditLog />} />
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Route>
     </Routes>

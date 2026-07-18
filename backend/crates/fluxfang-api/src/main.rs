@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use fluxfang_api::capture::RealCapturerFactory;
@@ -62,7 +63,10 @@ async fn main() {
     });
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
-    axum::serve(listener, fluxfang_api::app(state))
-        .await
-        .unwrap();
+    axum::serve(
+        listener,
+        fluxfang_api::app(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .unwrap();
 }

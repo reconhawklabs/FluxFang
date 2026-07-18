@@ -18,6 +18,7 @@ async fn insert_and_get_entity_roundtrips() {
         NewEntity {
             name: "Bob's phone".to_string(),
             notes: Some("seen at the office".to_string()),
+            ..Default::default()
         },
     )
     .await
@@ -46,6 +47,7 @@ async fn list_returns_all_entities() {
         NewEntity {
             name: "A".to_string(),
             notes: None,
+            ..Default::default()
         },
     )
     .await
@@ -55,6 +57,7 @@ async fn list_returns_all_entities() {
         NewEntity {
             name: "B".to_string(),
             notes: None,
+            ..Default::default()
         },
     )
     .await
@@ -72,6 +75,7 @@ async fn last_seen_is_none_when_entity_has_no_emitters_or_emissions() {
         NewEntity {
             name: "Lonely".to_string(),
             notes: None,
+            ..Default::default()
         },
     )
     .await
@@ -92,6 +96,7 @@ async fn last_seen_returns_max_observed_at_across_entitys_emitters_emissions() {
         NewEntity {
             name: "Group".to_string(),
             notes: None,
+            ..Default::default()
         },
     )
     .await
@@ -164,6 +169,7 @@ async fn query_with_no_filter_returns_everything_and_correct_total() {
         NewEntity {
             name: "A".to_string(),
             notes: None,
+            ..Default::default()
         },
     )
     .await
@@ -173,6 +179,7 @@ async fn query_with_no_filter_returns_everything_and_correct_total() {
         NewEntity {
             name: "B".to_string(),
             notes: None,
+            ..Default::default()
         },
     )
     .await
@@ -193,6 +200,7 @@ async fn query_search_matches_by_name_case_insensitively() {
         NewEntity {
             name: "Bob's Phone".to_string(),
             notes: None,
+            ..Default::default()
         },
     )
     .await
@@ -202,6 +210,7 @@ async fn query_search_matches_by_name_case_insensitively() {
         NewEntity {
             name: "Alice's Laptop".to_string(),
             notes: None,
+            ..Default::default()
         },
     )
     .await
@@ -228,6 +237,7 @@ async fn query_search_matches_by_notes_substring() {
         NewEntity {
             name: "Device 1".to_string(),
             notes: Some("seen loitering near the entrance".to_string()),
+            ..Default::default()
         },
     )
     .await
@@ -237,6 +247,7 @@ async fn query_search_matches_by_notes_substring() {
         NewEntity {
             name: "Device 2".to_string(),
             notes: Some("nothing notable".to_string()),
+            ..Default::default()
         },
     )
     .await
@@ -264,6 +275,7 @@ async fn query_paginates_with_correct_total_ignoring_limit_offset() {
             NewEntity {
                 name: name.to_string(),
                 notes: None,
+                ..Default::default()
             },
         )
         .await
@@ -311,6 +323,7 @@ async fn seed_entity(pool: &sqlx::PgPool, name: &str) -> Uuid {
         NewEntity {
             name: name.to_string(),
             notes: None,
+            ..Default::default()
         },
     )
     .await

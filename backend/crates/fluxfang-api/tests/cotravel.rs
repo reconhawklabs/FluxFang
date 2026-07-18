@@ -64,6 +64,7 @@ async fn seed_emitter(pool: &PgPool, name: &str) -> Uuid {
             attributes: json!({}),
             match_enabled: true,
             identity_key: Some(format!("wifi_client:{name}")),
+            source: "manual".to_string(),
         },
     )
     .await

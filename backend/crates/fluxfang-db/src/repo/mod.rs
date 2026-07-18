@@ -17,6 +17,7 @@
 //! instead of compile time — acceptable given the repo test suite exercises
 //! every query.
 
+pub mod ai_audit;
 pub mod alert_method;
 pub mod alert_rule;
 pub mod app_config;
@@ -32,6 +33,7 @@ pub mod session;
 pub mod zone;
 pub mod zone_membership;
 
+pub use ai_audit::AiAuditRepo;
 pub use alert_method::AlertMethodRepo;
 pub use alert_rule::AlertRuleRepo;
 pub use app_config::AppConfigRepo;

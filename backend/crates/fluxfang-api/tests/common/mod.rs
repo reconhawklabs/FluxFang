@@ -339,9 +339,12 @@ pub async fn spawn_server(app: Router) -> std::net::SocketAddr {
         .expect("bind an ephemeral TCP port");
     let addr = listener.local_addr().expect("read the bound local addr");
     tokio::spawn(async move {
-        axum::serve(listener, app)
-            .await
-            .expect("axum::serve should not fail");
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("axum::serve should not fail");
     });
     addr
 }

@@ -101,6 +101,7 @@ async fn get_entity_detail_returns_emitters_max_last_seen_and_located_detections
         NewEntity {
             name: "Bob's phone".to_string(),
             notes: Some("seen at the office".to_string()),
+            ..Default::default()
         },
     )
     .await
@@ -225,6 +226,7 @@ async fn patch_entity_updates_name() {
         NewEntity {
             name: "Old Name".to_string(),
             notes: Some("keep me".to_string()),
+            ..Default::default()
         },
     )
     .await
@@ -261,6 +263,7 @@ async fn delete_entity_removes_row_and_nulls_emitter_entity_id() {
         NewEntity {
             name: "Doomed".to_string(),
             notes: None,
+            ..Default::default()
         },
     )
     .await
@@ -415,6 +418,7 @@ async fn bulk_delete_removes_only_listed_ids_and_reports_count() {
         NewEntity {
             name: "A".to_string(),
             notes: None,
+            ..Default::default()
         },
     )
     .await
@@ -425,6 +429,7 @@ async fn bulk_delete_removes_only_listed_ids_and_reports_count() {
         NewEntity {
             name: "B".to_string(),
             notes: None,
+            ..Default::default()
         },
     )
     .await
@@ -435,6 +440,7 @@ async fn bulk_delete_removes_only_listed_ids_and_reports_count() {
         NewEntity {
             name: "Keep".to_string(),
             notes: None,
+            ..Default::default()
         },
     )
     .await
@@ -462,6 +468,7 @@ async fn bulk_delete_with_empty_ids_deletes_nothing() {
         NewEntity {
             name: "Survivor".to_string(),
             notes: None,
+            ..Default::default()
         },
     )
     .await
@@ -489,6 +496,7 @@ async fn clear_deletes_all_entities() {
         NewEntity {
             name: "A".to_string(),
             notes: None,
+            ..Default::default()
         },
     )
     .await
@@ -498,6 +506,7 @@ async fn clear_deletes_all_entities() {
         NewEntity {
             name: "B".to_string(),
             notes: None,
+            ..Default::default()
         },
     )
     .await

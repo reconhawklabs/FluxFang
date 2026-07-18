@@ -396,6 +396,7 @@ async fn subjects_in_zone_includes_entity_iff_one_of_its_emitters_is_in() {
         NewEntity {
             name: "In Entity".to_string(),
             notes: None,
+            ..Default::default()
         },
     )
     .await
@@ -405,6 +406,7 @@ async fn subjects_in_zone_includes_entity_iff_one_of_its_emitters_is_in() {
         NewEntity {
             name: "Out Entity".to_string(),
             notes: None,
+            ..Default::default()
         },
     )
     .await
