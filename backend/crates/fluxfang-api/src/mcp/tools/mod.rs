@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 use sqlx::PgPool;
 
+pub mod analysis;
 pub mod reads;
 
 #[derive(Debug, Clone)]
@@ -105,6 +106,13 @@ pub fn tool_list() -> Vec<ToolSchema> {
             input_schema: json!({"type":"object","required":["field","value"],"properties":{
                 "field":{"type":"string"},"value":{"type":"string"}}}),
         },
+        ToolSchema {
+            name: "collocation_query",
+            description: "For each unordered pair among the given emitters, count co-occurring emissions within a time window.",
+            input_schema: json!({"type":"object","required":["emitter_ids"],"properties":{
+                "emitter_ids":{"type":"array","items":{"type":"string"},"minItems":2},
+                "window_seconds":{"type":"integer"}}}),
+        },
     ]
 }
 
@@ -121,6 +129,7 @@ pub async fn dispatch(pool: &PgPool, name: &str, args: Value) -> Result<Value, T
         "emitters_connected_to" => reads::emitters_connected_to(pool, args).await,
         "list_attributes_by_type" => reads::list_attributes_by_type(pool, args).await,
         "signal_uniqueness" => reads::signal_uniqueness(pool, args).await,
+        "collocation_query" => analysis::collocation_query(pool, args).await,
         _ => Err(ToolError::Unknown(name.to_string())),
     }
 }
