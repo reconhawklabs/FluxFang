@@ -579,4 +579,53 @@ impl EmissionRepo {
         let result = sqlx::query("DELETE FROM emission").execute(pool).await?;
         Ok(result.rows_affected())
     }
+
+    /// Delete every `emission` matching a simple filter, returning the count.
+    /// Backs the MCP `delete_emissions_where` tool. Every field is optional and
+    /// bound as a parameter (never interpolated), using the same
+    /// `($n IS NULL OR ...)` no-op idiom as the read queries — so a `None`
+    /// field imposes no constraint. `unassigned = Some(true)` restricts to
+    /// stray emissions (`emitter_id IS NULL`), `Some(false)` to attached ones.
+    ///
+    /// NOTE: a filter with every field `None` matches — and deletes — ALL
+    /// emissions. The MCP tool layer guards against an accidental unfiltered
+    /// wipe (it requires an explicit `all` flag, which routes to
+    /// [`Self::delete_all`] instead); this method itself is unconditional by
+    /// design, mirroring `delete_all`.
+    pub async fn delete_where(
+        pool: &PgPool,
+        filter: DeleteEmissionFilter,
+    ) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            "DELETE FROM emission WHERE \
+             ($1::text IS NULL OR kind = $1) \
+             AND ($2::timestamptz IS NULL OR observed_at >= $2) \
+             AND ($3::timestamptz IS NULL OR observed_at <= $3) \
+             AND ($4::uuid IS NULL OR emitter_id = $4) \
+             AND ($5::bool IS NULL OR \
+                  ($5 = true AND emitter_id IS NULL) OR \
+                  ($5 = false AND emitter_id IS NOT NULL))",
+        )
+        .bind(filter.kind)
+        .bind(filter.time_from)
+        .bind(filter.time_to)
+        .bind(filter.emitter_id)
+        .bind(filter.unassigned)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+}
+
+/// Filter for [`EmissionRepo::delete_where`]. Every field optional; a `None`
+/// field imposes no constraint.
+#[derive(Debug, Clone, Default)]
+pub struct DeleteEmissionFilter {
+    pub kind: Option<String>,
+    pub time_from: Option<DateTime<Utc>>,
+    pub time_to: Option<DateTime<Utc>>,
+    pub emitter_id: Option<Uuid>,
+    /// `Some(true)` = only stray (unassigned) emissions; `Some(false)` = only
+    /// attached; `None` = no constraint.
+    pub unassigned: Option<bool>,
 }
