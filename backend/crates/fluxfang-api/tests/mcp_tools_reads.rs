@@ -50,3 +50,34 @@ async fn list_stray_emissions_only_unassigned_and_get_emission_full_payload() {
     let one = reads::get_emission(&pool, serde_json::json!({"id": stray.to_string()})).await.unwrap();
     assert_eq!(one["payload"]["ssid"], "Net");
 }
+
+use fluxfang_db::models::NewEmitter;
+use fluxfang_db::EmitterRepo;
+
+#[tokio::test]
+async fn get_emitter_includes_attributes_and_associations() {
+    let pool = fresh_pool().await;
+    let ap = EmitterRepo::insert(&pool, NewEmitter {
+        name: "AP".into(), emitter_type: Some("wifi_access_point".into()),
+        attributes: serde_json::json!({"bssid":"aa:bb:cc:dd:ee:ff","ssid":"HomeNet"}),
+        ..Default::default()
+    }).await.unwrap();
+
+    let out = reads::get_emitter(&pool, serde_json::json!({"id": ap.id.to_string()})).await.unwrap();
+    assert_eq!(out["emitter"]["attributes"]["ssid"], "HomeNet");
+    assert!(out["associations"].is_array());
+    assert!(out["recent_emissions"].is_array());
+}
+
+#[tokio::test]
+async fn emitters_connected_to_matches_connected_ssid() {
+    let pool = fresh_pool().await;
+    EmitterRepo::insert(&pool, NewEmitter {
+        name: "Client".into(), emitter_type: Some("wifi_client".into()),
+        attributes: serde_json::json!({"src_mac":"11:22:33:44:55:66","connected_ssid":"HomeNet"}),
+        ..Default::default()
+    }).await.unwrap();
+
+    let out = reads::emitters_connected_to(&pool, serde_json::json!({"ssid":"HomeNet"})).await.unwrap();
+    assert_eq!(out["emitters"].as_array().unwrap().len(), 1);
+}

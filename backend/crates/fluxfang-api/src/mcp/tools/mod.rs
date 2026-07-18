@@ -71,6 +71,40 @@ pub fn tool_list() -> Vec<ToolSchema> {
             description: "Get one emission by id, with its complete raw payload.",
             input_schema: json!({"type":"object","required":["id"],"properties":{"id":{"type":"string"}}}),
         },
+        ToolSchema {
+            name: "list_emitters",
+            description: "List emitters with attributes/identity/match rule; filter by search, entity_id, emitter_type.",
+            input_schema: json!({"type":"object","properties":{
+                "search":{"type":"string"},"entity_id":{"type":"string"},"emitter_type":{"type":"string"},
+                "limit":{"type":"integer"},"offset":{"type":"integer"}}}),
+        },
+        ToolSchema {
+            name: "get_emitter",
+            description: "Full emitter detail incl associations and recent located emissions.",
+            input_schema: json!({"type":"object","required":["id"],"properties":{"id":{"type":"string"}}}),
+        },
+        ToolSchema {
+            name: "get_entity",
+            description: "Full entity detail incl emitters, last_seen, recent detections.",
+            input_schema: json!({"type":"object","required":["id"],"properties":{"id":{"type":"string"}}}),
+        },
+        ToolSchema {
+            name: "emitters_connected_to",
+            description: "Client emitters that connected to a given ssid or bssid access point.",
+            input_schema: json!({"type":"object","properties":{
+                "ssid":{"type":"string"},"bssid":{"type":"string"},"limit":{"type":"integer"}}}),
+        },
+        ToolSchema {
+            name: "list_attributes_by_type",
+            description: "All attribute keys+values in use for an emitter_type.",
+            input_schema: json!({"type":"object","required":["emitter_type"],"properties":{"emitter_type":{"type":"string"}}}),
+        },
+        ToolSchema {
+            name: "signal_uniqueness",
+            description: "How rare a payload field value is across all emissions.",
+            input_schema: json!({"type":"object","required":["field","value"],"properties":{
+                "field":{"type":"string"},"value":{"type":"string"}}}),
+        },
     ]
 }
 
@@ -81,6 +115,12 @@ pub async fn dispatch(pool: &PgPool, name: &str, args: Value) -> Result<Value, T
         "list_stray_emissions" => reads::list_stray_emissions(pool, args).await,
         "list_emissions" => reads::list_emissions(pool, args).await,
         "get_emission" => reads::get_emission(pool, args).await,
+        "list_emitters" => reads::list_emitters(pool, args).await,
+        "get_emitter" => reads::get_emitter(pool, args).await,
+        "get_entity" => reads::get_entity(pool, args).await,
+        "emitters_connected_to" => reads::emitters_connected_to(pool, args).await,
+        "list_attributes_by_type" => reads::list_attributes_by_type(pool, args).await,
+        "signal_uniqueness" => reads::signal_uniqueness(pool, args).await,
         _ => Err(ToolError::Unknown(name.to_string())),
     }
 }
