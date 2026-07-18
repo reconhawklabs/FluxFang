@@ -39,6 +39,7 @@
 //! security payoff here today. It's left wired up in the environment for
 //! whichever future task adds a persistent, signed/private-cookie store.
 
+pub mod ai_audit;
 pub mod alert_methods;
 pub mod alert_rules;
 pub mod auth_routes;
@@ -87,6 +88,7 @@ pub fn app(state: AppState) -> Router {
     // other protected route rather than living in the public group.
     let protected = Router::new()
         .merge(auth_routes::protected_routes())
+        .merge(ai_audit::protected_routes())
         .merge(alert_methods::protected_routes())
         .merge(alert_rules::protected_routes())
         .merge(catalog_routes::protected_routes())
