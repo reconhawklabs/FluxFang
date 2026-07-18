@@ -56,6 +56,28 @@ Rust API), and `frontend` (the React UI served by nginx).
 > can reach physical RF and GPS hardware. Treat it as host-root-equivalent, and
 > don't expose it to untrusted operators.
 
+## Connect a console AI (MCP)
+
+FluxFang's backend exposes a Model Context Protocol (MCP) endpoint at
+`POST http://localhost:8080/mcp` so a console AI (e.g. Claude Code) can read
+your captured signals and help build emitters and entities from them.
+
+**Localhost only.** The endpoint rejects any non-loopback caller. Because the
+backend runs with host networking, only connect from the same host (or an SSH
+tunnel); do not expose port 8080 to untrusted networks.
+
+Add it to Claude Code:
+
+```bash
+claude mcp add --transport http fluxfang http://localhost:8080/mcp
+```
+
+The AI can then list stray emissions, inspect emitters/emissions with full raw
+payloads and signal levels, correlate by collocation/timing/distance, and
+create or refine emitters and entities. Every change the AI makes is recorded
+on the **AI Audit Log** page in the web UI (left nav, under Entities), showing
+each addition and subtraction.
+
 ## Running on Windows (WSL2)
 
 The web stack runs fine under WSL2 (Ubuntu): install Docker and follow the Quick
