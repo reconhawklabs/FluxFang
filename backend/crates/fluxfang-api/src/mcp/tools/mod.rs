@@ -1,5 +1,7 @@
-use serde_json::Value;
+use serde_json::{json, Value};
 use sqlx::PgPool;
+
+pub mod reads;
 
 #[derive(Debug, Clone)]
 pub struct ToolSchema {
@@ -37,10 +39,24 @@ impl From<sqlx::Error> for ToolError {
 
 /// Every registered tool's schema, for `tools/list`. Grows in Phase 3.
 pub fn tool_list() -> Vec<ToolSchema> {
-    Vec::new()
+    vec![ToolSchema {
+        name: "list_entities",
+        description: "List entities (tracked real-world things that own emitters). Paginated.",
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "search": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+                "offset": {"type": "integer", "minimum": 0}
+            }
+        }),
+    }]
 }
 
 /// Dispatch a `tools/call` by name. Grows in Phase 3.
-pub async fn dispatch(_pool: &PgPool, name: &str, _args: Value) -> Result<Value, ToolError> {
-    Err(ToolError::Unknown(name.to_string()))
+pub async fn dispatch(pool: &PgPool, name: &str, args: Value) -> Result<Value, ToolError> {
+    match name {
+        "list_entities" => reads::list_entities(pool, args).await,
+        _ => Err(ToolError::Unknown(name.to_string())),
+    }
 }

@@ -3,8 +3,10 @@
 //! Mounted as its own router group behind `guard::mcp_guard` (loopback-only) —
 //! NOT the session-auth group.
 
+pub mod audit;
 pub mod guard;
 pub mod protocol;
+pub mod shape;
 pub mod tools;
 
 use axum::routing::post;
