@@ -113,6 +113,19 @@ pub fn tool_list() -> Vec<ToolSchema> {
                 "emitter_ids":{"type":"array","items":{"type":"string"},"minItems":2},
                 "window_seconds":{"type":"integer"}}}),
         },
+        ToolSchema {
+            name: "suggest_associations",
+            description: "Score candidate emitter pairs for association using co-occurrence timing/distance (returns confidence).",
+            input_schema: json!({"type":"object","required":["emitter_ids"],"properties":{
+                "emitter_ids":{"type":"array","items":{"type":"string"},"minItems":2}}}),
+        },
+        ToolSchema {
+            name: "cotravel_analysis",
+            description: "Rank emitters by how strongly they co-travel with the host (spread/points/span → tier).",
+            input_schema: json!({"type":"object","properties":{
+                "time_from":{"type":"string"},"time_to":{"type":"string"},
+                "min_distance_m":{"type":"number"},"min_time_s":{"type":"number"}}}),
+        },
     ]
 }
 
@@ -130,6 +143,8 @@ pub async fn dispatch(pool: &PgPool, name: &str, args: Value) -> Result<Value, T
         "list_attributes_by_type" => reads::list_attributes_by_type(pool, args).await,
         "signal_uniqueness" => reads::signal_uniqueness(pool, args).await,
         "collocation_query" => analysis::collocation_query(pool, args).await,
+        "suggest_associations" => analysis::suggest_associations(pool, args).await,
+        "cotravel_analysis" => analysis::cotravel_analysis(pool, args).await,
         _ => Err(ToolError::Unknown(name.to_string())),
     }
 }
