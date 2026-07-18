@@ -78,6 +78,12 @@ create or refine emitters and entities. Every change the AI makes is recorded
 on the **AI Audit Log** page in the web UI (left nav, under Entities), showing
 each addition and subtraction.
 
+**The AI has full write authority over your local database.** It can delete
+or detach data you created by hand, including emitters and entities you
+built manually; emitters and entities aren't scoped to AI-created rows, so
+the AI can edit or remove anything, not just its own work. The append-only
+AI Audit Log is the only record of what changed. There is no undo.
+
 ## Running on Windows (WSL2)
 
 The web stack runs fine under WSL2 (Ubuntu): install Docker and follow the Quick

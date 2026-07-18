@@ -72,7 +72,7 @@ impl AiAuditRepo {
 
         let rows_sql = format!(
             "SELECT {AUDIT_COLUMNS} FROM ai_audit_log WHERE {where_clause} \
-             ORDER BY created_at DESC LIMIT $5 OFFSET $6"
+             ORDER BY created_at DESC, id DESC LIMIT $5 OFFSET $6"
         );
         let rows = sqlx::query_as::<_, AiAuditEntry>(&rows_sql)
             .bind(&filter.action)

@@ -246,9 +246,15 @@ pub fn tool_list() -> Vec<ToolSchema> {
 /// (returns `None`, so no audit row is written for it).
 fn write_action(name: &str) -> Option<&'static str> {
     match name {
-        "create_emitter_from_emissions" | "set_emitter_match_rule" | "attach_emissions"
-        | "update_emitter" | "create_entity" | "update_entity" | "assign_emitters_to_entity"
-        | "link_emitters" => Some("add"),
+        // `create_emitter_from_emissions` self-audits both success and error
+        // paths internally, incl. partial-failure affected_ids (it can create
+        // an emitter and attach emissions before a later step fails, and the
+        // error row needs to record those ids) -- see
+        // `writes::create_emitter_from_emissions`. Routing it through this
+        // wrapper too would double-audit its error path.
+        "create_emitter_from_emissions" => None,
+        "set_emitter_match_rule" | "attach_emissions" | "update_emitter" | "create_entity"
+        | "update_entity" | "assign_emitters_to_entity" | "link_emitters" => Some("add"),
         "detach_emissions" | "unassign_emitters_from_entity" | "unlink_emitters"
         | "delete_emitter" | "delete_entity" => Some("remove"),
         _ => None, // read-only / preview tools
@@ -263,7 +269,7 @@ fn write_action(name: &str) -> Option<&'static str> {
 pub async fn dispatch(pool: &PgPool, name: &str, args: Value) -> Result<Value, ToolError> {
     let result = dispatch_inner(pool, name, args.clone()).await;
     if let (Some(action), Err(e)) = (write_action(name), &result) {
-        crate::mcp::audit::record_error(pool, name, action, &args, &e.message()).await;
+        crate::mcp::audit::record_error(pool, name, action, &args, &e.message(), Vec::new()).await;
     }
     result
 }

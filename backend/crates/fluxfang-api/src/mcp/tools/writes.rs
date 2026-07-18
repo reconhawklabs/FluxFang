@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use fluxfang_core::rule::Rule;
 use fluxfang_db::models::{NewEmitter, NewEntity};
@@ -22,30 +23,68 @@ fn kind_of(args: &Value) -> Result<String, ToolError> {
         .ok_or_else(|| ToolError::InvalidParams("missing 'kind' (wifi/bluetooth/tpms)".into()))
 }
 
+/// Create an AI-sourced emitter, optionally attaching explicit emission_ids
+/// and/or retroactively claiming emissions via a match rule. This handler
+/// self-audits both its success AND error paths (see the outer
+/// `create_emitter_from_emissions` below) rather than relying on
+/// `dispatch`'s wrapper-based error auditing, because a failure partway
+/// through (e.g. attaching a nonexistent emission id after the emitter row
+/// was already inserted) must still record the ids that DID persist -- an
+/// error row with an empty `affected_ids` would understate real DB state.
+/// `write_action` returns `None` for this tool name specifically so
+/// `dispatch` doesn't ALSO write an error row on top of this one.
 pub async fn create_emitter_from_emissions(pool: &PgPool, args: Value) -> Result<Value, ToolError> {
-    let name = shape::opt_str(&args, "name")
+    let mut affected: Vec<Uuid> = Vec::new();
+    match create_emitter_inner(pool, &args, &mut affected).await {
+        Ok((summary, result)) => {
+            audit::record_success(
+                pool, "create_emitter_from_emissions", "add", summary, &args, &result, affected,
+            ).await;
+            Ok(result)
+        }
+        Err(e) => {
+            audit::record_error(
+                pool, "create_emitter_from_emissions", "add", &args, &e.message(), affected,
+            ).await;
+            Err(e)
+        }
+    }
+}
+
+/// Does the actual work of `create_emitter_from_emissions`, pushing each
+/// created/attached id into `affected` as it goes (emitter id first, then
+/// each attached emission id) so the caller can audit whatever persisted
+/// even on a failure. Returns `(summary, result)` on success instead of
+/// auditing itself, since only the caller knows whether to record it as a
+/// success or (partial) failure.
+async fn create_emitter_inner(
+    pool: &PgPool,
+    args: &Value,
+    affected: &mut Vec<Uuid>,
+) -> Result<(String, Value), ToolError> {
+    let name = shape::opt_str(args, "name")
         .ok_or_else(|| ToolError::InvalidParams("missing 'name'".into()))?;
     let attributes = args.get("attributes").cloned().unwrap_or_else(|| json!({}));
     let match_criteria = args.get("match_rule").cloned().unwrap_or_else(|| json!({}));
-    let rule = parse_rule(&args, "match_rule")?;
-    let kind = if rule.is_some() { kind_of(&args)? } else { String::new() };
+    let rule = parse_rule(args, "match_rule")?;
+    let kind = if rule.is_some() { kind_of(args)? } else { String::new() };
     let emission_ids = match args.get("emission_ids") {
-        Some(_) => shape::parse_uuid_list(&args, "emission_ids")?,
+        Some(_) => shape::parse_uuid_list(args, "emission_ids")?,
         None => Vec::new(),
     };
 
     let emitter = EmitterRepo::insert(pool, NewEmitter {
         name: name.clone(),
-        type_: shape::opt_str(&args, "type"),
-        emitter_type: shape::opt_str(&args, "emitter_type"),
+        type_: shape::opt_str(args, "type"),
+        emitter_type: shape::opt_str(args, "emitter_type"),
         attributes,
         match_criteria: match_criteria.clone(),
         source: "ai".to_string(),
         ..Default::default()
     }).await?;
+    affected.push(emitter.id);
 
     // Attach explicitly-listed emissions.
-    let mut affected = vec![emitter.id];
     for eid in &emission_ids {
         EmissionRepo::set_emitter(pool, *eid, emitter.id).await?;
         affected.push(*eid);
@@ -62,12 +101,8 @@ pub async fn create_emitter_from_emissions(pool: &PgPool, args: Value) -> Result
     let emitter = EmitterRepo::get(pool, emitter.id).await?
         .ok_or_else(|| ToolError::NotFound("emitter vanished".into()))?;
     let result = json!({ "emitter": shape::emitter_json(&emitter), "emissions_claimed": claimed });
-    audit::record_success(
-        pool, "create_emitter_from_emissions", "add",
-        format!("Created emitter '{name}' ({claimed} emission(s) claimed)"),
-        &args, &result, affected,
-    ).await;
-    Ok(result)
+    let summary = format!("Created emitter '{name}' ({claimed} emission(s) claimed)");
+    Ok((summary, result))
 }
 
 pub async fn set_emitter_match_rule(pool: &PgPool, args: Value) -> Result<Value, ToolError> {

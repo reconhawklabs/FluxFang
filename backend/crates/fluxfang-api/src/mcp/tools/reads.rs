@@ -158,7 +158,7 @@ pub async fn list_attributes_by_type(pool: &PgPool, args: Value) -> Result<Value
     .bind(&emitter_type)
     .fetch_all(pool)
     .await?;
-    let attrs: serde_json::Map<String, Value> = rows.into_iter().map(|(k, v)| (k, v)).collect();
+    let attrs: serde_json::Map<String, Value> = rows.into_iter().collect();
     Ok(json!({ "emitter_type": emitter_type, "attributes": attrs }))
 }
 
@@ -168,9 +168,13 @@ pub async fn signal_uniqueness(pool: &PgPool, args: Value) -> Result<Value, Tool
     let value = shape::opt_str(&args, "value")
         .ok_or_else(|| ToolError::InvalidParams("missing 'value'".into()))?;
     // Validate field against the safe identifier charset (no interpolation risk).
-    if !field
-        .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    // `field.is_empty()` must be checked explicitly: `str::chars().all(..)` is
+    // vacuously true on an empty string, which would otherwise let "" through
+    // and interpolate into the SQL below as `payload->>''`.
+    if field.is_empty()
+        || !field
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
     {
         return Err(ToolError::InvalidParams(
             "'field' must match [a-z0-9_]+".into(),

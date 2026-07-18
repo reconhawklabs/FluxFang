@@ -31,14 +31,25 @@ pub async fn record_success(
     }
 }
 
-pub async fn record_error(pool: &PgPool, tool: &str, action: &str, args: &Value, err_msg: &str) {
+/// Record a failed AI mutation. `affected_ids` carries whatever ids *did*
+/// persist before the failure (e.g. a partially-completed multi-step write),
+/// so the audit trail doesn't understate real DB state; pass `Vec::new()`
+/// when nothing was created before the error.
+pub async fn record_error(
+    pool: &PgPool,
+    tool: &str,
+    action: &str,
+    args: &Value,
+    err_msg: &str,
+    affected_ids: Vec<Uuid>,
+) {
     let row = NewAiAudit {
         tool: tool.to_string(),
         action: action.to_string(),
         summary: format!("{tool} failed"),
         args: args.clone(),
         result: None,
-        affected_ids: Vec::new(),
+        affected_ids,
         status: "error".to_string(),
         error: Some(err_msg.to_string()),
     };
