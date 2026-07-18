@@ -413,6 +413,19 @@ impl EmissionRepo {
             .await
     }
 
+    /// Detach `id` from its emitter, returning it to "stray" status -- the
+    /// single-row counterpart to `set_emitter`, used by the MCP
+    /// `detach_emissions` subtraction tool.
+    pub async fn clear_emitter(pool: &PgPool, id: Uuid) -> Result<Emission, sqlx::Error> {
+        let sql = format!(
+            "UPDATE emission SET emitter_id = NULL WHERE id = $1 RETURNING {EMISSION_COLUMNS}"
+        );
+        sqlx::query_as::<_, Emission>(&sql)
+            .bind(id)
+            .fetch_one(pool)
+            .await
+    }
+
     /// Filter/paginate emissions. Returns the requested page plus `total`,
     /// the count of matching rows ignoring `limit`/`offset` (for pagination
     /// UIs). See the module docs for the WHERE-building and catalog-scoping

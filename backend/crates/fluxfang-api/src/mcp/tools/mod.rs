@@ -3,6 +3,7 @@ use sqlx::PgPool;
 
 pub mod analysis;
 pub mod reads;
+pub mod subtractions;
 pub mod writes;
 
 #[derive(Debug, Clone)]
@@ -198,6 +199,41 @@ pub fn tool_list() -> Vec<ToolSchema> {
                 "confidence":{"type":"number"}
             }}),
         },
+        ToolSchema {
+            name: "detach_emissions",
+            description: "Detach a list of emission_ids from their emitter, returning them to stray status.",
+            input_schema: json!({"type":"object","required":["emission_ids"],"properties":{
+                "emission_ids":{"type":"array","items":{"type":"string"}}
+            }}),
+        },
+        ToolSchema {
+            name: "unassign_emitters_from_entity",
+            description: "Unassign a list of emitter_ids from their current entity.",
+            input_schema: json!({"type":"object","required":["emitter_ids"],"properties":{
+                "emitter_ids":{"type":"array","items":{"type":"string"}}
+            }}),
+        },
+        ToolSchema {
+            name: "unlink_emitters",
+            description: "Remove an association between two emitters.",
+            input_schema: json!({"type":"object","required":["emitter_id","associated_emitter_id"],"properties":{
+                "emitter_id":{"type":"string"},"associated_emitter_id":{"type":"string"}
+            }}),
+        },
+        ToolSchema {
+            name: "delete_emitter",
+            description: "Permanently delete an emitter.",
+            input_schema: json!({"type":"object","required":["emitter_id"],"properties":{
+                "emitter_id":{"type":"string"}
+            }}),
+        },
+        ToolSchema {
+            name: "delete_entity",
+            description: "Permanently delete an entity.",
+            input_schema: json!({"type":"object","required":["entity_id"],"properties":{
+                "entity_id":{"type":"string"}
+            }}),
+        },
     ]
 }
 
@@ -256,6 +292,13 @@ async fn dispatch_inner(pool: &PgPool, name: &str, args: Value) -> Result<Value,
         "update_entity" => writes::update_entity(pool, args).await,
         "assign_emitters_to_entity" => writes::assign_emitters_to_entity(pool, args).await,
         "link_emitters" => writes::link_emitters(pool, args).await,
+        "detach_emissions" => subtractions::detach_emissions(pool, args).await,
+        "unassign_emitters_from_entity" => {
+            subtractions::unassign_emitters_from_entity(pool, args).await
+        }
+        "unlink_emitters" => subtractions::unlink_emitters(pool, args).await,
+        "delete_emitter" => subtractions::delete_emitter(pool, args).await,
+        "delete_entity" => subtractions::delete_entity(pool, args).await,
         _ => Err(ToolError::Unknown(name.to_string())),
     }
 }
