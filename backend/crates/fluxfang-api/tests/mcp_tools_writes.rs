@@ -59,3 +59,35 @@ async fn create_emitter_from_emissions_with_match_rule_claims_future() {
     assert_eq!(rows[0].action, "add");
     assert_eq!(rows[0].status, "ok");
 }
+
+#[tokio::test]
+async fn create_entity_and_group_emitters() {
+    let pool = fresh_pool().await;
+    let e1 = fluxfang_db::EmitterRepo::insert(&pool, fluxfang_db::models::NewEmitter { name: "E1".into(), ..Default::default() }).await.unwrap().id;
+
+    let ent = writes::create_entity(&pool, json!({
+        "name": "Silver Sedan", "notes": "seen tailing on 3 outings", "confidence": 0.75,
+        "emitter_ids": [e1.to_string()]
+    })).await.unwrap();
+    let entity_id = Uuid::parse_str(ent["entity"]["id"].as_str().unwrap()).unwrap();
+    assert_eq!(ent["entity"]["source"], "ai");
+    assert_eq!(ent["entity"]["ai_confidence"], 0.75);
+
+    let emitter = fluxfang_db::EmitterRepo::get(&pool, e1).await.unwrap().unwrap();
+    assert_eq!(emitter.entity_id, Some(entity_id));
+}
+
+#[tokio::test]
+async fn link_emitters_creates_ai_association() {
+    let pool = fresh_pool().await;
+    let a = fluxfang_db::EmitterRepo::insert(&pool, fluxfang_db::models::NewEmitter { name: "A".into(), ..Default::default() }).await.unwrap().id;
+    let b = fluxfang_db::EmitterRepo::insert(&pool, fluxfang_db::models::NewEmitter { name: "B".into(), ..Default::default() }).await.unwrap().id;
+
+    writes::link_emitters(&pool, json!({
+        "emitter_id": a.to_string(), "associated_emitter_id": b.to_string(), "confidence": 0.9
+    })).await.unwrap();
+
+    assert!(fluxfang_db::EmitterAssociationRepo::exists(&pool, a, b).await.unwrap());
+    let list = fluxfang_db::EmitterAssociationRepo::list_for(&pool, a).await.unwrap();
+    assert_eq!(list[0].source, "ai");
+}

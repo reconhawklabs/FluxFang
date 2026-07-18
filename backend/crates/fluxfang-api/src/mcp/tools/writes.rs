@@ -2,8 +2,8 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 
 use fluxfang_core::rule::Rule;
-use fluxfang_db::models::NewEmitter;
-use fluxfang_db::{EmissionRepo, EmitterRepo};
+use fluxfang_db::models::{NewEmitter, NewEntity};
+use fluxfang_db::{EmissionRepo, EmitterAssociationRepo, EmitterRepo, EntityRepo};
 
 use crate::mcp::tools::ToolError;
 use crate::mcp::{audit, shape};
@@ -144,6 +144,81 @@ pub async fn update_emitter(pool: &PgPool, args: Value) -> Result<Value, ToolErr
         pool, "update_emitter", "add",
         format!("Updated emitter {id} ('{name}')"),
         &args, &result, vec![id],
+    ).await;
+    Ok(result)
+}
+
+pub async fn create_entity(pool: &PgPool, args: Value) -> Result<Value, ToolError> {
+    let name = shape::opt_str(&args, "name")
+        .ok_or_else(|| ToolError::InvalidParams("missing 'name'".into()))?;
+    let notes = shape::opt_str(&args, "notes");
+    let confidence = args.get("confidence").and_then(Value::as_f64);
+    let emitter_ids = match args.get("emitter_ids") {
+        Some(_) => shape::parse_uuid_list(&args, "emitter_ids")?,
+        None => Vec::new(),
+    };
+
+    let entity = EntityRepo::insert(pool, NewEntity {
+        name: name.clone(), notes, source: "ai".to_string(), ai_confidence: confidence,
+    }).await?;
+
+    let mut affected = vec![entity.id];
+    for eid in &emitter_ids {
+        EmitterRepo::set_entity(pool, *eid, Some(entity.id)).await?;
+        affected.push(*eid);
+    }
+
+    let result = json!({ "entity": shape::entity_json(&entity), "grouped_emitters": emitter_ids.len() });
+    audit::record_success(
+        pool, "create_entity", "add",
+        format!("Created entity '{name}' with {} emitter(s)", emitter_ids.len()),
+        &args, &result, affected,
+    ).await;
+    Ok(result)
+}
+
+pub async fn update_entity(pool: &PgPool, args: Value) -> Result<Value, ToolError> {
+    let id = shape::parse_uuid(&args, "entity_id")?;
+    let existing = EntityRepo::get(pool, id).await?
+        .ok_or_else(|| ToolError::NotFound(format!("entity {id}")))?;
+    let name = shape::opt_str(&args, "name").unwrap_or(existing.name.clone());
+    let notes = shape::opt_str(&args, "notes").or(existing.notes.clone());
+    let entity = EntityRepo::update(pool, id, &name, notes.as_deref()).await?;
+
+    let result = json!({ "entity": shape::entity_json(&entity) });
+    audit::record_success(
+        pool, "update_entity", "add",
+        format!("Updated entity {id} ('{name}')"), &args, &result, vec![id],
+    ).await;
+    Ok(result)
+}
+
+pub async fn assign_emitters_to_entity(pool: &PgPool, args: Value) -> Result<Value, ToolError> {
+    let entity_id = shape::parse_uuid(&args, "entity_id")?;
+    let ids = shape::parse_uuid_list(&args, "emitter_ids")?;
+    for eid in &ids {
+        EmitterRepo::set_entity(pool, *eid, Some(entity_id)).await?;
+    }
+    let mut affected = vec![entity_id];
+    affected.extend(ids.iter().copied());
+    let result = json!({ "entity_id": entity_id, "assigned": ids.len() });
+    audit::record_success(
+        pool, "assign_emitters_to_entity", "add",
+        format!("Assigned {} emitter(s) to entity {entity_id}", ids.len()),
+        &args, &result, affected,
+    ).await;
+    Ok(result)
+}
+
+pub async fn link_emitters(pool: &PgPool, args: Value) -> Result<Value, ToolError> {
+    let a = shape::parse_uuid(&args, "emitter_id")?;
+    let b = shape::parse_uuid(&args, "associated_emitter_id")?;
+    let confidence = args.get("confidence").and_then(Value::as_f64);
+    EmitterAssociationRepo::add(pool, a, b, "ai", confidence).await?;
+    let result = json!({ "emitter_id": a, "associated_emitter_id": b });
+    audit::record_success(
+        pool, "link_emitters", "add",
+        format!("Linked emitter {a} <-> {b}"), &args, &result, vec![a, b],
     ).await;
     Ok(result)
 }

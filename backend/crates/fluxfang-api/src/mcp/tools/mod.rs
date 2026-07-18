@@ -168,6 +168,36 @@ pub fn tool_list() -> Vec<ToolSchema> {
                 "attributes":{"type":"object"}
             }}),
         },
+        ToolSchema {
+            name: "create_entity",
+            description: "Create a new AI-sourced entity (tracked real-world thing), optionally grouping in a set of existing emitter_ids.",
+            input_schema: json!({"type":"object","required":["name"],"properties":{
+                "name":{"type":"string"},"notes":{"type":"string"},"confidence":{"type":"number"},
+                "emitter_ids":{"type":"array","items":{"type":"string"}}
+            }}),
+        },
+        ToolSchema {
+            name: "update_entity",
+            description: "Update an entity's name and/or notes.",
+            input_schema: json!({"type":"object","required":["entity_id"],"properties":{
+                "entity_id":{"type":"string"},"name":{"type":"string"},"notes":{"type":"string"}
+            }}),
+        },
+        ToolSchema {
+            name: "assign_emitters_to_entity",
+            description: "Assign a list of emitter_ids to an existing entity.",
+            input_schema: json!({"type":"object","required":["entity_id","emitter_ids"],"properties":{
+                "entity_id":{"type":"string"},"emitter_ids":{"type":"array","items":{"type":"string"}}
+            }}),
+        },
+        ToolSchema {
+            name: "link_emitters",
+            description: "Create an AI-sourced association between two emitters, with an optional confidence score.",
+            input_schema: json!({"type":"object","required":["emitter_id","associated_emitter_id"],"properties":{
+                "emitter_id":{"type":"string"},"associated_emitter_id":{"type":"string"},
+                "confidence":{"type":"number"}
+            }}),
+        },
     ]
 }
 
@@ -222,6 +252,10 @@ async fn dispatch_inner(pool: &PgPool, name: &str, args: Value) -> Result<Value,
         "preview_match_rule" => writes::preview_match_rule(pool, args).await,
         "attach_emissions" => writes::attach_emissions(pool, args).await,
         "update_emitter" => writes::update_emitter(pool, args).await,
+        "create_entity" => writes::create_entity(pool, args).await,
+        "update_entity" => writes::update_entity(pool, args).await,
+        "assign_emitters_to_entity" => writes::assign_emitters_to_entity(pool, args).await,
+        "link_emitters" => writes::link_emitters(pool, args).await,
         _ => Err(ToolError::Unknown(name.to_string())),
     }
 }
