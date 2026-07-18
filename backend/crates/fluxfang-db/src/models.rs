@@ -220,6 +220,8 @@ pub struct Entity {
     pub created_at: DateTime<Utc>,
     pub name: String,
     pub notes: Option<String>,
+    pub source: String,
+    pub ai_confidence: Option<f64>,
 }
 
 /// Fields required to create a new `entity`.
@@ -227,6 +229,19 @@ pub struct Entity {
 pub struct NewEntity {
     pub name: String,
     pub notes: Option<String>,
+    pub source: String,
+    pub ai_confidence: Option<f64>,
+}
+
+impl Default for NewEntity {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            notes: None,
+            source: "manual".to_string(),
+            ai_confidence: None,
+        }
+    }
 }
 
 /// `emitter`: a distinct identified source (e.g. a specific access point),
@@ -262,6 +277,7 @@ pub struct Emitter {
     pub attributes: serde_json::Value,
     pub match_enabled: bool,
     pub identity_key: Option<String>,
+    pub source: String,
 }
 
 /// Fields required to create a new `emitter`.
@@ -289,6 +305,7 @@ pub struct NewEmitter {
     pub attributes: serde_json::Value,
     pub match_enabled: bool,
     pub identity_key: Option<String>,
+    pub source: String,
 }
 
 impl Default for NewEmitter {
@@ -302,6 +319,7 @@ impl Default for NewEmitter {
             attributes: serde_json::json!({}),
             match_enabled: true,
             identity_key: None,
+            source: "manual".to_string(),
         }
     }
 }

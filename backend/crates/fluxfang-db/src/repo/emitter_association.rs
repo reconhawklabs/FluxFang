@@ -18,10 +18,20 @@ pub struct AssociatedEmitter {
 
 /// Row shape for `list_for`'s join: the joined emitter's columns flattened,
 /// plus the association's `source`/`confidence`.
+///
+/// The association's own `source` column is selected as `assoc_source` (see
+/// `list_for`'s SQL) and mapped here via `#[sqlx(rename)]`: `emitter` now
+/// also has its own `source` column (Task 2, migration `0012`), and Postgres
+/// happily returns two result columns both literally named `source` for an
+/// unaliased `SELECT ... e.source, ..., ea.source ...` — sqlx's by-name
+/// column lookup would then resolve `AssocRow::source` to whichever of the
+/// two same-named columns wins, silently corrupting one of the two `source`
+/// values. Aliasing the association's copy avoids the collision entirely.
 #[derive(sqlx::FromRow)]
 struct AssocRow {
     #[sqlx(flatten)]
     emitter: Emitter,
+    #[sqlx(rename = "assoc_source")]
     source: String,
     confidence: Option<f64>,
 }
@@ -98,7 +108,7 @@ impl EmitterAssociationRepo {
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT {cols}, ea.source, ea.confidence \
+            "SELECT {cols}, ea.source AS assoc_source, ea.confidence \
              FROM emitter_association ea \
              JOIN emitter e ON e.id = ea.associated_emitter_id \
              WHERE ea.emitter_id = $1 \

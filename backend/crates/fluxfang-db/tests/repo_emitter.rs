@@ -36,6 +36,7 @@ fn new_auto_emitter(identity_key: &str) -> NewEmitter {
         attributes: serde_json::json!({"bssid": identity_key}),
         match_enabled: true,
         identity_key: Some(identity_key.to_string()),
+        source: "manual".to_string(),
     }
 }
 
@@ -135,6 +136,7 @@ async fn set_entity_associates_then_detaches() {
         NewEntity {
             name: "Bob".to_string(),
             notes: None,
+            ..Default::default()
         },
     )
     .await
@@ -475,6 +477,7 @@ async fn insert_roundtrips_classification_columns() {
         attributes: serde_json::json!({"bssid": "aa:bb:cc:dd:ee:ff", "ssid": "Home"}),
         match_enabled: true,
         identity_key: Some("wifi_access_point:aa:bb:cc:dd:ee:ff".to_string()),
+        source: "manual".to_string(),
     };
     let created = EmitterRepo::insert(&pool, new).await.unwrap();
     assert_eq!(created.emitter_type.as_deref(), Some("wifi_access_point"));
@@ -668,6 +671,7 @@ async fn merge_client_attributes_merges_on_client_and_noops_on_other_types() {
             }),
             match_enabled: true,
             identity_key: Some("wifi_client:3a:de:ad:be:ef:00".to_string()),
+            source: "manual".to_string(),
         },
     )
     .await
@@ -703,6 +707,7 @@ async fn merge_client_attributes_merges_on_client_and_noops_on_other_types() {
             attributes: serde_json::json!({"bssid": "aa:bb:cc:dd:ee:ff"}),
             match_enabled: true,
             identity_key: Some("wifi_access_point:aa:bb:cc:dd:ee:ff".to_string()),
+            source: "manual".to_string(),
         },
     )
     .await
@@ -745,6 +750,7 @@ async fn merge_ap_attributes_is_conditional_on_label_change() {
             attributes: serde_json::json!({"security_label": "WPA2-PSK (CCMP)"}),
             match_enabled: true,
             identity_key: Some("wifi_access_point:bssid:aa:bb:cc:dd:ee:ff".into()),
+            source: "manual".to_string(),
         },
     )
     .await
@@ -797,6 +803,7 @@ async fn merge_ap_attributes_is_a_noop_for_non_ap_emitter_types() {
             attributes: serde_json::json!({"src_mac": "3a:de:ad:be:ef:00"}),
             match_enabled: true,
             identity_key: Some("wifi_client:3a:de:ad:be:ef:00".to_string()),
+            source: "manual".to_string(),
         },
     )
     .await
@@ -851,6 +858,7 @@ async fn create_with_entity_reassigns_all_matching_emissions_regardless_of_prior
         NewEntity {
             name: "Bob's phone".to_string(),
             notes: None,
+            ..Default::default()
         },
         "Bob's phone AP".to_string(),
         Some("Access Point".to_string()),
@@ -947,6 +955,7 @@ async fn query_search_matches_by_mac_inside_attributes_json() {
             attributes: serde_json::json!({"bssid": "aa:bb:cc:dd:ee:ff"}),
             match_enabled: true,
             identity_key: None,
+            source: "manual".to_string(),
         },
     )
     .await
@@ -1013,6 +1022,7 @@ async fn query_entity_id_filters_to_only_that_entitys_emitters() {
         NewEntity {
             name: "Bob".to_string(),
             notes: None,
+            ..Default::default()
         },
     )
     .await
@@ -1157,6 +1167,7 @@ async fn query_emitter_type_combines_with_search_and_entity_id() {
         NewEntity {
             name: "Bob".to_string(),
             notes: None,
+            ..Default::default()
         },
     )
     .await

@@ -172,6 +172,7 @@ async fn create_entity(
         NewEntity {
             name: req.name,
             notes: req.notes,
+            ..Default::default()
         },
     )
     .await?;

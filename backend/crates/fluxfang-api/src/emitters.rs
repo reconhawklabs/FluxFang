@@ -725,6 +725,7 @@ async fn create_with_entity(
         NewEntity {
             name: req.entity.name,
             notes: req.entity.notes,
+            ..Default::default()
         },
         req.emitter.name,
         req.emitter.type_,

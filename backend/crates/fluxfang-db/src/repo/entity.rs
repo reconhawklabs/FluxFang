@@ -24,7 +24,7 @@ pub struct EntityRepo;
 /// entity-insert half of its atomic entity+emitter transaction, same
 /// precedent as `repo::alert_rule` reusing `repo::alert_method`'s
 /// `ALERT_METHOD_COLUMNS`.
-pub(crate) const ENTITY_COLUMNS: &str = "id, created_at, name, notes";
+pub(crate) const ENTITY_COLUMNS: &str = "id, created_at, name, notes, source, ai_confidence";
 
 /// Filter/paginate criteria for [`EntityRepo::query`] (Phase 1b). `search`,
 /// when `Some`, is a case-insensitive substring matched across `name` and
@@ -49,11 +49,16 @@ impl Default for EntityListFilter {
 
 impl EntityRepo {
     pub async fn insert(pool: &PgPool, new: NewEntity) -> Result<Entity, sqlx::Error> {
-        let sql =
-            format!("INSERT INTO entity (name, notes) VALUES ($1, $2) RETURNING {ENTITY_COLUMNS}");
+        let sql = format!(
+            "INSERT INTO entity (name, notes, source, ai_confidence) \
+             VALUES ($1, $2, $3, $4) \
+             RETURNING {ENTITY_COLUMNS}"
+        );
         sqlx::query_as::<_, Entity>(&sql)
             .bind(new.name)
             .bind(new.notes)
+            .bind(new.source)
+            .bind(new.ai_confidence)
             .fetch_one(pool)
             .await
     }

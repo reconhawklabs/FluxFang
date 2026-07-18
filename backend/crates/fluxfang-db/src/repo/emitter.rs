@@ -223,7 +223,7 @@ impl From<RuleSqlError> for EmitterQueryError {
 /// name, not position, so appending them here is enough for every query
 /// built from this constant to pick them up.
 pub(crate) const EMITTER_COLUMNS: &str = "id, created_at, name, type, entity_id, match_criteria, \
-     first_seen_at, last_seen_at, emitter_type, attributes, match_enabled, identity_key";
+     first_seen_at, last_seen_at, emitter_type, attributes, match_enabled, identity_key, source";
 
 /// Allow-listed emitter sort keys -> SQL ordering expressions. `identity`
 /// mirrors `MacIdentityCell`'s display precedence; `emissions` orders by the
@@ -287,8 +287,8 @@ impl EmitterRepo {
         let sql = format!(
             "INSERT INTO emitter \
                  (name, type, entity_id, match_criteria, emitter_type, attributes, \
-                  match_enabled, identity_key) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+                  match_enabled, identity_key, source) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
              RETURNING {EMITTER_COLUMNS}"
         );
         sqlx::query_as::<_, Emitter>(&sql)
@@ -300,6 +300,7 @@ impl EmitterRepo {
             .bind(new.attributes)
             .bind(new.match_enabled)
             .bind(new.identity_key)
+            .bind(new.source)
             .fetch_one(pool)
             .await
     }
@@ -338,8 +339,8 @@ impl EmitterRepo {
         let insert_sql = format!(
             "INSERT INTO emitter \
                  (name, type, entity_id, match_criteria, emitter_type, attributes, \
-                  match_enabled, identity_key) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+                  match_enabled, identity_key, source) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
              ON CONFLICT (identity_key) DO NOTHING \
              RETURNING {EMITTER_COLUMNS}"
         );
@@ -352,6 +353,7 @@ impl EmitterRepo {
             .bind(&new.attributes)
             .bind(new.match_enabled)
             .bind(&new.identity_key)
+            .bind(&new.source)
             .fetch_optional(pool)
             .await?;
 
@@ -945,8 +947,8 @@ impl EmitterRepo {
         .map_err(EmitterRuleError::Sql)?;
 
         let emitter_sql = format!(
-            "INSERT INTO emitter (name, type, entity_id, match_criteria, emitter_type) \
-             VALUES ($1, $2, $3, $4, $5) \
+            "INSERT INTO emitter (name, type, entity_id, match_criteria, emitter_type, source) \
+             VALUES ($1, $2, $3, $4, $5, 'manual') \
              RETURNING {EMITTER_COLUMNS}"
         );
         let mut emitter = sqlx::query_as::<_, Emitter>(&emitter_sql)
