@@ -4,6 +4,8 @@
 //! NOT the session-auth group.
 
 pub mod guard;
+pub mod protocol;
+pub mod tools;
 
 use axum::routing::post;
 use axum::Router;
@@ -12,11 +14,9 @@ use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/mcp", post(placeholder))
+        .route(
+            "/mcp",
+            post(protocol::handle).get(|| async { axum::http::StatusCode::METHOD_NOT_ALLOWED }),
+        )
         .route_layer(axum::middleware::from_fn(guard::mcp_guard))
-}
-
-// Replaced in Task 5 by the real JSON-RPC handler.
-async fn placeholder() -> &'static str {
-    "mcp"
 }
