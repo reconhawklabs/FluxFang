@@ -234,6 +234,25 @@ pub fn tool_list() -> Vec<ToolSchema> {
                 "entity_id":{"type":"string"}
             }}),
         },
+        ToolSchema {
+            name: "delete_emissions",
+            description: "Permanently delete specific emissions by id (IRREVERSIBLE). Unlike detach_emissions (which only unlinks an emission from its emitter), this removes the rows entirely. Find ids first via list_stray_emissions/list_emissions.",
+            input_schema: json!({"type":"object","required":["emission_ids"],"properties":{
+                "emission_ids":{"type":"array","items":{"type":"string"}}
+            }}),
+        },
+        ToolSchema {
+            name: "delete_emissions_where",
+            description: "Permanently delete emissions in bulk by filter (IRREVERSIBLE). Filter by kind (wifi/bluetooth/tpms), time_from/time_to (RFC3339), emitter_id, and/or unassigned (true=only stray). At least one filter is required; to wipe ALL emissions pass 'all': true explicitly.",
+            input_schema: json!({"type":"object","properties":{
+                "kind":{"type":"string"},
+                "time_from":{"type":"string"},
+                "time_to":{"type":"string"},
+                "emitter_id":{"type":"string"},
+                "unassigned":{"type":"boolean"},
+                "all":{"type":"boolean","description":"Delete every emission. Required to be true for an unfiltered wipe."}
+            }}),
+        },
     ]
 }
 
@@ -256,7 +275,8 @@ fn write_action(name: &str) -> Option<&'static str> {
         "set_emitter_match_rule" | "attach_emissions" | "update_emitter" | "create_entity"
         | "update_entity" | "assign_emitters_to_entity" | "link_emitters" => Some("add"),
         "detach_emissions" | "unassign_emitters_from_entity" | "unlink_emitters"
-        | "delete_emitter" | "delete_entity" => Some("remove"),
+        | "delete_emitter" | "delete_entity" | "delete_emissions"
+        | "delete_emissions_where" => Some("remove"),
         _ => None, // read-only / preview tools
     }
 }
@@ -305,6 +325,8 @@ async fn dispatch_inner(pool: &PgPool, name: &str, args: Value) -> Result<Value,
         "unlink_emitters" => subtractions::unlink_emitters(pool, args).await,
         "delete_emitter" => subtractions::delete_emitter(pool, args).await,
         "delete_entity" => subtractions::delete_entity(pool, args).await,
+        "delete_emissions" => subtractions::delete_emissions(pool, args).await,
+        "delete_emissions_where" => subtractions::delete_emissions_where(pool, args).await,
         _ => Err(ToolError::Unknown(name.to_string())),
     }
 }

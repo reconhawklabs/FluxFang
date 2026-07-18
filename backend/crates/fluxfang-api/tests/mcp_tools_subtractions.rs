@@ -103,3 +103,66 @@ async fn delete_emitter_not_found_returns_error() {
     let result = subtractions::delete_emitter(&pool, json!({"emitter_id": missing.to_string()})).await;
     assert!(result.is_err());
 }
+
+async fn seed_emission(pool: &sqlx::PgPool, kind: &str, emitter_id: Option<Uuid>, at_secs: i64) -> Uuid {
+    let ds = DataSourceRepo::insert(pool, NewDataSource::wifi_monitor("wlan0")).await.unwrap().id;
+    SessionRepo::close_active(pool).await.ok();
+    let session = SessionRepo::open(pool).await.unwrap().id;
+    let mut em = NewEmission::wifi(ds, session, json!({"bssid":"a"}));
+    em.kind = kind.to_string();
+    em.emitter_id = emitter_id;
+    em.observed_at = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap() + chrono::Duration::seconds(at_secs);
+    EmissionRepo::insert(pool, em).await.unwrap().id
+}
+
+#[tokio::test]
+async fn delete_emissions_by_id_removes_rows_and_audits_remove() {
+    let pool = fresh_pool().await;
+    let e1 = seed_emission(&pool, "wifi", None, 0).await;
+    let e2 = seed_emission(&pool, "wifi", None, 1).await;
+
+    let out = subtractions::delete_emissions(&pool, json!({"emission_ids":[e1.to_string()]}))
+        .await
+        .unwrap();
+    assert_eq!(out["deleted"], 1);
+
+    // e1 gone, e2 remains.
+    assert!(EmissionRepo::get(&pool, e1).await.unwrap().is_none());
+    assert!(EmissionRepo::get(&pool, e2).await.unwrap().is_some());
+
+    let (rows, _) = AiAuditRepo::query(&pool, AiAuditFilter { action: Some("remove".into()), ..Default::default() }).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].tool, "delete_emissions");
+    assert_eq!(rows[0].affected_ids, vec![e1]);
+}
+
+#[tokio::test]
+async fn delete_emissions_where_filters_and_guards_unfiltered() {
+    let pool = fresh_pool().await;
+    let _stray = seed_emission(&pool, "wifi", None, 0).await;
+    let emitter = EmitterRepo::insert(&pool, NewEmitter { name: "E".into(), ..Default::default() }).await.unwrap().id;
+    let _attached = seed_emission(&pool, "wifi", Some(emitter), 1).await;
+
+    // Unfiltered call with no `all` flag is rejected (no accidental total wipe).
+    let guarded = subtractions::delete_emissions_where(&pool, json!({})).await;
+    assert!(guarded.is_err(), "unfiltered delete_emissions_where must be rejected");
+
+    // Filter to stray only.
+    let out = subtractions::delete_emissions_where(&pool, json!({"unassigned": true})).await.unwrap();
+    assert_eq!(out["deleted"], 1);
+    let (_, total) = EmissionRepo::query(&pool, fluxfang_db::repo::emission::EmissionFilter::default()).await.unwrap();
+    assert_eq!(total, 1, "only the attached emission should remain");
+}
+
+#[tokio::test]
+async fn delete_emissions_where_all_clears_everything() {
+    let pool = fresh_pool().await;
+    seed_emission(&pool, "wifi", None, 0).await;
+    seed_emission(&pool, "tpms", None, 1).await;
+
+    let out = subtractions::delete_emissions_where(&pool, json!({"all": true})).await.unwrap();
+    assert_eq!(out["deleted"], 2);
+    assert_eq!(out["all"], true);
+    let (_, total) = EmissionRepo::query(&pool, fluxfang_db::repo::emission::EmissionFilter::default()).await.unwrap();
+    assert_eq!(total, 0);
+}
