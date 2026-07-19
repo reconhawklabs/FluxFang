@@ -256,6 +256,38 @@ pub fn tool_list() -> Vec<ToolSchema> {
     ]
 }
 
+/// Human/model-readable server guidance returned in the MCP `initialize`
+/// response's `instructions` field. MCP clients surface this to the model
+/// (often folded into the system prompt), so it's how an AI learns what this
+/// server is for without having to infer it from tool names. The tool roster
+/// at the end is generated from [`tool_list`], so it always names every
+/// registered tool and can never drift out of sync as tools are added.
+pub fn server_instructions() -> String {
+    let names: Vec<&str> = tool_list().iter().map(|t| t.name).collect();
+    format!(
+        "FluxFang is a self-hosted signals-intelligence platform; this MCP server gives you \
+read/write access to its live database, so you can act as an analyst assistant.\n\n\
+Data model: an EMISSION is one captured RF observation (WiFi / Bluetooth / TPMS) with a raw \
+payload, signal strength, timestamp, and usually a location. An EMITTER is a distinct source \
+(e.g. an access point or a TPMS sensor) that owns many emissions. An ENTITY is a real-world \
+thing (e.g. a specific vehicle or person) that owns many emitters. An emission with no \
+emitter is 'stray'.\n\n\
+Typical workflow: find stray emissions; group them into an emitter, optionally with a match \
+rule so future matching emissions auto-attach; correlate emitters by collocation, timing, \
+distance, and uniqueness to fingerprint them; then create and enrich entities from emitters \
+seen together in the same places at the same times. Enrich records with identifying detail \
+pulled from their emissions (device names, MAC addresses, connected access points, SSIDs, \
+TPMS IDs).\n\n\
+Read tools return full raw payloads/attributes and accept optional time_from/time_to \
+windows. Every write you make is tagged source='ai' and recorded in an audit log the \
+operator reviews; deletions are permanent (no undo). Call tools/list for each tool's full \
+input schema.\n\n\
+Available tools ({count}): {roster}.",
+        count = names.len(),
+        roster = names.join(", "),
+    )
+}
+
 /// Write tools and the audit action they log on the error path. Success rows
 /// are written inside each handler; this covers the complementary case where
 /// a write tool errors out and still needs an `action`-tagged trail. Lists

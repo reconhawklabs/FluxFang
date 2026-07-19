@@ -30,7 +30,8 @@ pub async fn handle(State(state): State<AppState>, Json(req): Json<Value>) -> Re
                     .get("params").and_then(|p| p.get("protocolVersion"))
                     .and_then(Value::as_str).unwrap_or(PROTOCOL_VERSION),
                 "capabilities": { "tools": {} },
-                "serverInfo": { "name": "fluxfang", "version": env!("CARGO_PKG_VERSION") }
+                "serverInfo": { "name": "fluxfang", "version": env!("CARGO_PKG_VERSION") },
+                "instructions": tools::server_instructions()
             }),
         ),
         "tools/list" => {
