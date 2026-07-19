@@ -30,6 +30,24 @@ async fn initialize_then_tools_list() {
     assert_eq!(init["result"]["serverInfo"]["name"], "fluxfang");
     assert!(init["result"]["capabilities"]["tools"].is_object());
 
+    // The `instructions` field orients the AI. It must be present, meaningful,
+    // and — critically — name EVERY registered tool, so the model always sees
+    // the full surface and the roster can't drift out of sync with tool_list().
+    let instructions = init["result"]["instructions"]
+        .as_str()
+        .expect("initialize result must include an instructions string");
+    assert!(
+        instructions.contains("FluxFang"),
+        "instructions should describe the server"
+    );
+    for tool in fluxfang_api::mcp::tools::tool_list() {
+        assert!(
+            instructions.contains(tool.name),
+            "instructions must name every tool; missing: {}",
+            tool.name
+        );
+    }
+
     let list = rpc(
         addr,
         json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
