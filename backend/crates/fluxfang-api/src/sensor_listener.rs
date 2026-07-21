@@ -136,7 +136,18 @@ async fn enroll(
                 .map(|s| (StatusCode::OK, s.status))
         }
         Some(s) if s.status == "approved" => {
-            if s.key == req.key {
+            // Constant-time compare of the DECODED 32-byte keys (defense in
+            // depth on an unauthenticated endpoint) rather than a
+            // short-circuiting String/base64 compare. If the stored key
+            // somehow fails to decode (should never happen — we only ever
+            // store valid base64 here) treat it as a mismatch, not a panic.
+            // subtle 2.x implements `ConstantTimeEq` for slices, not fixed-
+            // size arrays, so compare via `.as_slice()`.
+            use subtle::ConstantTimeEq;
+            let stored_key = fluxfang_sensor_proto::decode_key(&s.key);
+            let same =
+                matches!(&stored_key, Ok(sk) if bool::from(sk.as_slice().ct_eq(key.as_slice())));
+            if same {
                 let _ = SensorRepo::touch_last_seen(&st.pool, s.id).await;
                 Ok((StatusCode::OK, "approved".to_string()))
             } else {
