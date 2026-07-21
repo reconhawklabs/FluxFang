@@ -39,10 +39,20 @@ pub struct PasswordPayload {
     password: String,
 }
 
+fn default_role() -> NodeRole {
+    NodeRole::Standalone
+}
+
+fn default_node_sensor_id() -> String {
+    "local".to_string()
+}
+
 #[derive(Deserialize)]
 pub struct SetupPayload {
     password: String,
+    #[serde(default = "default_role")]
     role: NodeRole,
+    #[serde(default = "default_node_sensor_id")]
     node_sensor_id: String,
     #[serde(default)]
     sensor: Option<SensorConfig>,
