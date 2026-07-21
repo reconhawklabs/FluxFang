@@ -1260,3 +1260,53 @@ async fn gpsd_source_rejected_while_manual_gps_already_running() {
         "manual source should still be running: {first_after}"
     );
 }
+
+/// Task 3 (Phase 2B): a `sensor` datasource is a network listener driven by
+/// `SensorListenerManager`, not a capturer — feeding it to
+/// `CapturerFactory::build` errors (`MockCapturerFactory`'s `other => Err`
+/// arm). `CaptureSupervisor` must skip `kind == "sensor"` rows in `start`,
+/// `resume_running`, and `reconcile_once` so a stray start (or a
+/// resume/reconcile sweep after a restart) is a harmless no-op instead of
+/// flipping the row to `status = 'error'`.
+#[tokio::test]
+async fn capture_supervisor_skips_sensor_datasources() {
+    let (_app, pool) = common::test_app_with_factory(std::sync::Arc::new(
+        fluxfang_api::capture::MockCapturerFactory::default(),
+    ))
+    .await;
+
+    let src = DataSourceRepo::insert(
+        &pool,
+        NewDataSource {
+            kind: "sensor".to_string(),
+            mode: "listener".to_string(),
+            interface: None,
+            config: serde_json::json!({"bind_ip":"127.0.0.1","bind_port":9099,"enrollment_window_secs":900}),
+        },
+    )
+    .await
+    .unwrap();
+    DataSourceRepo::set_desired_state(&pool, src.id, "running")
+        .await
+        .unwrap();
+
+    // Build a supervisor over the same pool and resume — a sensor row must be
+    // skipped, not fed to the factory (which would set status='error').
+    let sup = fluxfang_api::capture::CaptureSupervisor::new(
+        pool.clone(),
+        tokio::sync::broadcast::channel(16).0,
+        [0u8; 32],
+        std::sync::Arc::new(fluxfang_api::capture::MockCapturerFactory::default()),
+    );
+    sup.resume_running().await;
+
+    let row = DataSourceRepo::get(&pool, src.id).await.unwrap().unwrap();
+    assert_ne!(
+        row.status, "error",
+        "sensor datasource must be skipped, not errored, by the capture supervisor"
+    );
+    // Directly calling start on a sensor row is a harmless no-op.
+    sup.start(src.id)
+        .await
+        .expect("start on a sensor row is a no-op Ok");
+}

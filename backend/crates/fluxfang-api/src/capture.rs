@@ -826,6 +826,14 @@ impl CaptureSupervisor {
             .await?
             .ok_or_else(|| anyhow!("data source {data_source_id} not found"))?;
 
+        // A `sensor` datasource is a network listener, not a capturer — it is
+        // driven by `SensorListenerManager`, never the capture pipeline. Skip
+        // it here so a stray start() (or a resume/reconcile sweep) is a no-op
+        // rather than a failed `factory.build`.
+        if source.kind == "sensor" {
+            return Ok(());
+        }
+
         if let Err(msg) = validate_data_source(
             &source.kind,
             &source.mode,
@@ -926,7 +934,7 @@ impl CaptureSupervisor {
 
         let to_resume: Vec<DataSource> = sources
             .into_iter()
-            .filter(|source| source.desired_state == "running")
+            .filter(|source| source.kind != "sensor" && source.desired_state == "running")
             .collect();
         // No kind ordering: the session is GPS-agnostic now.
 
@@ -956,7 +964,11 @@ impl CaptureSupervisor {
             let running = self.running.lock().await;
             sources
                 .into_iter()
-                .filter(|s| s.desired_state == "running" && !running.contains_key(&s.id))
+                .filter(|s| {
+                    s.kind != "sensor"
+                        && s.desired_state == "running"
+                        && !running.contains_key(&s.id)
+                })
                 .map(|s| s.id)
                 .collect()
         };
