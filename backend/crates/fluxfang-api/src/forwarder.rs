@@ -12,6 +12,9 @@ use uuid::Uuid;
 
 const FORWARD_BATCH_LIMIT: i64 = 200;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+const FORWARD_IDLE: Duration = Duration::from_secs(2);
+const FORWARD_BACKOFF: Duration = Duration::from_secs(30);
+const PRUNE_INTERVAL: Duration = Duration::from_secs(300);
 
 #[derive(Debug)]
 pub enum ForwardOutcome {
@@ -121,4 +124,39 @@ impl SensorForwarder {
 #[derive(serde::Deserialize)]
 struct AcceptResponse {
     accepted: Vec<Uuid>,
+}
+
+/// Background loop: forward continuously, backing off 30s when not-approved
+/// or on error, idling 2s when the queue is empty.
+pub fn spawn_forwarder(forwarder: SensorForwarder) {
+    tokio::spawn(async move {
+        loop {
+            let delay = match forwarder.forward_once().await {
+                ForwardOutcome::Delivered(_) => FORWARD_IDLE,
+                ForwardOutcome::Nothing => FORWARD_IDLE,
+                ForwardOutcome::NotApproved => FORWARD_BACKOFF,
+                ForwardOutcome::Error(e) => {
+                    eprintln!("SensorForwarder: {e}");
+                    FORWARD_BACKOFF
+                }
+            };
+            tokio::time::sleep(delay).await;
+        }
+    });
+}
+
+/// Background loop: every 5 min, delete cached rows older than the TTL.
+pub fn spawn_pruner(pool: PgPool, cache_ttl_secs: i64) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(PRUNE_INTERVAL);
+        loop {
+            ticker.tick().await;
+            let cutoff = chrono::Utc::now() - chrono::Duration::seconds(cache_ttl_secs.max(0));
+            match CachedEmissionRepo::prune_older_than(&pool, cutoff).await {
+                Ok(n) if n > 0 => eprintln!("SensorForwarder: pruned {n} cached emission(s)"),
+                Ok(_) => {}
+                Err(e) => eprintln!("SensorForwarder: prune failed: {e}"),
+            }
+        }
+    });
 }
