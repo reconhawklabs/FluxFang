@@ -85,3 +85,57 @@ test('reject posts to the reject endpoint', async () => {
   fireEvent.click(await screen.findByRole('button', { name: /reject/i }));
   await waitFor(() => expect(calls.some((u) => u.includes('/reject'))).toBe(true));
 });
+
+const APPROVED: Sensor = {
+  id: 's2', data_source_id: 'ds1', sensor_id: 'backlot', fingerprint: 'AA-BB-CC-DD',
+  status: 'approved', auto_group_emitters: true, source_ip: '9.9.9.9',
+  approved_at: '2026-07-20T00:00:00Z', last_seen_at: '2026-07-21T00:00:00Z', online: true,
+};
+
+test('registered sensor shows online + rotate reveals a one-time key', async () => {
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.toString();
+    if (init?.method === 'POST' && url.includes('/rotate'))
+      return Promise.resolve(jsonResponse({ key: 'NEWKEYBASE64', fingerprint: 'EE-FF-00-11' }));
+    if (url.includes('/api/sensors')) return Promise.resolve(jsonResponse([APPROVED]));
+    if (url.includes('/api/data-sources')) return Promise.resolve(jsonResponse([]));
+    return Promise.reject(new Error(url));
+  }));
+  render(<Sensors />, { wrapper });
+  expect(await screen.findByText('backlot')).toBeInTheDocument();
+  expect(screen.getByTestId('sensor-online-backlot')).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: /rotate/i }));
+  await waitFor(() => expect(screen.getByText('NEWKEYBASE64')).toBeInTheDocument());
+  expect(screen.getByText(/shown once/i)).toBeInTheDocument();
+});
+
+test('Allow new Sensors is disabled when no running sensor datasource exists', async () => {
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+    const url = typeof input === 'string' ? input : input.toString();
+    if (url.includes('/api/sensors')) return Promise.resolve(jsonResponse([]));
+    if (url.includes('/api/data-sources')) return Promise.resolve(jsonResponse([])); // none
+    return Promise.reject(new Error(url));
+  }));
+  render(<Sensors />, { wrapper });
+  const btn = await screen.findByRole('button', { name: /allow new sensors/i });
+  expect(btn).toBeDisabled();
+});
+
+test('Allow new Sensors posts to the running sensor datasource', async () => {
+  const calls: string[] = [];
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.toString();
+    if (init?.method === 'POST' && url.includes('/allow-sensors')) { calls.push(url); return Promise.resolve(jsonResponse({ remaining_secs: 900 })); }
+    if (url.includes('/api/sensors')) return Promise.resolve(jsonResponse([]));
+    if (url.includes('/api/data-sources')) return Promise.resolve(jsonResponse([
+      { id: 'dsX', created_at: '', kind: 'sensor', mode: 'listener', interface: null, status: 'running', config: { bind_ip: '0.0.0.0', bind_port: 9000 }, last_error: null, desired_state: 'running', last_ok_at: null },
+    ]));
+    return Promise.reject(new Error(url));
+  }));
+  render(<Sensors />, { wrapper });
+  const btn = await screen.findByRole('button', { name: /allow new sensors/i });
+  await waitFor(() => expect(btn).not.toBeDisabled());
+  fireEvent.click(btn);
+  await waitFor(() => expect(calls.some((u) => u.includes('/api/data-sources/dsX/allow-sensors'))).toBe(true));
+});

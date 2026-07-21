@@ -2,11 +2,12 @@
 // pending-approval registrations, approved sensors + health, and the
 // enrollment window. Consumes the Phase 3A operator endpoints.
 import { useState } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSensors } from '../hooks/useSensors';
 import { queryKeys } from '../api/queryKeys';
-import { approveSensor, rejectSensor } from '../api/sensors';
-import type { Sensor } from '../api/sensors';
+import { approveSensor, rejectSensor, revokeSensor, rotateSensor, allowSensors } from '../api/sensors';
+import type { Sensor, RotatedKey } from '../api/sensors';
+import { listDataSources } from '../api/dataSources';
 
 export default function Sensors() {
   const { data: sensors = [], isLoading } = useSensors();
@@ -20,14 +21,38 @@ export default function Sensors() {
 
   const rejectMutation = useMutation({ mutationFn: rejectSensor, onSuccess: invalidate });
 
+  const { data: dataSources = [] } = useQuery({ queryKey: queryKeys.dataSources, queryFn: listDataSources });
+  const sensorListener = dataSources.find((d) => d.kind === 'sensor' && d.status === 'running');
+  const [rotatedKey, setRotatedKey] = useState<RotatedKey | null>(null);
+
+  const revokeMutation = useMutation({ mutationFn: revokeSensor, onSuccess: invalidate });
+  const rotateMutation = useMutation({ mutationFn: rotateSensor, onSuccess: (k) => { setRotatedKey(k); invalidate(); } });
+  const allowMutation = useMutation({ mutationFn: () => allowSensors(sensorListener!.id), onSuccess: invalidate });
+
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-lg font-semibold text-slate-100">Sensors</h1>
-        <p className="mt-1 text-sm text-slate-400">
-          Distributed Sensor nodes reporting to this Standalone.
-        </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-lg font-semibold text-slate-100">Sensors</h1>
+          <p className="mt-1 text-sm text-slate-400">
+            Distributed Sensor nodes reporting to this Standalone.
+          </p>
+        </div>
+        <button
+          type="button"
+          disabled={!sensorListener || allowMutation.isPending}
+          onClick={() => allowMutation.mutate()}
+          title={sensorListener ? undefined : 'Enable a Sensor datasource first'}
+          className="rounded bg-amber-500 px-3 py-1.5 text-sm font-semibold text-slate-950 hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Allow new Sensors
+        </button>
       </div>
+      {allowMutation.isSuccess && (
+        <p className="text-sm text-emerald-400">
+          Enrollment window open for {allowMutation.data?.remaining_secs ?? 0}s — sensors can now request approval.
+        </p>
+      )}
 
       <section data-testid="pending-section" className="space-y-2">
         <h2 className="text-sm font-medium uppercase tracking-wide text-slate-500">
@@ -69,7 +94,33 @@ export default function Sensors() {
         ) : registered.length === 0 ? (
           <p className="text-sm text-slate-500">No approved sensors yet.</p>
         ) : (
-          <p className="text-sm text-slate-400">{registered.length} registered</p>
+          <ul className="divide-y divide-slate-800 rounded border border-slate-800">
+            {registered.map((s) => (
+              <li key={s.id} className="flex items-center justify-between px-3 py-2 text-sm">
+                <div className="flex items-center gap-3">
+                  <span
+                    data-testid={s.online ? `sensor-online-${s.sensor_id}` : `sensor-offline-${s.sensor_id}`}
+                    className={`inline-block h-2 w-2 rounded-full ${s.online ? 'bg-emerald-400' : 'bg-slate-600'}`}
+                  />
+                  <span className="font-mono text-slate-200">{s.sensor_id}</span>
+                  <span className="font-mono text-xs text-amber-400/80">fp {s.fingerprint}</span>
+                  <span className="text-xs text-slate-500" title="Available once sensors stream emissions">
+                    — emissions/24h
+                  </span>
+                </div>
+                <div className="flex gap-2">
+                  <button type="button" onClick={() => rotateMutation.mutate(s.id)}
+                    className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:border-slate-500">
+                    Rotate key
+                  </button>
+                  <button type="button" onClick={() => revokeMutation.mutate(s.id)}
+                    className="rounded border border-red-900/60 px-2 py-1 text-xs text-red-400 hover:border-red-700">
+                    Revoke
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
         )}
       </section>
 
@@ -79,6 +130,25 @@ export default function Sensors() {
           onClose={() => setApproving(null)}
           onApproved={() => { setApproving(null); invalidate(); }}
         />
+      )}
+
+      {rotatedKey && (
+        <div className="fixed inset-0 z-10 flex items-center justify-center bg-slate-950/70 px-4">
+          <div className="w-full max-w-md space-y-4 rounded-lg border border-slate-800 bg-slate-900 p-6">
+            <h3 className="text-sm font-semibold text-slate-100">New encryption key</h3>
+            <p className="text-sm text-amber-400">Copy this now — it is shown once. Re-provision the sensor with it.</p>
+            <code className="block break-all rounded bg-slate-950 px-3 py-2 font-mono text-sm text-slate-200">
+              {rotatedKey.key}
+            </code>
+            <p className="font-mono text-xs text-slate-500">fingerprint {rotatedKey.fingerprint}</p>
+            <div className="flex justify-end">
+              <button type="button" onClick={() => setRotatedKey(null)}
+                className="rounded bg-amber-500 px-3 py-1.5 text-sm font-semibold text-slate-950 hover:bg-amber-400">
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
