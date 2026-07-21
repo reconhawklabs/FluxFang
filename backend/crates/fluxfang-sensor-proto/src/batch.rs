@@ -44,9 +44,15 @@ pub fn open_batch(key: &Key, sealed: &[u8]) -> Result<SensorBatch, ProtoError> {
 
 /// True when `sent_at_ms` is within `max_skew_ms` of `now_ms` in either
 /// direction (tolerates modest clock skew; rejects stale replays and
-/// far-future timestamps).
+/// far-future timestamps). Overflow-safe: `sent_at_ms` is attacker-controlled
+/// (it rides inside the sensor's sealed batch), so the difference is computed
+/// in i128 and a negative skew is rejected rather than allowed to wrap.
 pub fn within_replay_window(sent_at_ms: i64, now_ms: i64, max_skew_ms: i64) -> bool {
-    (now_ms - sent_at_ms).abs() <= max_skew_ms
+    if max_skew_ms < 0 {
+        return false;
+    }
+    let diff = (now_ms as i128 - sent_at_ms as i128).unsigned_abs();
+    diff <= max_skew_ms as u128
 }
 
 #[cfg(test)]
@@ -125,5 +131,27 @@ mod tests {
         assert!(within_replay_window(now + 29_000, now, skew)); // clock ahead, still ok
         assert!(!within_replay_window(now - 31_000, now, skew)); // too old
         assert!(!within_replay_window(now + 31_000, now, skew)); // too far future
+    }
+
+    #[test]
+    fn replay_window_extreme_sent_at_does_not_bypass_or_panic() {
+        assert!(!within_replay_window(i64::MIN, 1_700_000_000_000, 30_000));
+        assert!(!within_replay_window(i64::MAX, 1_700_000_000_000, 30_000));
+        assert!(!within_replay_window(0, i64::MAX, 30_000));
+    }
+
+    #[test]
+    fn replay_window_boundary_is_inclusive() {
+        let now = 1_000_000i64;
+        let skew = 30_000i64;
+        assert!(within_replay_window(now - skew, now, skew));
+        assert!(within_replay_window(now + skew, now, skew));
+        assert!(!within_replay_window(now - skew - 1, now, skew));
+    }
+
+    #[test]
+    fn replay_window_negative_skew_is_rejected() {
+        let now = 1_000_000i64;
+        assert!(!within_replay_window(now, now, -1));
     }
 }
