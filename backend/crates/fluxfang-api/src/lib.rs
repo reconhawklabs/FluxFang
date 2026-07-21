@@ -54,6 +54,7 @@ pub mod emissions;
 pub mod emitter_type_routes;
 pub mod emitters;
 pub mod entities;
+pub mod forwarder;
 pub mod gps_status;
 pub mod ingest;
 pub mod mcp;
