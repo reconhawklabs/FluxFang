@@ -527,3 +527,30 @@ pub struct Sensor {
     pub approved_at: Option<DateTime<Utc>>,
     pub last_seen_at: Option<DateTime<Utc>>,
 }
+
+/// A locally-cached emission on a Sensor node, awaiting forward to the
+/// Standalone. `id` becomes the Standalone emission's PK on delivery.
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]
+pub struct CachedEmission {
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub kind: String,
+    pub signal_strength: Option<i32>,
+    pub lat: Option<f64>,
+    pub lon: Option<f64>,
+    pub observed_at: DateTime<Utc>,
+    pub payload: serde_json::Value,
+    pub data_source_id: Option<Uuid>,
+    pub delivered: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewCachedEmission {
+    pub kind: String,
+    pub signal_strength: Option<i32>,
+    pub lat: Option<f64>,
+    pub lon: Option<f64>,
+    pub observed_at: DateTime<Utc>,
+    pub payload: serde_json::Value,
+    pub data_source_id: Option<Uuid>,
+}
