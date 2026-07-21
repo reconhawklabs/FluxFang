@@ -12,12 +12,13 @@ pub mod node_config;
 pub mod repo;
 pub mod sort;
 
-pub use models::{NewDataSource, Sensor};
+pub use models::{CachedEmission, NewCachedEmission, NewDataSource, Sensor};
 pub use node_config::{NodeConfig, NodeRole, SensorConfig};
 pub use repo::{
-    AiAuditRepo, AlertMethodRepo, AlertRuleRepo, AppConfigRepo, AssociatedEmitter, CoTravelRepo,
-    DataSourceRepo, EmissionRepo, EmitterAssociationRepo, EmitterRepo, EntityRepo, IgnoredEmitter,
-    LocationRepo, NotificationRepo, SensorRepo, SessionRepo, ZoneMembershipRepo, ZoneRepo,
+    AiAuditRepo, AlertMethodRepo, AlertRuleRepo, AppConfigRepo, AssociatedEmitter, CacheStats,
+    CachedEmissionRepo, CoTravelRepo, DataSourceRepo, EmissionRepo, EmitterAssociationRepo,
+    EmitterRepo, EntityRepo, IgnoredEmitter, LocationRepo, NotificationRepo, SensorRepo,
+    SessionRepo, ZoneMembershipRepo, ZoneRepo,
 };
 pub use sort::resolve_order_by;
 

@@ -27,21 +27,29 @@ async fn main() {
     let secret_key = key_from_base64(&secret_key_raw)
         .expect("FLUXFANG_SECRET_KEY must be valid base64-encoded 32 bytes");
 
-    // This node's own sensor id (from app_config.settings.node_sensor_id,
-    // default "local") — every locally-captured emission gets tagged with
-    // it (see IngestCtx::node_sensor_id).
-    let node_sensor_id = fluxfang_db::AppConfigRepo::node_config(&pool)
+    // This node's role configuration (from app_config.settings) — role,
+    // node_sensor_id (every locally-captured emission gets tagged with it,
+    // see IngestCtx::node_sensor_id), and, for Sensor nodes, the Standalone
+    // connection + cache settings.
+    let node = fluxfang_db::AppConfigRepo::node_config(&pool)
         .await
         .ok()
-        .flatten()
-        .map(|n| n.node_sensor_id)
+        .flatten();
+    let node_sensor_id = node
+        .as_ref()
+        .map(|n| n.node_sensor_id.clone())
         .unwrap_or_else(|| "local".to_string());
+    let is_sensor = matches!(
+        node.as_ref().map(|n| n.role),
+        Some(fluxfang_db::NodeRole::Sensor)
+    );
 
     let state = AppState::with_capture(
-        pool,
+        pool.clone(),
         secret_key,
         Arc::new(RealCapturerFactory),
-        node_sensor_id,
+        node_sensor_id.clone(),
+        is_sensor,
     );
 
     // Start the supervisor's background tasks (the device-failure drain) before
@@ -59,30 +67,65 @@ async fn main() {
         startup.capture.resume_running().await;
     });
 
-    // Rebind any sensor listeners the user left running (mirrors the capture
-    // supervisor's resume_running for capture datasources).
-    let startup_listeners = state.clone();
-    tokio::spawn(async move {
-        startup_listeners.sensor_listeners.resume_running().await;
-    });
-
-    // Periodic TPMS correlation pass (Spec B). Runs every minute; a pass is a
-    // no-op unless some tpms_sensor emitter belongs to an auto-correlate data
-    // source. Errors are logged, never fatal.
-    let corr_pool = state.pool.clone();
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            ticker.tick().await;
-            match fluxfang_api::correlate::run_correlation_pass(&corr_pool, chrono::Utc::now())
-                .await
-            {
-                Ok(n) if n > 0 => eprintln!("TPMS correlation: added {n} association(s)"),
-                Ok(_) => {}
-                Err(err) => eprintln!("TPMS correlation pass failed: {err:#}"),
+    if is_sensor {
+        // Sensor node: forward cached captures to the Standalone + prune by
+        // TTL. Sensor nodes don't run their own sensor listeners or TPMS
+        // correlation — that's the Standalone's job once it receives the
+        // forwarded emissions.
+        //
+        // Review fix (Phase 4-A): the pruner must run even when sensor
+        // config is absent/invalid, or `cached_emission` grows unbounded
+        // with no forwarder able to drain it. Only the forwarder is
+        // conditional on config; the pruner always runs, falling back to a
+        // 7-day default TTL when there's no configured `cache_ttl_secs`.
+        let sensor_cfg = node.as_ref().and_then(|n| n.sensor.clone());
+        let ttl = sensor_cfg
+            .as_ref()
+            .map(|c| c.cache_ttl_secs)
+            .unwrap_or(604_800);
+        fluxfang_api::forwarder::spawn_pruner(pool.clone(), ttl);
+        match sensor_cfg {
+            Some(cfg) => match fluxfang_api::forwarder::SensorForwarder::new(
+                pool.clone(),
+                &cfg,
+                node_sensor_id.clone(),
+            ) {
+                Ok(fwd) => fluxfang_api::forwarder::spawn_forwarder(fwd),
+                Err(e) => eprintln!("SensorForwarder disabled: {e}"),
+            },
+            None => {
+                eprintln!(
+                    "sensor role but no sensor config — forwarder disabled (pruner still running)"
+                )
             }
         }
-    });
+    } else {
+        // Standalone node: rebind any sensor listeners the user left running
+        // (mirrors the capture supervisor's resume_running for capture
+        // datasources).
+        let startup_listeners = state.clone();
+        tokio::spawn(async move {
+            startup_listeners.sensor_listeners.resume_running().await;
+        });
+
+        // Periodic TPMS correlation pass (Spec B). Runs every minute; a pass
+        // is a no-op unless some tpms_sensor emitter belongs to an
+        // auto-correlate data source. Errors are logged, never fatal.
+        let corr_pool = state.pool.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                ticker.tick().await;
+                match fluxfang_api::correlate::run_correlation_pass(&corr_pool, chrono::Utc::now())
+                    .await
+                {
+                    Ok(n) if n > 0 => eprintln!("TPMS correlation: added {n} association(s)"),
+                    Ok(_) => {}
+                    Err(err) => eprintln!("TPMS correlation pass failed: {err:#}"),
+                }
+            }
+        });
+    }
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
     axum::serve(

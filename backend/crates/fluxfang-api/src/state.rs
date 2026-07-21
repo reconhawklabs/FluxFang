@@ -138,6 +138,7 @@ impl AppState {
             PLACEHOLDER_SECRET_KEY,
             Arc::new(RealCapturerFactory),
             "local".to_string(),
+            false,
         )
     }
 
@@ -148,12 +149,19 @@ impl AppState {
     /// `MockCapturerFactory` in `tests/data_sources.rs` — and
     /// `node_sensor_id` is this node's own sensor id (from
     /// `app_config.settings.node_sensor_id`, default `"local"`), threaded
-    /// into every `IngestCtx` the `CaptureSupervisor` builds.
+    /// into every `IngestCtx` the `CaptureSupervisor` builds. `sensor_mode`
+    /// is whether this node runs as a Sensor (`app_config.settings.role ==
+    /// Sensor`) — threaded into the `CaptureSupervisor`'s own `IngestCtx`s
+    /// (so its capture reader caches instead of ingests); the sensor-
+    /// listener `IngestCtx` built below always uses `sensor_mode: false`,
+    /// since `/sensor/ingest` is the Standalone's own remote-receive path,
+    /// never run on a Sensor node itself.
     pub fn with_capture(
         pool: PgPool,
         secret_key: [u8; 32],
         factory: Arc<dyn CapturerFactory>,
         node_sensor_id: String,
+        sensor_mode: bool,
     ) -> Self {
         let (events_tx, _events_rx) = broadcast::channel::<Event>(EVENTS_CHANNEL_CAPACITY);
         let capture = Arc::new(CaptureSupervisor::new(
@@ -161,13 +169,15 @@ impl AppState {
             events_tx.clone(),
             secret_key,
             node_sensor_id.clone(),
+            sensor_mode,
             factory,
         ));
         // The `IngestCtx` sensor listeners carry for the (Task 6)
         // `/sensor/ingest` handler. Remote emissions carry no local
         // session, so `sessions` is `None`; `location` is built but never
         // read on the remote path (a remote sensor's own `classify` call
-        // never happens here).
+        // never happens here). `sensor_mode: false` — see this fn's doc
+        // comment.
         let sensor_ingest = crate::ingest::IngestCtx {
             pool: pool.clone(),
             sessions: None,
@@ -175,6 +185,7 @@ impl AppState {
             events: events_tx,
             secret_key,
             node_sensor_id,
+            sensor_mode: false,
         };
         let sensor_listeners = Arc::new(SensorListenerManager::new(pool.clone(), sensor_ingest));
         Self {
