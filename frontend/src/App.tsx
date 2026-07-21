@@ -17,6 +17,7 @@ import Setup from "./pages/Setup";
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import DataSources from "./pages/DataSources";
+import Sensors from "./pages/Sensors";
 import Emissions from "./pages/Emissions";
 import Emitters from "./pages/Emitters";
 import EmitterDetailPage from "./pages/EmitterDetailPage";
@@ -75,6 +76,7 @@ export default function App() {
         <Route path="notifications" element={<Notifications />} />
         {!isSensor && (
           <>
+            <Route path="sensors" element={<Sensors />} />
             <Route path="emitters" element={<Emitters />} />
             <Route path="emitters/:id" element={<EmitterDetailPage />} />
             <Route path="co-travel" element={<CoTravel />} />
