@@ -3,6 +3,7 @@
 use sqlx::PgPool;
 
 use crate::models::AppConfig;
+use crate::node_config::NodeConfig;
 
 /// `app_config` has exactly one logical row (app-wide settings + the admin
 /// password hash). Rather than relying on "whatever row happens to exist"
@@ -90,6 +91,48 @@ impl AppConfigRepo {
         )
         .bind(SINGLETON_ID)
         .bind(hash)
+        .fetch_optional(pool)
+        .await
+    }
+
+    /// The persisted node-role config, or `None` if setup hasn't stored one
+    /// yet (a fresh singleton has `settings = '{}'`, with no `role` key).
+    pub async fn node_config(pool: &PgPool) -> Result<Option<NodeConfig>, sqlx::Error> {
+        let Some(cfg) = Self::get(pool).await? else {
+            return Ok(None);
+        };
+        if cfg.settings.get("role").is_none() {
+            return Ok(None);
+        }
+        serde_json::from_value(cfg.settings)
+            .map(Some)
+            .map_err(|e| sqlx::Error::Decode(Box::new(e)))
+    }
+
+    /// First-run setup, atomic set-once: create the singleton row (or fill a
+    /// still-blank one) with the admin password hash AND the node-role config
+    /// in one statement. Like [`Self::set_password_hash_if_unset`], only the
+    /// caller that observes `password_hash IS NULL` performs the write and
+    /// gets `Some(_)`; concurrent callers serialize on the row lock and get
+    /// `None` (treat as "setup already completed" → 409).
+    pub async fn complete_setup(
+        pool: &PgPool,
+        hash: &str,
+        node: &NodeConfig,
+    ) -> Result<Option<AppConfig>, sqlx::Error> {
+        let settings = serde_json::to_value(node).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
+        sqlx::query_as::<_, AppConfig>(
+            "INSERT INTO app_config (id, password_hash, settings) \
+             VALUES ($1, $2, $3) \
+             ON CONFLICT (id) DO UPDATE \
+                SET password_hash = EXCLUDED.password_hash, \
+                    settings = EXCLUDED.settings \
+             WHERE app_config.password_hash IS NULL \
+             RETURNING *",
+        )
+        .bind(SINGLETON_ID)
+        .bind(hash)
+        .bind(settings)
         .fetch_optional(pool)
         .await
     }
