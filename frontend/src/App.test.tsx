@@ -93,7 +93,7 @@ test("routes to Login when setup is done but not authed", () => {
   expect(screen.getByRole("button", { name: /sign in/i })).toBeInTheDocument();
 });
 
-test("renders the AppShell with full nav once authed", () => {
+test("renders the AppShell with full nav once authed", async () => {
   mockedUseAuth.mockReturnValue({
     needsSetup: false,
     authed: true,
@@ -103,18 +103,25 @@ test("renders the AppShell with full nav once authed", () => {
   // The real `Dashboard` (Task 9.10) fires several `GET` queries on mount —
   // this test only cares about the shell/nav, so every route resolves to an
   // empty collection (safe for all of Dashboard's/MapView's `?? []`-guarded
-  // reads).
+  // reads). `/api/config` also falls through this catch-all; an empty array
+  // isn't a valid `AppConfig`, so `role` reads as `undefined`, which is not
+  // `"sensor"` — same as the default/standalone case Task 6 wires up.
   vi.stubGlobal(
     "fetch",
     vi.fn(() => Promise.resolve(jsonResponse([]))),
   );
   renderApp();
+  // Task 6's `App` now gates the authed routes behind `useConfig(authed)`
+  // settling (so a sensor never flashes the analysis nav), so the shell
+  // only mounts after that fetch resolves — wait for it rather than
+  // asserting synchronously right after render.
   expect(
-    screen.getByRole("link", { name: /data sources/i }),
+    await screen.findByRole("link", { name: /data sources/i }),
   ).toBeInTheDocument();
   expect(screen.getByRole("link", { name: /emitters/i })).toBeInTheDocument();
-  // "/" redirects to "/dashboard", now the real Dashboard page (Task 9.10).
+  // "/" redirects to "/dashboard", now the real Dashboard page (Task 9.10),
+  // which fires its own async queries — wait for it too.
   expect(
-    screen.getByRole("heading", { name: /dashboard/i }),
+    await screen.findByRole("heading", { name: /dashboard/i }),
   ).toBeInTheDocument();
 });

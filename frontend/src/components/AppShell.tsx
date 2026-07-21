@@ -3,10 +3,14 @@
 // via `<Outlet/>`, wired up by `App.tsx`'s nested routes.
 import { NavLink, Outlet } from 'react-router-dom';
 import { useUnreadCount } from '../store/notificationStore';
+import { useConfig } from '../hooks/useConfig';
+import type { NodeRole } from '../api/client';
 
 export interface AppShellProps {
   onLogout: () => void | Promise<void>;
 }
+
+const SENSOR_PATHS: ReadonlySet<string> = new Set(['/dashboard', '/data-sources', '/emissions']);
 
 const NAV_ITEMS: ReadonlyArray<{ to: string; label: string }> = [
   { to: '/dashboard', label: 'Dashboard' },
@@ -22,6 +26,10 @@ const NAV_ITEMS: ReadonlyArray<{ to: string; label: string }> = [
   { to: '/notifications', label: 'Notifications' },
 ];
 
+function navItemsForRole(role: NodeRole): ReadonlyArray<{ to: string; label: string }> {
+  return role === 'sensor' ? NAV_ITEMS.filter((i) => SENSOR_PATHS.has(i.to)) : NAV_ITEMS;
+}
+
 function navLinkClassName({ isActive }: { isActive: boolean }): string {
   return `block rounded px-3 py-2 text-sm transition ${
     isActive ? 'bg-amber-500/10 text-amber-400' : 'text-slate-400 hover:bg-slate-800/60 hover:text-slate-100'
@@ -30,13 +38,15 @@ function navLinkClassName({ isActive }: { isActive: boolean }): string {
 
 export default function AppShell({ onLogout }: AppShellProps) {
   const unread = useUnreadCount();
+  const { data: config } = useConfig();
+  const items = navItemsForRole(config?.role ?? 'standalone');
 
   return (
     <div className="flex h-screen bg-slate-950 text-slate-200">
       <aside className="flex w-56 flex-shrink-0 flex-col border-r border-slate-800 bg-slate-900/60">
         <div className="px-4 py-4 font-mono text-sm font-semibold tracking-wide text-amber-400">FluxFang</div>
         <nav className="flex-1 space-y-0.5 px-2">
-          {NAV_ITEMS.map((item) => (
+          {items.map((item) => (
             <NavLink key={item.to} to={item.to} className={navLinkClassName}>
               {item.label}
             </NavLink>

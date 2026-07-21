@@ -105,10 +105,35 @@ export interface SetupStatus {
   needs_setup: boolean;
 }
 
+export type NodeRole = 'standalone' | 'sensor';
+
+/** `GET /api/config` response shape (secret-free). */
+export interface AppConfig {
+  role: NodeRole;
+  node_sensor_id: string;
+}
+
+/** A sensor node's connection block, sent only when `role === 'sensor'`. */
+export interface SensorSetup {
+  host: string;
+  port: number;
+  key: string;
+  cache_ttl_secs: number;
+}
+
+/** `POST /api/setup` request body. */
+export interface SetupRequest {
+  password: string;
+  role: NodeRole;
+  node_sensor_id: string;
+  sensor?: SensorSetup;
+}
+
 /** Auth endpoints — the only resource methods this foundation task owns. */
 export const api = {
   setupStatus: (): Promise<SetupStatus> => get<SetupStatus>('/api/setup/status'),
-  setup: (password: string): Promise<void> => post<void>('/api/setup', { password }),
+  setup: (req: SetupRequest): Promise<void> => post<void>('/api/setup', req),
+  config: (): Promise<AppConfig> => get<AppConfig>('/api/config'),
   login: (password: string): Promise<void> => post<void>('/api/login', { password }),
   logout: (): Promise<void> => post<void>('/api/logout'),
 };

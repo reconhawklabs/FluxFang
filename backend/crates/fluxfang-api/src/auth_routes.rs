@@ -22,6 +22,7 @@ use serde_json::json;
 use tower_sessions::Session;
 
 use fluxfang_core::auth::{hash_password, verify_password};
+use fluxfang_db::node_config::{NodeConfig, NodeRole, SensorConfig};
 use fluxfang_db::AppConfigRepo;
 
 use crate::middleware::SESSION_AUTH_KEY;
@@ -36,6 +37,34 @@ const MAX_PASSWORD_BYTES: usize = 1024;
 #[derive(Deserialize)]
 pub struct PasswordPayload {
     password: String,
+}
+
+fn default_role() -> NodeRole {
+    NodeRole::Standalone
+}
+
+fn default_node_sensor_id() -> String {
+    "local".to_string()
+}
+
+#[derive(Deserialize)]
+pub struct SetupPayload {
+    password: String,
+    #[serde(default = "default_role")]
+    role: NodeRole,
+    #[serde(default = "default_node_sensor_id")]
+    node_sensor_id: String,
+    #[serde(default)]
+    sensor: Option<SensorConfig>,
+}
+
+/// Slug rule for a node/sensor id: non-empty, ≤ 64 chars, `[A-Za-z0-9_-]`
+/// only (no spaces).
+fn is_valid_sensor_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// The public route group. Mounted without `require_auth` — see module docs.
@@ -65,37 +94,55 @@ async fn setup_status(State(state): State<AppState>) -> Result<Json<serde_json::
 async fn setup(
     State(state): State<AppState>,
     session: Session,
-    Json(payload): Json<PasswordPayload>,
+    Json(payload): Json<SetupPayload>,
 ) -> Result<StatusCode, ApiError> {
     if payload.password.is_empty() || payload.password.len() > MAX_PASSWORD_BYTES {
         return Err(ApiError::Status(StatusCode::BAD_REQUEST));
     }
+    if !is_valid_sensor_id(&payload.node_sensor_id) {
+        return Err(ApiError::Status(StatusCode::BAD_REQUEST));
+    }
 
-    // Argon2 hashing is deliberately CPU-heavy; run it on a blocking-pool
-    // thread so it doesn't stall the async executor handling other requests.
-    let hash = tokio::task::spawn_blocking(move || hash_password(&payload.password))
+    let node = match payload.role {
+        NodeRole::Sensor => {
+            let Some(sensor) = payload.sensor else {
+                return Err(ApiError::Status(StatusCode::BAD_REQUEST));
+            };
+            if sensor.host.is_empty()
+                || sensor.port == 0
+                || sensor.key.is_empty()
+                || sensor.cache_ttl_secs <= 0
+            {
+                return Err(ApiError::Status(StatusCode::BAD_REQUEST));
+            }
+            NodeConfig {
+                role: NodeRole::Sensor,
+                node_sensor_id: payload.node_sensor_id,
+                sensor: Some(sensor),
+            }
+        }
+        NodeRole::Standalone => NodeConfig {
+            role: NodeRole::Standalone,
+            node_sensor_id: payload.node_sensor_id,
+            sensor: None,
+        },
+    };
+
+    // Argon2 hashing is CPU-heavy; run it off the async executor.
+    let password = payload.password;
+    let hash = tokio::task::spawn_blocking(move || hash_password(&password))
         .await
         .expect("hash_password blocking task panicked");
 
-    // `set_password_hash_if_unset` is the single source of truth on whether
-    // this call won the race to set the password: it's a single atomic
-    // statement, so there's no separate "is one already set?" check to race
-    // against it (a prior check-then-act here let two concurrent requests
-    // both pass the check and both upsert, with the last write silently
-    // becoming the admin password). `None` means a password was already
-    // configured (by this request or a concurrent one that won).
-    if AppConfigRepo::set_password_hash_if_unset(&state.pool, &hash)
+    // Atomic set-once: only the winner of a concurrent-setup race gets Some.
+    if AppConfigRepo::complete_setup(&state.pool, &hash, &node)
         .await?
         .is_none()
     {
         return Err(ApiError::Status(StatusCode::CONFLICT));
     }
 
-    // First-run setup doubles as a login: the person who just set the
-    // password is sitting right there and shouldn't have to log in again
-    // immediately after.
     session.insert(SESSION_AUTH_KEY, true).await?;
-
     Ok(StatusCode::OK)
 }
 

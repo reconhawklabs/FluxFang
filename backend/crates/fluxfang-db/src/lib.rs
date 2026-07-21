@@ -8,9 +8,11 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
 pub mod models;
+pub mod node_config;
 pub mod repo;
 pub mod sort;
 
+pub use node_config::{NodeConfig, NodeRole, SensorConfig};
 pub use repo::{
     AiAuditRepo, AlertMethodRepo, AlertRuleRepo, AppConfigRepo, AssociatedEmitter, CoTravelRepo,
     DataSourceRepo, EmissionRepo, EmitterAssociationRepo, EmitterRepo, EntityRepo, IgnoredEmitter,
