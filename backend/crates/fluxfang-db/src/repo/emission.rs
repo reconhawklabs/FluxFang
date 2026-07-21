@@ -384,6 +384,49 @@ impl EmissionRepo {
             .await
     }
 
+    /// Insert an emission with a caller-supplied `id` (the sensor-generated
+    /// UUID), idempotently: `ON CONFLICT (id) DO NOTHING` returns `Ok(None)`
+    /// when the id already exists (a retried/duplicate delivery), so
+    /// at-least-once forwarding never double-inserts.
+    pub async fn insert_remote(
+        pool: &PgPool,
+        id: Uuid,
+        new: NewEmission,
+    ) -> Result<Option<Emission>, sqlx::Error> {
+        let (lon, lat) = match new.location {
+            Some((lon, lat)) => (Some(lon), Some(lat)),
+            None => (None, None),
+        };
+        let sql = format!(
+            "INSERT INTO emission \
+                 (id, data_source_id, emitter_id, session_id, observed_at, signal_strength, \
+                  location, kind, payload, location_quality, sensor_id) \
+             VALUES \
+                 ($1, $2, $3, $4, $5, $6, \
+                  CASE WHEN $7::double precision IS NULL THEN NULL \
+                       ELSE ST_SetSRID(ST_MakePoint($7::double precision, $8::double precision), 4326)::geography \
+                  END, \
+                  $9, $10, $11, $12) \
+             ON CONFLICT (id) DO NOTHING \
+             RETURNING {EMISSION_COLUMNS}"
+        );
+        sqlx::query_as::<_, Emission>(&sql)
+            .bind(id)
+            .bind(new.data_source_id)
+            .bind(new.emitter_id)
+            .bind(new.session_id)
+            .bind(new.observed_at)
+            .bind(new.signal_strength)
+            .bind(lon)
+            .bind(lat)
+            .bind(new.kind)
+            .bind(new.payload)
+            .bind(new.location_quality)
+            .bind(new.sensor_id)
+            .fetch_optional(pool)
+            .await
+    }
+
     pub async fn get(pool: &PgPool, id: Uuid) -> Result<Option<Emission>, sqlx::Error> {
         let sql = format!("SELECT {EMISSION_COLUMNS} FROM emission WHERE id = $1");
         sqlx::query_as::<_, Emission>(&sql)
