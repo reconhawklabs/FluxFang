@@ -21,7 +21,12 @@ async fn setup_then_login_flow() {
 
     assert!(needs_setup(&app).await, "fresh instance should need setup");
 
-    let resp = post_json(&app, "/api/setup", r#"{"password":"pw123456"}"#).await;
+    let resp = post_json(
+        &app,
+        "/api/setup",
+        r#"{"password":"pw123456","role":"standalone","node_sensor_id":"local"}"#,
+    )
+    .await;
     assert_status(&resp, StatusCode::OK);
 
     assert!(
@@ -53,7 +58,12 @@ async fn setup_then_login_flow() {
 async fn setup_logs_in_directly() {
     let app = test_app().await;
 
-    let resp = post_json(&app, "/api/setup", r#"{"password":"pw123456"}"#).await;
+    let resp = post_json(
+        &app,
+        "/api/setup",
+        r#"{"password":"pw123456","role":"standalone","node_sensor_id":"local"}"#,
+    )
+    .await;
     assert_status(&resp, StatusCode::OK);
     let cookie = session_cookie(&resp);
 
@@ -207,4 +217,63 @@ async fn repeated_failed_logins_get_rate_limited() {
         saw_429,
         "expected to eventually see 429 after repeated failed logins"
     );
+}
+
+/// Setup as a Standalone stores the role and this node's sensor id, and
+/// completing setup still logs the caller in (existing behavior preserved).
+#[tokio::test]
+async fn setup_standalone_persists_role() {
+    let app = test_app().await;
+
+    let body = r#"{"password":"pw123456","role":"standalone","node_sensor_id":"local"}"#;
+    let resp = post_json(&app, "/api/setup", body).await;
+    assert_status(&resp, StatusCode::OK);
+    let cookie = session_cookie(&resp);
+
+    let resp = get_with_cookie(&app, "/api/config", &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["role"], "standalone");
+    assert_eq!(json["node_sensor_id"], "local");
+}
+
+/// Setup as a Sensor requires + stores the connection block; the key is
+/// never echoed back by GET /api/config.
+#[tokio::test]
+async fn setup_sensor_persists_role_and_hides_key() {
+    let app = test_app().await;
+
+    let body = r#"{"password":"pw123456","role":"sensor","node_sensor_id":"frontgate",
+        "sensor":{"host":"base.example","port":9000,"key":"a2V5","cache_ttl_secs":604800}}"#;
+    let resp = post_json(&app, "/api/setup", body).await;
+    assert_status(&resp, StatusCode::OK);
+    let cookie = session_cookie(&resp);
+
+    let resp = get_with_cookie(&app, "/api/config", &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["role"], "sensor");
+    assert_eq!(json["node_sensor_id"], "frontgate");
+    assert!(
+        json.get("sensor").is_none(),
+        "config must not leak the sensor key block"
+    );
+}
+
+/// A sensor-role setup with no connection block is rejected.
+#[tokio::test]
+async fn setup_sensor_without_connection_block_is_rejected() {
+    let app = test_app().await;
+    let body = r#"{"password":"pw123456","role":"sensor","node_sensor_id":"frontgate"}"#;
+    let resp = post_json(&app, "/api/setup", body).await;
+    assert_status(&resp, StatusCode::BAD_REQUEST);
+}
+
+/// A node id with a space is rejected (slug rule).
+#[tokio::test]
+async fn setup_rejects_non_slug_node_id() {
+    let app = test_app().await;
+    let body = r#"{"password":"pw123456","role":"standalone","node_sensor_id":"front gate"}"#;
+    let resp = post_json(&app, "/api/setup", body).await;
+    assert_status(&resp, StatusCode::BAD_REQUEST);
 }
