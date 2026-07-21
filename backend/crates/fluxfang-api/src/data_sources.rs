@@ -184,7 +184,15 @@ async fn delete_data_source(
 
     if existing.status == "running" {
         // Best-effort: see module docs on why delete proceeds regardless.
-        if let Err(err) = state.capture.stop(id).await {
+        // `sensor` datasources are network listeners driven by
+        // `sensor_listeners`, not `CaptureSupervisor` -- same branch as
+        // start_data_source/stop_data_source above, otherwise `capture.stop`
+        // finds no in-memory handle for a running sensor, phantom-reconciles
+        // the row to `stopped`, and never signals the real listener task,
+        // leaking its bound `TcpListener`.
+        if existing.kind == "sensor" {
+            state.sensor_listeners.stop(id).await;
+        } else if let Err(err) = state.capture.stop(id).await {
             eprintln!("data_sources: failed to stop {id} before delete: {err:#}");
         }
     }

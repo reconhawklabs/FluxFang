@@ -1352,3 +1352,67 @@ async fn sensor_datasource_start_stop_via_api_binds_health() {
     assert_eq!(body_json(resp).await["status"], "stopped");
     assert!(reqwest::get(&url).await.is_err());
 }
+
+/// Regression test for the Phase 2 whole-branch-review finding: deleting a
+/// *running* `sensor` datasource used to fall through `delete_data_source`'s
+/// "stop it first" block straight to `state.capture.stop(id)` (the
+/// `CaptureSupervisor` path), same as every other kind -- but a `sensor` row
+/// is a network listener driven by `state.sensor_listeners`, not the
+/// capture supervisor. `capture.stop` found no in-memory handle, phantom-
+/// reconciled the row to `stopped` (masking the problem), and never signaled
+/// the real `SensorListenerManager` task, leaking its bound `TcpListener`:
+/// `/sensor/health` kept answering 200 for a data source that had just been
+/// deleted. Mirrors `sensor_datasource_start_stop_via_api_binds_health`'s
+/// setup, but stops the source via DELETE instead of POST .../stop, then
+/// confirms the port is actually released. Fails against the pre-fix code
+/// (health still answers 200 after delete); passes once `delete_data_source`
+/// branches on `existing.kind == "sensor"` the same way start/stop already
+/// do.
+#[tokio::test]
+async fn deleting_a_running_sensor_datasource_releases_its_listener_port() {
+    // Free port helper (local to this test), same as the sibling test.
+    let port = {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let p = l.local_addr().unwrap().port();
+        drop(l);
+        p
+    };
+
+    let (app, _pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    // create
+    let body = format!(
+        r#"{{"kind":"sensor","mode":"listener","config":{{"bind_ip":"127.0.0.1","bind_port":{port},"enrollment_window_secs":900}}}}"#
+    );
+    let resp = post_json_with_cookie(&app, "/api/data-sources", &body, &cookie).await;
+    assert_status(&resp, StatusCode::CREATED);
+    let id = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+    // start -> running + health answers.
+    let resp = post_with_cookie(&app, &format!("/api/data-sources/{id}/start"), &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    assert_eq!(body_json(resp).await["status"], "running");
+    let url = format!("http://127.0.0.1:{port}/sensor/health");
+    assert_eq!(reqwest::get(&url).await.unwrap().status().as_u16(), 200);
+
+    // delete while running -- must route the "stop before delete" through
+    // sensor_listeners, not CaptureSupervisor.
+    let resp = delete_with_cookie(&app, &format!("/api/data-sources/{id}"), &cookie).await;
+    assert_status(&resp, StatusCode::NO_CONTENT);
+
+    // The listener's TcpListener must actually be released -- guard against
+    // both a connection-refused error and a hang, matching the sibling
+    // test's flakiness guard (the pre-fix leaked task is still listening
+    // and would otherwise keep answering 200 here indefinitely).
+    let gone = match tokio::time::timeout(Duration::from_secs(2), reqwest::get(&url)).await {
+        Ok(Ok(resp)) => resp.status().as_u16() != 200,
+        Ok(Err(_)) => true,
+        Err(_) => true,
+    };
+    assert!(
+        gone,
+        "expected the sensor listener's port to be released after delete, \
+         but /sensor/health is still answering"
+    );
+}
