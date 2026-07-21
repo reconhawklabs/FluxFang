@@ -37,11 +37,15 @@ async fn main() {
         .map(|n| n.node_sensor_id)
         .unwrap_or_else(|| "local".to_string());
 
+    // Task 4 of this phase wires this from `app_config.settings.role` --
+    // this task only threads the plumbing through, so every node still
+    // behaves as a Standalone (`sensor_mode: false`) until then.
     let state = AppState::with_capture(
         pool,
         secret_key,
         Arc::new(RealCapturerFactory),
         node_sensor_id,
+        false,
     );
 
     // Start the supervisor's background tasks (the device-failure drain) before

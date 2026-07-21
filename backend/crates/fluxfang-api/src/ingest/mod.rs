@@ -153,6 +153,9 @@ pub struct IngestCtx {
     /// This node's own sensor id (from app_config.settings.node_sensor_id,
     /// default "local") — every locally-captured emission is tagged with it.
     pub node_sensor_id: String,
+    /// True on a Sensor node — the capture reader caches observations for
+    /// forwarding instead of running the local analysis pipeline.
+    pub sensor_mode: bool,
 }
 
 /// Turn one capture-layer [`RawObservation`] into a persisted, auto-attached,
@@ -248,6 +251,35 @@ pub async fn ingest(
     let mut emission = EmissionRepo::insert(&ctx.pool, new).await?;
     finalize_emission(ctx, data_source_id, &mut emission, GroupingPolicy::Local).await?;
     Ok(emission)
+}
+
+/// Sensor-node capture path: persist a `RawObservation` to the local forward
+/// cache (with the sensor's current GPS fix), skipping all analysis. The
+/// `SensorForwarder` ships these to the Standalone.
+pub async fn cache_observation(
+    ctx: &IngestCtx,
+    data_source_id: Uuid,
+    obs: RawObservation,
+) -> anyhow::Result<()> {
+    let (coords, _q) = ctx.location.classify(obs.observed_at);
+    let (lon, lat) = match coords {
+        Some((lon, lat)) => (Some(lon), Some(lat)),
+        None => (None, None),
+    };
+    fluxfang_db::CachedEmissionRepo::insert(
+        &ctx.pool,
+        fluxfang_db::models::NewCachedEmission {
+            kind: obs.kind,
+            signal_strength: obs.signal_strength,
+            lat,
+            lon,
+            observed_at: obs.observed_at,
+            payload: obs.payload,
+            data_source_id: Some(data_source_id),
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 /// Ingest one remote emission from an approved sensor: insert with the
@@ -783,6 +815,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
+            sensor_mode: false,
         };
 
         let obs = wifi_obs("aa:bb:cc:dd:ee:ff", base);
@@ -833,6 +866,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "base".to_string(),
+            sensor_mode: false,
         };
 
         let obs = wifi_obs("aa:bb:cc:dd:ee:ff", base);
@@ -846,6 +880,51 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(got.sensor_id, "base");
+    }
+
+    /// Phase 4-A: on a Sensor node, `IngestCtx::sensor_mode == true` means
+    /// the capture reader must NOT run the local analysis pipeline
+    /// (`ingest`) -- it caches the raw observation for the `SensorForwarder`
+    /// to ship to the Standalone instead. Confirms `cache_observation`
+    /// writes a `cached_emission` row (with the sensor's current GPS fix)
+    /// and creates NO `emission` row at all.
+    #[tokio::test]
+    async fn sensor_mode_caches_observation_instead_of_ingesting() {
+        let pool = fresh_pool().await;
+        let ds = seed_wifi_source(&pool).await;
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let fix = a_fix(base);
+        let (manager, provider) = session_with_fix(pool.clone(), fix.clone()).await;
+
+        let (events_tx, _events_rx) = broadcast::channel(8);
+        let ctx = IngestCtx {
+            pool: pool.clone(),
+            sessions: Some(Arc::new(manager)),
+            location: provider.clone(),
+            events: events_tx,
+            secret_key: [0x11u8; 32],
+            node_sensor_id: "frontgate".to_string(),
+            sensor_mode: true,
+        };
+
+        let obs = wifi_obs("aa:bb:cc:dd:ee:ff", base);
+        cache_observation(&ctx, ds, obs)
+            .await
+            .expect("cache_observation should succeed");
+
+        let undelivered = fluxfang_db::CachedEmissionRepo::list_undelivered(&pool, 100)
+            .await
+            .unwrap();
+        assert_eq!(undelivered.len(), 1, "expected exactly one cached row");
+        assert_eq!(undelivered[0].kind, "wifi");
+        assert_eq!(undelivered[0].lat, Some(fix.lat));
+        assert_eq!(undelivered[0].lon, Some(fix.lon));
+        assert_eq!(undelivered[0].data_source_id, Some(ds));
+
+        let (_rows, total) = EmissionRepo::query(&pool, Default::default())
+            .await
+            .expect("query should succeed");
+        assert_eq!(total, 0, "sensor_mode must not create an emission row");
     }
 
     /// Task 5: a fix that exists but is older than
@@ -872,6 +951,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
+            sensor_mode: false,
         };
 
         let obs = wifi_obs("aa:bb:cc:dd:ee:ff", base + ChronoDuration::seconds(30));
@@ -901,6 +981,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
+            sensor_mode: false,
         };
 
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
@@ -948,6 +1029,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
+            sensor_mode: false,
         };
 
         let emission = ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", base))
@@ -1029,6 +1111,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
+            sensor_mode: false,
         };
 
         let emission = ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", base))
@@ -1095,6 +1178,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
+            sensor_mode: false,
         };
 
         let emission = ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", base))
@@ -1130,6 +1214,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
+            sensor_mode: false,
         };
 
         let bssid = "aa:bb:cc:dd:ee:ff";
@@ -1196,6 +1281,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
+            sensor_mode: false,
         };
 
         let bssid = "aa:bb:cc:dd:ee:ff";
@@ -1291,6 +1377,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
+            sensor_mode: false,
         };
 
         // First octet 0x3a has bit 0x02 set -> locally-administered/randomized.
@@ -1335,6 +1422,7 @@ mod tests {
                 events: events_tx,
                 secret_key: [0x11u8; 32],
                 node_sensor_id: "local".to_string(),
+                sensor_mode: false,
             };
 
             let emission = ingest(&ctx, ds, beacon_obs("11:22:33:44:55:66", "SomeNet", base))
@@ -1396,6 +1484,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
+            sensor_mode: false,
         };
 
         let emission = ingest(&ctx, ds, beacon_obs(bssid, "HomeNet", base))
@@ -1438,6 +1527,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
+            sensor_mode: false,
         };
 
         // No `frame_type` at all -- classify_wifi's match falls through to
@@ -1514,6 +1604,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
+            sensor_mode: false,
         };
 
         let obs = association_obs("3a:de:ad:be:ef:00", "aa:bb:cc:dd:ee:ff", "HomeNet", base);
@@ -1551,6 +1642,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
+            sensor_mode: false,
         };
 
         let obs = association_obs("3a:de:ad:be:ef:00", "aa:bb:cc:dd:ee:ff", "HomeNet", base);
@@ -1579,6 +1671,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
+            sensor_mode: false,
         };
 
         let obs = association_obs("3a:de:ad:be:ef:00", "aa:bb:cc:dd:ee:ff", "HomeNet", base);
@@ -1608,6 +1701,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
+            sensor_mode: false,
         };
 
         let obs = RawObservation {
@@ -1653,6 +1747,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
+            sensor_mode: false,
         };
 
         let first = ingest(

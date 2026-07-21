@@ -595,6 +595,9 @@ pub struct CaptureSupervisor {
     /// This node's own sensor id, threaded into every `IngestCtx` this
     /// supervisor builds — see `IngestCtx::node_sensor_id`.
     node_sensor_id: String,
+    /// Whether this node runs in sensor mode — threaded into every
+    /// `IngestCtx` this supervisor builds. See `IngestCtx::sensor_mode`.
+    sensor_mode: bool,
     factory: Arc<dyn CapturerFactory>,
     /// The shared "where am I?" value, fed by the running location source's
     /// [`LocationPump`] and read by every ingest task + the gps status
@@ -623,6 +626,7 @@ impl CaptureSupervisor {
         events: broadcast::Sender<Event>,
         secret_key: [u8; 32],
         node_sensor_id: String,
+        sensor_mode: bool,
         factory: Arc<dyn CapturerFactory>,
     ) -> Self {
         let (failure_tx, failure_rx) = mpsc::unbounded_channel();
@@ -631,6 +635,7 @@ impl CaptureSupervisor {
             events,
             secret_key,
             node_sensor_id,
+            sensor_mode,
             factory,
             provider: Arc::new(LocationProvider::new()),
             session: Mutex::new(None),
@@ -652,6 +657,7 @@ impl CaptureSupervisor {
             events: self.events.clone(),
             secret_key: self.secret_key,
             node_sensor_id: self.node_sensor_id.clone(),
+            sensor_mode: self.sensor_mode,
         }
     }
 
@@ -680,6 +686,7 @@ impl CaptureSupervisor {
             events: self.events.clone(),
             secret_key: self.secret_key,
             node_sensor_id: self.node_sensor_id.clone(),
+            sensor_mode: self.sensor_mode,
         }
     }
 
@@ -761,13 +768,25 @@ impl CaptureSupervisor {
         let failure_tx = self.failure_tx.clone();
         let reader = tokio::spawn(async move {
             while let Some(obs) = rx.recv().await {
-                if let Err(err) = ingest(&ctx, data_source_id, obs).await {
+                // On a Sensor node (`sensor_mode`), the local analysis
+                // pipeline (`ingest`) never runs -- observations are cached
+                // for the `SensorForwarder` to ship to the Standalone
+                // instead. Standalone behavior (`sensor_mode == false`) is
+                // unchanged.
+                let result = if ctx.sensor_mode {
+                    crate::ingest::cache_observation(&ctx, data_source_id, obs)
+                        .await
+                        .map(|_| ())
+                } else {
+                    ingest(&ctx, data_source_id, obs).await.map(|_| ())
+                };
+                if let Err(err) = result {
                     // No tracing/log crate is wired into this workspace yet
                     // (same situation `ingest`'s own docs note) -- a single
-                    // failed ingest must not kill the whole reader task; log
-                    // and keep draining.
+                    // failed ingest/cache must not kill the whole reader
+                    // task; log and keep draining.
                     eprintln!(
-                        "CaptureSupervisor: ingest failed for data source {data_source_id}: {err:#}"
+                        "CaptureSupervisor: capture failed for data source {data_source_id}: {err:#}"
                     );
                 }
             }
@@ -1315,6 +1334,7 @@ mod reconcile_tests {
             events_tx,
             [0u8; 32],
             "local".to_string(),
+            false,
             factory,
         );
 
