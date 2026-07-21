@@ -95,6 +95,19 @@ fn listener_router(state: EnrollState) -> Router {
 /// Replay-window skew tolerance for `POST /sensor/ingest` batches.
 const MAX_SKEW_MS: i64 = 300_000;
 
+/// A permanent ingest failure (a DB constraint/check violation) can never
+/// succeed on retry — ACK it so an at-least-once forwarder drops the poison
+/// pill instead of retrying forever. `anyhow::Error` from `ingest_remote`
+/// wraps the underlying `sqlx::Error`; a `Database` variant is a
+/// constraint/data problem (permanent), anything else (IO/pool/timeout) is
+/// transient.
+fn is_permanent_ingest_error(err: &anyhow::Error) -> bool {
+    matches!(
+        err.downcast_ref::<sqlx::Error>(),
+        Some(sqlx::Error::Database(_))
+    )
+}
+
 /// `POST /sensor/ingest` — an approved sensor forwards an AEAD-sealed batch
 /// of emissions. A successful AEAD open under the claimed sensor's stored
 /// key IS the authentication (the `X-Sensor-Id` header is non-authoritative,
@@ -152,7 +165,8 @@ async fn ingest_handler(
         .await
         {
             Ok(_) => accepted.push(id), // accept whether newly-inserted or a dup
-            Err(_) => { /* skip this one; keep going */ }
+            Err(e) if is_permanent_ingest_error(&e) => accepted.push(id), // drop poison pill, don't retry forever
+            Err(_) => { /* transient — omit from accepted so the sensor retries */ }
         }
     }
     let _ = SensorRepo::touch_last_seen(&st.pool, sensor.id).await; // heartbeat

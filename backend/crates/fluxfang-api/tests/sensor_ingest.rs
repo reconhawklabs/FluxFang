@@ -404,3 +404,55 @@ async fn out_of_range_coordinate_is_stored_without_location() {
 
     mgr.stop(ds_id).await;
 }
+
+/// A `kind` outside the `emission_kind_check` CHECK set (`'wifi'`,
+/// `'bluetooth'`, `'tpms'`) makes the insert fail with a permanent DB
+/// constraint violation -- retrying can NEVER succeed. The handler must
+/// still ACK it (200, id present in `accepted`) so an at-least-once
+/// forwarder drops this poison pill instead of retrying it forever, and the
+/// row must NOT be stored (the insert genuinely failed, it's dropped, not
+/// silently persisted).
+#[tokio::test]
+async fn permanent_constraint_violation_is_acked_and_dropped() {
+    let (pool, mgr, ds_id, port, key) = setup(false).await;
+
+    let em_id = uuid::Uuid::new_v4();
+    let batch = fluxfang_sensor_proto::SensorBatch {
+        sensor_id: "frontgate".into(),
+        sent_at_ms: chrono::Utc::now().timestamp_millis(),
+        emissions: vec![fluxfang_sensor_proto::WireEmission {
+            id: em_id,
+            kind: "bogus".into(), // violates emission_kind_check
+            signal_strength: Some(-40),
+            lat: Some(1.5),
+            lon: Some(2.5),
+            observed_at: chrono::Utc::now(),
+            payload: serde_json::json!({"bssid":"aa:bb:cc:dd:ee:ff"}),
+        }],
+    };
+    let sealed = fluxfang_sensor_proto::seal_batch(&key, &batch).unwrap();
+    let url = format!("http://127.0.0.1:{port}/sensor/ingest");
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .header("X-Sensor-Id", "frontgate")
+        .body(sealed)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let j: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(j["accepted"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        j["accepted"][0].as_str().unwrap(),
+        em_id.to_string(),
+        "poison pill must be ACKed so the forwarder drops it instead of retrying forever"
+    );
+
+    // The insert genuinely failed -- nothing was stored.
+    assert!(
+        EmissionRepo::get(&pool, em_id).await.unwrap().is_none(),
+        "the row must not be stored; it was dropped, not persisted"
+    );
+
+    mgr.stop(ds_id).await;
+}
