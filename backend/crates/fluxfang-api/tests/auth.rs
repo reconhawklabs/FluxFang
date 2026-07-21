@@ -237,8 +237,9 @@ async fn setup_standalone_persists_role() {
     assert_eq!(json["node_sensor_id"], "local");
 }
 
-/// Setup as a Sensor requires + stores the connection block; the key is
-/// never echoed back by GET /api/config.
+/// Setup as a Sensor requires + stores the connection block; GET
+/// /api/config echoes the non-secret host/port/cache_ttl_secs, but the key
+/// is never echoed back.
 #[tokio::test]
 async fn setup_sensor_persists_role_and_hides_key() {
     let app = test_app().await;
@@ -254,8 +255,11 @@ async fn setup_sensor_persists_role_and_hides_key() {
     let json = body_json(resp).await;
     assert_eq!(json["role"], "sensor");
     assert_eq!(json["node_sensor_id"], "frontgate");
+    assert_eq!(json["sensor"]["host"], "base.example");
+    assert_eq!(json["sensor"]["port"], 9000);
+    assert_eq!(json["sensor"]["cache_ttl_secs"], 604800);
     assert!(
-        json.get("sensor").is_none(),
+        json["sensor"].get("key").is_none(),
         "config must not leak the sensor key block"
     );
 }

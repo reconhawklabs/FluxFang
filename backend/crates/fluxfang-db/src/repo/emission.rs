@@ -659,6 +659,19 @@ impl EmissionRepo {
         .await?;
         Ok(result.rows_affected())
     }
+
+    /// Per-sensor emission counts since `since`, grouped by `sensor_id`.
+    pub async fn counts_by_sensor_since(
+        pool: &PgPool,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<(String, i64)>, sqlx::Error> {
+        sqlx::query_as::<_, (String, i64)>(
+            "SELECT sensor_id, count(*) FROM emission WHERE observed_at >= $1 GROUP BY sensor_id",
+        )
+        .bind(since)
+        .fetch_all(pool)
+        .await
+    }
 }
 
 /// Filter for [`EmissionRepo::delete_where`]. Every field optional; a `None`

@@ -26,7 +26,7 @@ pub fn protected_routes() -> Router<AppState> {
         .route("/api/sensors/:id/rotate", post(rotate_sensor))
 }
 
-fn sensor_json(s: &fluxfang_db::models::Sensor, now: chrono::DateTime<chrono::Utc>) -> Value {
+fn sensor_json(s: &fluxfang_db::models::Sensor, now: chrono::DateTime<chrono::Utc>, emissions_24h: i64) -> Value {
     let online = s
         .last_seen_at
         .is_some_and(|t| (now - t).num_seconds() <= ONLINE_THRESHOLD_SECS);
@@ -41,13 +41,26 @@ fn sensor_json(s: &fluxfang_db::models::Sensor, now: chrono::DateTime<chrono::Ut
         "approved_at": s.approved_at,
         "last_seen_at": s.last_seen_at,
         "online": online,
+        "emissions_24h": emissions_24h,
     })
 }
 
 async fn list_sensors(State(state): State<AppState>) -> Result<Json<Value>, StatusCode> {
     let sensors = SensorRepo::list(&state.pool).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let now = chrono::Utc::now();
-    Ok(Json(Value::Array(sensors.iter().map(|s| sensor_json(s, now)).collect())))
+    let since = now - chrono::Duration::hours(24);
+    let counts: std::collections::HashMap<String, i64> =
+        fluxfang_db::EmissionRepo::counts_by_sensor_since(&state.pool, since)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .into_iter()
+            .collect();
+    Ok(Json(Value::Array(
+        sensors
+            .iter()
+            .map(|s| sensor_json(s, now, counts.get(&s.sensor_id).copied().unwrap_or(0)))
+            .collect(),
+    )))
 }
 
 #[derive(Deserialize)]
@@ -65,7 +78,7 @@ async fn approve_sensor(
     }
     SensorRepo::set_auto_group(&state.pool, id, body.auto_group_emitters).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let s = SensorRepo::set_status(&state.pool, id, "approved", true).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(sensor_json(&s, chrono::Utc::now())))
+    Ok(Json(sensor_json(&s, chrono::Utc::now(), 0)))
 }
 
 async fn set_status_endpoint(state: &AppState, id: Uuid, status: &str) -> Result<Json<Value>, StatusCode> {
@@ -73,7 +86,7 @@ async fn set_status_endpoint(state: &AppState, id: Uuid, status: &str) -> Result
         return Err(StatusCode::NOT_FOUND);
     }
     let s = SensorRepo::set_status(&state.pool, id, status, false).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(sensor_json(&s, chrono::Utc::now())))
+    Ok(Json(sensor_json(&s, chrono::Utc::now(), 0)))
 }
 
 async fn reject_sensor(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<Json<Value>, StatusCode> {
