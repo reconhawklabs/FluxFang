@@ -19,7 +19,7 @@ async fn enroll_during_open_window_creates_pending_and_returns_fingerprint() {
         config: serde_json::json!({"bind_ip":"127.0.0.1","bind_port":port,"enrollment_window_secs":900}),
     }).await.unwrap();
 
-    let mgr = SensorListenerManager::new(pool.clone());
+    let mgr = common::sensor_manager(pool.clone());
     mgr.start(ds.id).await;
 
     let key = fluxfang_sensor_proto::encode_key(&fluxfang_sensor_proto::generate_key());
@@ -70,7 +70,7 @@ async fn enroll_rejects_bad_slug_and_bad_key() {
         kind: "sensor".to_string(), mode: "listener".to_string(), interface: None,
         config: serde_json::json!({"bind_ip":"127.0.0.1","bind_port":port,"enrollment_window_secs":900}),
     }).await.unwrap();
-    let mgr = SensorListenerManager::new(pool.clone());
+    let mgr = common::sensor_manager(pool.clone());
     mgr.start(ds.id).await;
     mgr.open_enrollment_window(ds.id).await;
     let url = format!("http://127.0.0.1:{port}/sensor/enroll");
@@ -110,7 +110,7 @@ async fn setup_open_listener() -> (
         kind: "sensor".to_string(), mode: "listener".to_string(), interface: None,
         config: serde_json::json!({"bind_ip":"127.0.0.1","bind_port":port,"enrollment_window_secs":900}),
     }).await.unwrap();
-    let mgr = SensorListenerManager::new(pool.clone());
+    let mgr = common::sensor_manager(pool.clone());
     mgr.start(ds.id).await;
     mgr.open_enrollment_window(ds.id).await;
     let url = format!("http://127.0.0.1:{port}/sensor/enroll");

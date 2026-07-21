@@ -28,6 +28,8 @@ use uuid::Uuid;
 
 use fluxfang_db::{DataSourceRepo, SensorRepo};
 
+use crate::ingest::IngestCtx;
+
 /// Per-datasource enrollment-window expiry (monotonic). Absent/past = closed.
 pub(crate) type WindowMap = Arc<tokio::sync::Mutex<HashMap<Uuid, Instant>>>;
 
@@ -47,15 +49,21 @@ pub struct SensorListenerManager {
     pool: PgPool,
     running: Mutex<HashMap<Uuid, ListenerHandle>>,
     windows: WindowMap,
+    /// Carried through to each listener's [`EnrollState`] so the
+    /// `/sensor/ingest` handler (Task 6) can call `ingest::ingest_remote`.
+    /// Unused until then.
+    ingest: IngestCtx,
 }
 
 /// State shared into a listener's router: the DB pool, THIS listener's
-/// datasource id, and the enrollment-window map.
+/// datasource id, the enrollment-window map, and the `IngestCtx` used by the
+/// (Task 6) `/sensor/ingest` handler.
 #[derive(Clone)]
 pub(crate) struct EnrollState {
     pub pool: PgPool,
     pub data_source_id: Uuid,
     pub windows: WindowMap,
+    pub ingest: IngestCtx,
 }
 
 #[derive(Deserialize)]
@@ -199,11 +207,12 @@ fn parse_bind(config: &Value) -> Option<SocketAddr> {
 }
 
 impl SensorListenerManager {
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(pool: PgPool, ingest: IngestCtx) -> Self {
         Self {
             pool,
             running: Mutex::new(HashMap::new()),
             windows: Arc::new(Mutex::new(HashMap::new())),
+            ingest,
         }
     }
 
@@ -248,6 +257,7 @@ impl SensorListenerManager {
             pool: self.pool.clone(),
             data_source_id: id,
             windows: self.windows.clone(),
+            ingest: self.ingest.clone(),
         };
         let (shutdown, shutdown_rx) = oneshot::channel::<()>();
         let task = tokio::spawn(async move {

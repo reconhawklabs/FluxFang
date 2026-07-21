@@ -158,12 +158,25 @@ impl AppState {
         let (events_tx, _events_rx) = broadcast::channel::<Event>(EVENTS_CHANNEL_CAPACITY);
         let capture = Arc::new(CaptureSupervisor::new(
             pool.clone(),
-            events_tx,
+            events_tx.clone(),
             secret_key,
-            node_sensor_id,
+            node_sensor_id.clone(),
             factory,
         ));
-        let sensor_listeners = Arc::new(SensorListenerManager::new(pool.clone()));
+        // The `IngestCtx` sensor listeners carry for the (Task 6)
+        // `/sensor/ingest` handler. Remote emissions carry no local
+        // session, so `sessions` is `None`; `location` is built but never
+        // read on the remote path (a remote sensor's own `classify` call
+        // never happens here).
+        let sensor_ingest = crate::ingest::IngestCtx {
+            pool: pool.clone(),
+            sessions: None,
+            location: Arc::new(crate::ingest::location::LocationProvider::new()),
+            events: events_tx,
+            secret_key,
+            node_sensor_id,
+        };
+        let sensor_listeners = Arc::new(SensorListenerManager::new(pool.clone(), sensor_ingest));
         Self {
             pool,
             login_limiter: Arc::new(LoginLimiter::default()),
