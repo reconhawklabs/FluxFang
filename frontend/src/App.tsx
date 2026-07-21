@@ -10,6 +10,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./hooks/useAuth";
 import { useLiveEvents } from "./hooks/useLiveEvents";
+import { useConfig } from "./hooks/useConfig";
 import { api } from "./api/client";
 import AppShell from "./components/AppShell";
 import Setup from "./pages/Setup";
@@ -32,8 +33,10 @@ import AiAuditLog from "./pages/AiAuditLog";
 export default function App() {
   const { needsSetup, authed, loading, refetch } = useAuth();
   useLiveEvents({ enabled: authed });
+  const { data: config, isLoading: configLoading } = useConfig(authed);
+  const isSensor = config?.role === "sensor";
 
-  if (loading) {
+  if (loading || (authed && configLoading)) {
     return (
       <div className="flex h-screen items-center justify-center bg-slate-950 text-sm text-slate-400">
         Loading…
@@ -69,17 +72,21 @@ export default function App() {
         <Route path="dashboard" element={<Dashboard />} />
         <Route path="data-sources" element={<DataSources />} />
         <Route path="emissions" element={<Emissions />} />
-        <Route path="emitters" element={<Emitters />} />
-        <Route path="emitters/:id" element={<EmitterDetailPage />} />
-        <Route path="co-travel" element={<CoTravel />} />
-        <Route path="entities" element={<Entities />} />
-        <Route path="entities/:id" element={<EntityDetailPage />} />
-        <Route path="zones" element={<Zones />} />
-        <Route path="zones/:id" element={<ZoneDetailPage />} />
-        <Route path="map" element={<MapView />} />
-        <Route path="alerts" element={<Alerts />} />
         <Route path="notifications" element={<Notifications />} />
-        <Route path="ai-audit" element={<AiAuditLog />} />
+        {!isSensor && (
+          <>
+            <Route path="emitters" element={<Emitters />} />
+            <Route path="emitters/:id" element={<EmitterDetailPage />} />
+            <Route path="co-travel" element={<CoTravel />} />
+            <Route path="entities" element={<Entities />} />
+            <Route path="entities/:id" element={<EntityDetailPage />} />
+            <Route path="zones" element={<Zones />} />
+            <Route path="zones/:id" element={<ZoneDetailPage />} />
+            <Route path="map" element={<MapView />} />
+            <Route path="alerts" element={<Alerts />} />
+            <Route path="ai-audit" element={<AiAuditLog />} />
+          </>
+        )}
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Route>
     </Routes>
