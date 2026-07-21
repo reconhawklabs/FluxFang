@@ -11,6 +11,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 fluxfang-core = { version = "0.1.0", path = "../fluxfang-core" }
 fluxfang-db = { version = "0.1.0", path = "../fluxfang-db" }
 fluxfang-capture = { version = "0.1.0", path = "../fluxfang-capture" }
+fluxfang-sensor-proto = { path = "../fluxfang-sensor-proto" }
 tower-sessions = "0.13"
 time = "0.3.53"
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "tls-rustls"] }
@@ -24,6 +25,7 @@ chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"
 async-trait = "0.1"
 form_urlencoded = "1"
+subtle = "2"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

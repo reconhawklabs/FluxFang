@@ -496,3 +496,20 @@ pub struct NewAiAudit {
     pub status: String,
     pub error: Option<String>,
 }
+
+/// `sensor`: one enrolled/pending distributed Sensor node in a `sensor`
+/// (listener) datasource's keyring.
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]
+pub struct Sensor {
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub data_source_id: Uuid,
+    pub sensor_id: String,
+    pub key: String,
+    pub fingerprint: String,
+    pub status: String,
+    pub auto_group_emitters: bool,
+    pub source_ip: Option<String>,
+    pub approved_at: Option<DateTime<Utc>>,
+    pub last_seen_at: Option<DateTime<Utc>>,
+}
