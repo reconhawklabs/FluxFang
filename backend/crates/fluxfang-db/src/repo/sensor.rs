@@ -59,27 +59,40 @@ impl SensorRepo {
 
     /// Update the key/fingerprint/source_ip and bump last_seen for a sensor
     /// re-enrolling while still `pending`.
+    ///
+    /// Guarded by `status = 'pending'` in the WHERE clause: without it, a
+    /// TOCTOU window exists between the enroll handler's read of the sensor
+    /// row and this write — if an operator approves the sensor in that gap,
+    /// this write would land on the now-`approved` row and silently swap in
+    /// an attacker-supplied key/fingerprint the operator never verified. The
+    /// guard makes that race safe: if the row is no longer `pending` by the
+    /// time this UPDATE runs, it matches zero rows and we return `Ok(None)`
+    /// instead of overwriting.
     pub async fn update_pending_key(
         pool: &PgPool,
         id: Uuid,
         key: &str,
         fingerprint: &str,
         source_ip: Option<&str>,
-    ) -> Result<Sensor, sqlx::Error> {
+    ) -> Result<Option<Sensor>, sqlx::Error> {
         sqlx::query_as::<_, Sensor>(
             "UPDATE sensor SET key = $2, fingerprint = $3, source_ip = $4, last_seen_at = now() \
-             WHERE id = $1 RETURNING *",
+             WHERE id = $1 AND status = 'pending' RETURNING *",
         )
         .bind(id)
         .bind(key)
         .bind(fingerprint)
         .bind(source_ip)
-        .fetch_one(pool)
+        .fetch_optional(pool)
         .await
     }
 
+    /// Bump `last_seen_at` for an `approved` sensor. Guarded by
+    /// `status = 'approved'` (defense in depth) so a sensor that was just
+    /// revoked mid-request doesn't get its last-seen/online state bumped
+    /// back up by a race with the revoke.
     pub async fn touch_last_seen(pool: &PgPool, id: Uuid) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE sensor SET last_seen_at = now() WHERE id = $1")
+        sqlx::query("UPDATE sensor SET last_seen_at = now() WHERE id = $1 AND status = 'approved'")
             .bind(id)
             .execute(pool)
             .await

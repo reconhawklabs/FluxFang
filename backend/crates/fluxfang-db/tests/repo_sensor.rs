@@ -78,6 +78,32 @@ async fn rotate_key_updates_key_and_fingerprint() {
 }
 
 #[tokio::test]
+async fn update_pending_key_does_not_touch_a_non_pending_row() {
+    let pool = common::fresh_pool().await;
+    let ds = a_sensor_datasource(&pool).await;
+    let s = SensorRepo::insert_pending(&pool, ds, "frontgate", "keyA", "fpA", None)
+        .await
+        .unwrap();
+
+    SensorRepo::set_status(&pool, s.id, "approved", true)
+        .await
+        .unwrap();
+
+    let result = SensorRepo::update_pending_key(&pool, s.id, "keyB", "fpB", Some("9.9.9.9"))
+        .await
+        .unwrap();
+    assert!(
+        result.is_none(),
+        "status guard must block writes to a non-pending row"
+    );
+
+    let got = SensorRepo::get(&pool, s.id).await.unwrap().unwrap();
+    assert_eq!(got.key, "keyA", "key must be unchanged");
+    assert_eq!(got.fingerprint, "fpA", "fingerprint must be unchanged");
+    assert_eq!(got.status, "approved", "status must be unchanged");
+}
+
+#[tokio::test]
 async fn unique_sensor_id_per_datasource() {
     let pool = common::fresh_pool().await;
     let ds = a_sensor_datasource(&pool).await;

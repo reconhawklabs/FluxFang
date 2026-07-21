@@ -131,9 +131,25 @@ async fn enroll(
         .await
         .map(|s| (StatusCode::OK, s.status)),
         Some(s) if s.status == "pending" => {
-            SensorRepo::update_pending_key(&st.pool, s.id, &req.key, &fingerprint, Some(&source_ip))
-                .await
-                .map(|s| (StatusCode::OK, s.status))
+            match SensorRepo::update_pending_key(
+                &st.pool,
+                s.id,
+                &req.key,
+                &fingerprint,
+                Some(&source_ip),
+            )
+            .await
+            {
+                Ok(Some(updated)) => Ok((StatusCode::OK, updated.status)),
+                // Raced out of `pending` (approved/revoked/rejected) between
+                // our read and this write — do NOT overwrite. The sensor's
+                // 30s retry will re-read the now-current status.
+                Ok(None) => {
+                    return (StatusCode::CONFLICT, "enrollment state changed, retry")
+                        .into_response()
+                }
+                Err(e) => Err(e),
+            }
         }
         Some(s) if s.status == "approved" => {
             // Constant-time compare of the DECODED 32-byte keys (defense in
