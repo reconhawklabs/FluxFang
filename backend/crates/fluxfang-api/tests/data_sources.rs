@@ -1310,3 +1310,45 @@ async fn capture_supervisor_skips_sensor_datasources() {
         .await
         .expect("start on a sensor row is a no-op Ok");
 }
+
+/// Task 5: a `sensor`-kind datasource's start/stop routes must be routed to
+/// `AppState::sensor_listeners`, not `CaptureSupervisor` -- driven fully
+/// through the HTTP API (create -> start -> health check -> stop -> health
+/// gone), same as the wifi/capture-supervisor flow above but for the network
+/// listener path.
+#[tokio::test]
+async fn sensor_datasource_start_stop_via_api_binds_health() {
+    // Free port helper (local to this test).
+    let port = {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let p = l.local_addr().unwrap().port();
+        drop(l);
+        p
+    };
+
+    // This file builds the app via `test_app_with_factory` and authenticates
+    // with the module-level `login(&app)` helper (setup + login → cookie).
+    let (app, _pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+
+    // create
+    let body = format!(
+        r#"{{"kind":"sensor","mode":"listener","config":{{"bind_ip":"127.0.0.1","bind_port":{port},"enrollment_window_secs":900}}}}"#
+    );
+    let resp = post_json_with_cookie(&app, "/api/data-sources", &body, &cookie).await;
+    assert_status(&resp, axum::http::StatusCode::CREATED);
+    let id = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+    // start -> running + health answers. (start/stop take no body → post_with_cookie.)
+    let resp = post_with_cookie(&app, &format!("/api/data-sources/{id}/start"), &cookie).await;
+    assert_status(&resp, axum::http::StatusCode::OK);
+    assert_eq!(body_json(resp).await["status"], "running");
+    let url = format!("http://127.0.0.1:{port}/sensor/health");
+    assert_eq!(reqwest::get(&url).await.unwrap().status().as_u16(), 200);
+
+    // stop -> stopped + health gone
+    let resp = post_with_cookie(&app, &format!("/api/data-sources/{id}/stop"), &cookie).await;
+    assert_status(&resp, axum::http::StatusCode::OK);
+    assert_eq!(body_json(resp).await["status"], "stopped");
+    assert!(reqwest::get(&url).await.is_err());
+}

@@ -201,17 +201,25 @@ async fn start_data_source(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<DataSource>, ApiError> {
-    if DataSourceRepo::get(&state.pool, id).await?.is_none() {
+    let Some(source) = DataSourceRepo::get(&state.pool, id).await? else {
         return Err(ApiError::NotFound);
-    }
+    };
     // Record the user's intent before touching the supervisor -- see Task 7:
-    // `desired_state` is what `CaptureSupervisor::resume_running` keys off
-    // after a restart, so it must be persisted regardless of whether the
-    // capture attempt below actually succeeds.
+    // `desired_state` is what `CaptureSupervisor::resume_running`/
+    // `SensorListenerManager::resume_running` key off after a restart, so it
+    // must be persisted regardless of whether the start attempt below
+    // actually succeeds.
     DataSourceRepo::set_desired_state(&state.pool, id, "running").await?;
-    // Errors are reflected in the row's own status/last_error -- see module
-    // docs -- not propagated as an HTTP error.
-    let _ = state.capture.start(id).await;
+    // A `sensor` datasource is a network listener, not a capture device --
+    // see `crate::sensor_listener` module docs -- so it's driven by
+    // `sensor_listeners` instead of `CaptureSupervisor`. Either way, errors
+    // are reflected in the row's own status/last_error, not propagated as an
+    // HTTP error.
+    if source.kind == "sensor" {
+        state.sensor_listeners.start(id).await;
+    } else {
+        let _ = state.capture.start(id).await;
+    }
     let current = DataSourceRepo::get(&state.pool, id)
         .await?
         .ok_or(ApiError::NotFound)?;
@@ -222,12 +230,17 @@ async fn stop_data_source(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<DataSource>, ApiError> {
-    if DataSourceRepo::get(&state.pool, id).await?.is_none() {
+    let Some(source) = DataSourceRepo::get(&state.pool, id).await? else {
         return Err(ApiError::NotFound);
-    }
-    // Same reasoning as start_data_source: record intent first.
+    };
+    // Same reasoning as start_data_source: record intent first, then branch
+    // on kind.
     DataSourceRepo::set_desired_state(&state.pool, id, "stopped").await?;
-    let _ = state.capture.stop(id).await;
+    if source.kind == "sensor" {
+        state.sensor_listeners.stop(id).await;
+    } else {
+        let _ = state.capture.stop(id).await;
+    }
     let current = DataSourceRepo::get(&state.pool, id)
         .await?
         .ok_or(ApiError::NotFound)?;
