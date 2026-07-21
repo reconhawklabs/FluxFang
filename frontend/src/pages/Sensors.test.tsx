@@ -122,6 +122,68 @@ test('Allow new Sensors is disabled when no running sensor datasource exists', a
   expect(btn).toBeDisabled();
 });
 
+test('revoke asks for confirmation and posts to the revoke endpoint when confirmed', async () => {
+  const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+  const calls: string[] = [];
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.toString();
+    if (init?.method === 'POST' && url.includes('/revoke')) { calls.push(url); return Promise.resolve(jsonResponse({ ...APPROVED, status: 'revoked' })); }
+    if (url.includes('/api/sensors')) return Promise.resolve(jsonResponse([APPROVED]));
+    if (url.includes('/api/data-sources')) return Promise.resolve(jsonResponse([]));
+    return Promise.reject(new Error(url));
+  }));
+  render(<Sensors />, { wrapper });
+  fireEvent.click(await screen.findByRole('button', { name: /revoke/i }));
+  expect(confirmSpy).toHaveBeenCalledWith('Revoke backlot? The sensor must re-enroll to reconnect.');
+  await waitFor(() => expect(calls.some((u) => u.includes('/revoke'))).toBe(true));
+  confirmSpy.mockRestore();
+});
+
+test('revoke does nothing when confirmation is declined', async () => {
+  const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+  const calls: string[] = [];
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.toString();
+    if (init?.method === 'POST') { calls.push(url); return Promise.resolve(jsonResponse({ ...APPROVED, status: 'revoked' })); }
+    if (url.includes('/api/sensors')) return Promise.resolve(jsonResponse([APPROVED]));
+    if (url.includes('/api/data-sources')) return Promise.resolve(jsonResponse([]));
+    return Promise.reject(new Error(url));
+  }));
+  render(<Sensors />, { wrapper });
+  fireEvent.click(await screen.findByRole('button', { name: /revoke/i }));
+  expect(confirmSpy).toHaveBeenCalled();
+  expect(calls.some((u) => u.includes('/revoke'))).toBe(false);
+  confirmSpy.mockRestore();
+});
+
+test('surfaces a page-level alert when revoke fails', async () => {
+  const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.toString();
+    if (init?.method === 'POST' && url.includes('/revoke')) return Promise.resolve(jsonResponse({}, 500));
+    if (url.includes('/api/sensors')) return Promise.resolve(jsonResponse([APPROVED]));
+    if (url.includes('/api/data-sources')) return Promise.resolve(jsonResponse([]));
+    return Promise.reject(new Error(url));
+  }));
+  render(<Sensors />, { wrapper });
+  fireEvent.click(await screen.findByRole('button', { name: /revoke/i }));
+  await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/action failed/i));
+  confirmSpy.mockRestore();
+});
+
+test('surfaces a page-level alert when rotate fails', async () => {
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.toString();
+    if (init?.method === 'POST' && url.includes('/rotate')) return Promise.resolve(jsonResponse({}, 500));
+    if (url.includes('/api/sensors')) return Promise.resolve(jsonResponse([APPROVED]));
+    if (url.includes('/api/data-sources')) return Promise.resolve(jsonResponse([]));
+    return Promise.reject(new Error(url));
+  }));
+  render(<Sensors />, { wrapper });
+  fireEvent.click(await screen.findByRole('button', { name: /rotate/i }));
+  await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/action failed/i));
+});
+
 test('Allow new Sensors posts to the running sensor datasource', async () => {
   const calls: string[] = [];
   vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {

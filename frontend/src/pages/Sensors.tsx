@@ -48,6 +48,9 @@ export default function Sensors() {
           Allow new Sensors
         </button>
       </div>
+      {(rejectMutation.isError || revokeMutation.isError || rotateMutation.isError || allowMutation.isError) && (
+        <p role="alert" className="text-sm text-red-400">Action failed. Please retry.</p>
+      )}
       {allowMutation.isSuccess && (
         <p className="text-sm text-emerald-400">
           Enrollment window open for {allowMutation.data?.remaining_secs ?? 0}s — sensors can now request approval.
@@ -113,7 +116,7 @@ export default function Sensors() {
                     className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:border-slate-500">
                     Rotate key
                   </button>
-                  <button type="button" onClick={() => revokeMutation.mutate(s.id)}
+                  <button type="button" onClick={() => { if (window.confirm(`Revoke ${s.sensor_id}? The sensor must re-enroll to reconnect.`)) revokeMutation.mutate(s.id); }}
                     className="rounded border border-red-900/60 px-2 py-1 text-xs text-red-400 hover:border-red-700">
                     Revoke
                   </button>
