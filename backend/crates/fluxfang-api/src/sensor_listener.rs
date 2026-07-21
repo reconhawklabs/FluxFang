@@ -4,15 +4,19 @@
 //! `CaptureSupervisor`. Each running listener is its own `axum::serve` on the
 //! datasource's `bind_ip:bind_port`, tracked by data_source id.
 //!
-//! Phase 2B serves only `GET /sensor/health`. Enrollment/ingest routes are
-//! added in later phases; they will extend [`listener_router`].
+//! `GET /sensor/health` provides liveness; `POST /sensor/enroll` (Phase 3A)
+//! lets a sensor self-register during an open enrollment window. Ingest
+//! routes are added in later phases; they will extend [`listener_router`].
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
-use axum::routing::get;
+use axum::extract::{ConnectInfo, State};
+use axum::routing::{get, post};
+use axum::Json;
 use axum::Router;
+use serde::Deserialize;
 use serde_json::Value;
 use sqlx::PgPool;
 use tokio::net::TcpListener;
@@ -22,7 +26,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use fluxfang_db::DataSourceRepo;
+use fluxfang_db::{DataSourceRepo, SensorRepo};
 
 /// Per-datasource enrollment-window expiry (monotonic). Absent/past = closed.
 pub(crate) type WindowMap = Arc<tokio::sync::Mutex<HashMap<Uuid, Instant>>>;
@@ -45,12 +49,119 @@ pub struct SensorListenerManager {
     windows: WindowMap,
 }
 
-/// The router each sensor listener serves. Phase 2B: liveness only.
-fn listener_router() -> Router {
-    Router::new().route(
-        "/sensor/health",
-        get(|| async { axum::http::StatusCode::OK }),
-    )
+/// State shared into a listener's router: the DB pool, THIS listener's
+/// datasource id, and the enrollment-window map.
+#[derive(Clone)]
+pub(crate) struct EnrollState {
+    pub pool: PgPool,
+    pub data_source_id: Uuid,
+    pub windows: WindowMap,
+}
+
+#[derive(Deserialize)]
+struct EnrollRequest {
+    sensor_id: String,
+    key: String,
+}
+
+/// Slug rule shared with Phase 1 setup: non-empty, ≤64, `[A-Za-z0-9_-]`.
+fn is_valid_sensor_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// The router each sensor listener serves.
+fn listener_router(state: EnrollState) -> Router {
+    Router::new()
+        .route(
+            "/sensor/health",
+            get(|| async { axum::http::StatusCode::OK }),
+        )
+        .route("/sensor/enroll", post(enroll))
+        .with_state(state)
+}
+
+/// `POST /sensor/enroll` — a sensor self-registers `{sensor_id, key}` during
+/// an open enrollment window. Returns `{status, fingerprint}`; the sensor
+/// displays the fingerprint for out-of-band verification before an operator
+/// approves it. Never panics on attacker input.
+async fn enroll(
+    State(st): State<EnrollState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(req): Json<EnrollRequest>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    // 1. Window gate.
+    {
+        let map = st.windows.lock().await;
+        if !window_is_open(&map, st.data_source_id) {
+            return (StatusCode::FORBIDDEN, "enrollment window is closed").into_response();
+        }
+    }
+    // 2. Slug + key validity (fail closed, no panic).
+    if !is_valid_sensor_id(&req.sensor_id) {
+        return (StatusCode::BAD_REQUEST, "invalid sensor_id").into_response();
+    }
+    let key = match fluxfang_sensor_proto::decode_key(&req.key) {
+        Ok(k) => k,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid key").into_response(),
+    };
+    let fingerprint = fluxfang_sensor_proto::fingerprint(&req.sensor_id, &key);
+    let source_ip = peer.ip().to_string();
+
+    // 3. Upsert policy by current status.
+    let existing = SensorRepo::get_by_sensor_id(&st.pool, st.data_source_id, &req.sensor_id).await;
+    let existing = match existing {
+        Ok(e) => e,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let result = match existing {
+        None => SensorRepo::insert_pending(
+            &st.pool,
+            st.data_source_id,
+            &req.sensor_id,
+            &req.key,
+            &fingerprint,
+            Some(&source_ip),
+        )
+        .await
+        .map(|s| (StatusCode::OK, s.status)),
+        Some(s) if s.status == "pending" => {
+            SensorRepo::update_pending_key(&st.pool, s.id, &req.key, &fingerprint, Some(&source_ip))
+                .await
+                .map(|s| (StatusCode::OK, s.status))
+        }
+        Some(s) if s.status == "approved" => {
+            if s.key == req.key {
+                let _ = SensorRepo::touch_last_seen(&st.pool, s.id).await;
+                Ok((StatusCode::OK, "approved".to_string()))
+            } else {
+                // An approved id re-enrolling with a DIFFERENT key — refuse.
+                return (
+                    StatusCode::CONFLICT,
+                    "sensor_id already approved with a different key",
+                )
+                    .into_response();
+            }
+        }
+        // revoked / rejected -> refuse; do not resurrect.
+        Some(_) => {
+            return (StatusCode::FORBIDDEN, "sensor is not permitted to enroll").into_response()
+        }
+    };
+
+    match result {
+        Ok((code, status)) => (
+            code,
+            Json(serde_json::json!({ "status": status, "fingerprint": fingerprint })),
+        )
+            .into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 /// Parse `bind_ip`/`bind_port` out of a sensor datasource's `config` jsonb.
@@ -106,9 +217,15 @@ impl SensorListenerManager {
             }
         };
 
+        let enroll_state = EnrollState {
+            pool: self.pool.clone(),
+            data_source_id: id,
+            windows: self.windows.clone(),
+        };
         let (shutdown, shutdown_rx) = oneshot::channel::<()>();
         let task = tokio::spawn(async move {
-            let service = listener_router().into_make_service_with_connect_info::<SocketAddr>();
+            let service =
+                listener_router(enroll_state).into_make_service_with_connect_info::<SocketAddr>();
             let _ = axum::serve(listener, service)
                 .with_graceful_shutdown(async move {
                     let _ = shutdown_rx.await;
