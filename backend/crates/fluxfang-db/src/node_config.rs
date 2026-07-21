@@ -45,7 +45,10 @@ mod tests {
             sensor: None,
         };
         let v = serde_json::to_value(&cfg).unwrap();
-        assert_eq!(v, json!({ "role": "standalone", "node_sensor_id": "local" }));
+        assert_eq!(
+            v,
+            json!({ "role": "standalone", "node_sensor_id": "local" })
+        );
         let back: NodeConfig = serde_json::from_value(v).unwrap();
         assert_eq!(back, cfg);
     }
