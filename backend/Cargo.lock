@@ -762,6 +762,7 @@ dependencies = [
  "fluxfang-capture",
  "fluxfang-core",
  "fluxfang-db",
+ "fluxfang-sensor-proto",
  "form_urlencoded",
  "futures-util",
  "hex",

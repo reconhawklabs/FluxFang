@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 
 use axum::routing::get;
 use axum::Router;
@@ -18,9 +19,18 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use uuid::Uuid;
 
 use fluxfang_db::DataSourceRepo;
+
+/// Per-datasource enrollment-window expiry (monotonic). Absent/past = closed.
+pub(crate) type WindowMap = Arc<tokio::sync::Mutex<HashMap<Uuid, Instant>>>;
+
+/// True if `id` has a window whose expiry is still in the future.
+pub(crate) fn window_is_open(map: &HashMap<Uuid, Instant>, id: Uuid) -> bool {
+    map.get(&id).is_some_and(|&exp| exp > Instant::now())
+}
 
 /// A running listener: a shutdown trigger + the serving task's handle.
 struct ListenerHandle {
@@ -32,6 +42,7 @@ struct ListenerHandle {
 pub struct SensorListenerManager {
     pool: PgPool,
     running: Mutex<HashMap<Uuid, ListenerHandle>>,
+    windows: WindowMap,
 }
 
 /// The router each sensor listener serves. Phase 2B: liveness only.
@@ -54,6 +65,7 @@ impl SensorListenerManager {
         Self {
             pool,
             running: Mutex::new(HashMap::new()),
+            windows: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -129,5 +141,58 @@ impl SensorListenerManager {
                 self.start(source.id).await;
             }
         }
+    }
+
+    /// Open the enrollment window for `data_source_id` for its configured
+    /// `enrollment_window_secs` (default 900). Returns remaining seconds, or
+    /// `None` if the datasource doesn't exist.
+    pub async fn open_enrollment_window(&self, data_source_id: Uuid) -> Option<u64> {
+        let source = DataSourceRepo::get(&self.pool, data_source_id)
+            .await
+            .ok()??;
+        let secs = source
+            .config
+            .get("enrollment_window_secs")
+            .and_then(Value::as_u64)
+            .unwrap_or(900);
+        let expiry = Instant::now() + std::time::Duration::from_secs(secs);
+        self.windows.lock().await.insert(data_source_id, expiry);
+        Some(secs)
+    }
+
+    /// Remaining seconds on the window, or 0 if closed/expired.
+    pub async fn enrollment_window_remaining(&self, data_source_id: Uuid) -> u64 {
+        let map = self.windows.lock().await;
+        map.get(&data_source_id)
+            .map(|&exp| exp.saturating_duration_since(Instant::now()).as_secs())
+            .unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+    use tokio::time::{Duration, Instant};
+
+    #[test]
+    fn window_open_and_expiry_logic() {
+        let windows: WindowMap = Arc::new(Mutex::new(HashMap::new()));
+        let id = Uuid::new_v4();
+        // Not opened yet -> closed.
+        assert!(!window_is_open(&windows.try_lock().unwrap(), id));
+        // Open for 1s.
+        windows
+            .try_lock()
+            .unwrap()
+            .insert(id, Instant::now() + Duration::from_secs(1));
+        assert!(window_is_open(&windows.try_lock().unwrap(), id));
+        // Expired.
+        windows
+            .try_lock()
+            .unwrap()
+            .insert(id, Instant::now() - Duration::from_secs(1));
+        assert!(!window_is_open(&windows.try_lock().unwrap(), id));
     }
 }
