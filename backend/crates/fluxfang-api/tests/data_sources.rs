@@ -1296,6 +1296,7 @@ async fn capture_supervisor_skips_sensor_datasources() {
         pool.clone(),
         tokio::sync::broadcast::channel(16).0,
         [0u8; 32],
+        "local".to_string(),
         std::sync::Arc::new(fluxfang_api::capture::MockCapturerFactory::default()),
     );
     sup.resume_running().await;

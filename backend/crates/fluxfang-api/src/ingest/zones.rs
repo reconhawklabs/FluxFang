@@ -371,7 +371,10 @@ mod tests {
     /// (what the pump would feed at runtime). The returned provider is handed
     /// to `full_ctx`; a test that needs the host's position to *move* just
     /// calls `provider.update(new_fix)` (synchronous — no channel/poll).
-    async fn session_with_fix(pool: PgPool, fix: GpsFix) -> (SessionManager, Arc<LocationProvider>) {
+    async fn session_with_fix(
+        pool: PgPool,
+        fix: GpsFix,
+    ) -> (SessionManager, Arc<LocationProvider>) {
         let manager = SessionManager::open(pool)
             .await
             .expect("open SessionManager");
@@ -413,6 +416,7 @@ mod tests {
             location,
             events: events_tx,
             secret_key: test_key(),
+            node_sensor_id: "local".to_string(),
         };
         (ctx, events_rx)
     }
@@ -673,12 +677,11 @@ mod tests {
         let (events_tx, _events_rx) = broadcast::channel(16);
         let ctx = IngestCtx {
             pool: pool.clone(),
-            sessions: Some(Arc::new(
-                SessionManager::open(pool.clone()).await.unwrap(),
-            )),
+            sessions: Some(Arc::new(SessionManager::open(pool.clone()).await.unwrap())),
             location: Arc::new(LocationProvider::new()),
             events: events_tx,
             secret_key: test_key(),
+            node_sensor_id: "local".to_string(),
         };
 
         let zone_id = seed_zone(&pool).await;

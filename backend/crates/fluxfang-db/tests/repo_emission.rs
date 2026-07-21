@@ -119,13 +119,14 @@ async fn insert_persists_location_quality() {
     let new = NewEmission {
         data_source_id: None,
         emitter_id: None,
-        session_id: session,
+        session_id: Some(session),
         observed_at: Utc::now(),
         signal_strength: None,
         location: None,
         location_quality: "stale".to_string(),
         kind: "wifi".to_string(),
         payload: serde_json::json!({}),
+        sensor_id: "local".to_string(),
     };
     let e = EmissionRepo::insert(&pool, new).await.unwrap();
     assert_eq!(e.location_quality, "stale");
@@ -802,4 +803,58 @@ async fn points_respects_data_source_filter() {
     let (points, total) = EmissionRepo::points(&pool, filter).await.unwrap();
     assert_eq!(total, 3);
     assert_eq!(points.len(), 3);
+}
+
+#[tokio::test]
+async fn insert_tags_sensor_id_and_allows_null_session() {
+    let pool = common::fresh_pool().await;
+    let ds = fluxfang_db::DataSourceRepo::insert(
+        &pool,
+        fluxfang_db::NewDataSource::wifi_monitor("wlan0"),
+    )
+    .await
+    .unwrap();
+    let em = fluxfang_db::EmissionRepo::insert(
+        &pool,
+        fluxfang_db::models::NewEmission {
+            data_source_id: Some(ds.id),
+            emitter_id: None,
+            session_id: None,
+            observed_at: chrono::Utc::now(),
+            signal_strength: Some(-40),
+            location: Some((2.5, 1.5)),
+            location_quality: "fresh".to_string(),
+            kind: "wifi".to_string(),
+            payload: serde_json::json!({"bssid":"aa:bb:cc:dd:ee:ff"}),
+            sensor_id: "frontgate".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(em.sensor_id, "frontgate");
+    assert!(em.session_id.is_none());
+    assert_eq!(em.lat, Some(1.5));
+    assert_eq!(em.lon, Some(2.5));
+}
+
+// ---------------------------------------------------------------------
+// Task 4: EmissionRepo::insert_remote -- explicit id + ON CONFLICT dedup.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn insert_remote_is_idempotent_by_id() {
+    let pool = common::fresh_pool().await;
+    let ds = fluxfang_db::DataSourceRepo::insert(&pool, fluxfang_db::NewDataSource::wifi_monitor("wlan0")).await.unwrap();
+    let id = uuid::Uuid::new_v4();
+    let mk = || fluxfang_db::models::NewEmission {
+        data_source_id: Some(ds.id), emitter_id: None, session_id: None,
+        observed_at: chrono::Utc::now(), signal_strength: None, location: None,
+        location_quality: "fresh".to_string(), kind: "wifi".to_string(),
+        payload: serde_json::json!({}), sensor_id: "frontgate".to_string(),
+    };
+    let first = fluxfang_db::EmissionRepo::insert_remote(&pool, id, mk()).await.unwrap();
+    assert!(first.is_some());
+    assert_eq!(first.unwrap().id, id);
+    let dup = fluxfang_db::EmissionRepo::insert_remote(&pool, id, mk()).await.unwrap();
+    assert!(dup.is_none(), "second insert with the same id is a no-op (deduped)");
 }

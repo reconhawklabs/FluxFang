@@ -1,6 +1,5 @@
 mod common;
 
-use fluxfang_api::sensor_listener::SensorListenerManager;
 use fluxfang_db::models::NewDataSource;
 use fluxfang_db::DataSourceRepo;
 
@@ -30,7 +29,7 @@ async fn listener_binds_serves_health_then_stops() {
     .await
     .unwrap();
 
-    let mgr = SensorListenerManager::new(pool.clone());
+    let mgr = common::sensor_manager(pool.clone());
     mgr.start(src.id).await;
 
     // Row is running and the health endpoint answers.

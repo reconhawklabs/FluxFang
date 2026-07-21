@@ -27,7 +27,22 @@ async fn main() {
     let secret_key = key_from_base64(&secret_key_raw)
         .expect("FLUXFANG_SECRET_KEY must be valid base64-encoded 32 bytes");
 
-    let state = AppState::with_capture(pool, secret_key, Arc::new(RealCapturerFactory));
+    // This node's own sensor id (from app_config.settings.node_sensor_id,
+    // default "local") — every locally-captured emission gets tagged with
+    // it (see IngestCtx::node_sensor_id).
+    let node_sensor_id = fluxfang_db::AppConfigRepo::node_config(&pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|n| n.node_sensor_id)
+        .unwrap_or_else(|| "local".to_string());
+
+    let state = AppState::with_capture(
+        pool,
+        secret_key,
+        Arc::new(RealCapturerFactory),
+        node_sensor_id,
+    );
 
     // Start the supervisor's background tasks (the device-failure drain) before
     // resuming, so a source that dies during/after resume is reconciled.

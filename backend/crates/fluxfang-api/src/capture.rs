@@ -592,6 +592,9 @@ pub struct CaptureSupervisor {
     pool: PgPool,
     events: broadcast::Sender<Event>,
     secret_key: [u8; 32],
+    /// This node's own sensor id, threaded into every `IngestCtx` this
+    /// supervisor builds — see `IngestCtx::node_sensor_id`.
+    node_sensor_id: String,
     factory: Arc<dyn CapturerFactory>,
     /// The shared "where am I?" value, fed by the running location source's
     /// [`LocationPump`] and read by every ingest task + the gps status
@@ -619,6 +622,7 @@ impl CaptureSupervisor {
         pool: PgPool,
         events: broadcast::Sender<Event>,
         secret_key: [u8; 32],
+        node_sensor_id: String,
         factory: Arc<dyn CapturerFactory>,
     ) -> Self {
         let (failure_tx, failure_rx) = mpsc::unbounded_channel();
@@ -626,6 +630,7 @@ impl CaptureSupervisor {
             pool,
             events,
             secret_key,
+            node_sensor_id,
             factory,
             provider: Arc::new(LocationProvider::new()),
             session: Mutex::new(None),
@@ -646,6 +651,7 @@ impl CaptureSupervisor {
             location: self.provider.clone(),
             events: self.events.clone(),
             secret_key: self.secret_key,
+            node_sensor_id: self.node_sensor_id.clone(),
         }
     }
 
@@ -673,6 +679,7 @@ impl CaptureSupervisor {
             location: self.provider.clone(),
             events: self.events.clone(),
             secret_key: self.secret_key,
+            node_sensor_id: self.node_sensor_id.clone(),
         }
     }
 
@@ -1303,7 +1310,13 @@ mod reconcile_tests {
         // supervisor whose running set is empty.
         let factory = Arc::new(MockCapturerFactory::new());
         let (events_tx, _events_rx) = broadcast::channel(8);
-        let supervisor = CaptureSupervisor::new(pool.clone(), events_tx, [0u8; 32], factory);
+        let supervisor = CaptureSupervisor::new(
+            pool.clone(),
+            events_tx,
+            [0u8; 32],
+            "local".to_string(),
+            factory,
+        );
 
         // Act: one reconciliation sweep. (Called directly, not via
         // `spawn_background`'s 10s loop, so the suite stays deterministic.)

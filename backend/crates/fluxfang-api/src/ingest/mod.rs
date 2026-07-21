@@ -150,6 +150,9 @@ pub struct IngestCtx {
     /// struct) is Task 6.2's job; this struct just needs the parsed 32
     /// bytes, however the caller obtained them.
     pub secret_key: [u8; 32],
+    /// This node's own sensor id (from app_config.settings.node_sensor_id,
+    /// default "local") — every locally-captured emission is tagged with it.
+    pub node_sensor_id: String,
 }
 
 /// Turn one capture-layer [`RawObservation`] into a persisted, auto-attached,
@@ -232,63 +235,146 @@ pub async fn ingest(
     let new = NewEmission {
         data_source_id: Some(data_source_id),
         emitter_id: None,
-        session_id,
+        session_id: Some(session_id),
         observed_at: obs.observed_at,
         signal_strength: obs.signal_strength,
         location,
         location_quality: location_quality.as_str().to_string(),
         kind: obs.kind,
         payload: obs.payload,
+        sensor_id: ctx.node_sensor_id.clone(),
     };
 
     let mut emission = EmissionRepo::insert(&ctx.pool, new).await?;
+    finalize_emission(ctx, data_source_id, &mut emission, GroupingPolicy::Local).await?;
+    Ok(emission)
+}
 
-    // Auto-attach: first match wins, in EmitterRepo::list's created_at ASC
-    // order (see module docs). match_enabled == false emitters are skipped
-    // outright (Phase A4) -- not even parsed/evaluated.
-    let emitters = EmitterRepo::list(&ctx.pool).await?;
-    for emitter in emitters {
-        if !emitter.match_enabled {
-            continue;
+/// Ingest one remote emission from an approved sensor: insert with the
+/// sensor-supplied id (deduped), tag `sensor_id`, use the sensor's location
+/// (`location_quality='fresh'`, no host GPS), then finalize per the sensor's
+/// grouping policy. Returns Ok(true) if newly inserted, Ok(false) if a dup.
+pub(crate) async fn ingest_remote(
+    ctx: &IngestCtx,
+    data_source_id: Uuid,
+    sensor_id: &str,
+    auto_group: bool,
+    em: fluxfang_sensor_proto::WireEmission,
+) -> anyhow::Result<bool> {
+    // A WireEmission's coordinate is only trusted when BOTH lon/lat are
+    // present AND within PostGIS's valid geography range -- an out-of-range
+    // value (e.g. lat > 90) makes the `::geography` insert ERROR, which would
+    // make this whole fn return Err, the handler skip the ACK, and an
+    // at-least-once forwarder retry that emission forever. Dropping the
+    // coordinate (storing the emission with no location, "none" quality)
+    // instead still inserts and gets ACKed.
+    let coord = match (em.lon, em.lat) {
+        (Some(lon), Some(lat))
+            if (-180.0..=180.0).contains(&lon) && (-90.0..=90.0).contains(&lat) =>
+        {
+            Some((lon, lat))
         }
-        let rule: Rule = match serde_json::from_value(emitter.match_criteria.clone()) {
-            Ok(rule) => rule,
-            // Malformed match_criteria: treat this emitter as non-matching
-            // rather than failing the whole ingest over one bad rule.
-            Err(_) => continue,
-        };
-        // `fluxfang_core::rule::eval` is pure, in-memory structural
-        // matching of a JSON payload against a `Rule`'s conditions -- it
-        // never parses or executes code (see that function's own doc
-        // comment's explicit NOTE). Not JS/Python `eval`.
-        if eval(&rule, &emission.payload) {
-            emission = EmissionRepo::set_emitter(&ctx.pool, emission.id, emitter.id).await?;
-            EmitterRepo::touch_seen(&ctx.pool, emitter.id, emission.observed_at).await?;
-            break;
+        _ => None,
+    };
+    let new = NewEmission {
+        data_source_id: Some(data_source_id),
+        emitter_id: None,
+        session_id: None,
+        observed_at: em.observed_at,
+        signal_strength: em.signal_strength,
+        location: coord,
+        location_quality: if coord.is_some() { "fresh" } else { "none" }.to_string(),
+        kind: em.kind,
+        payload: em.payload,
+        sensor_id: sensor_id.to_string(),
+    };
+    let Some(mut emission) = EmissionRepo::insert_remote(&ctx.pool, em.id, new).await? else {
+        return Ok(false); // duplicate — already ingested
+    };
+    let policy = if auto_group {
+        GroupingPolicy::RemoteGrouped
+    } else {
+        GroupingPolicy::RemoteStray
+    };
+    finalize_emission(ctx, data_source_id, &mut emission, policy).await?;
+    Ok(true)
+}
+
+/// How a just-inserted emission should be grouped into emitters.
+pub(crate) enum GroupingPolicy {
+    /// Local capture: auto-attach to a matching emitter always; auto-create
+    /// only if the data_source's `config.auto_create_emitters` is set.
+    Local,
+    /// Remote sensor with `auto_group_emitters=true`: attach; else create
+    /// unconditionally (the sensor's flag IS the gate, not the datasource).
+    RemoteGrouped,
+    /// Remote sensor with `auto_group_emitters=false`: no attach, no create --
+    /// the emission is a stray. Alerts/zones/broadcast still run.
+    RemoteStray,
+}
+
+/// Shared post-insert pipeline for both local and remote emissions: auto-
+/// attach/auto-create (gated by `policy`), enrichment, alerts, zones, and
+/// broadcast. Extracted from [`ingest`] (Phase 5-A Task 3) so remote-sensor
+/// ingest paths can share this tail without duplicating it -- see
+/// [`GroupingPolicy`] for the per-policy behavior differences.
+pub(crate) async fn finalize_emission(
+    ctx: &IngestCtx,
+    data_source_id: Uuid,
+    emission: &mut Emission,
+    policy: GroupingPolicy,
+) -> anyhow::Result<()> {
+    let group = !matches!(policy, GroupingPolicy::RemoteStray);
+    if group {
+        // Auto-attach: first match wins, in EmitterRepo::list's created_at ASC
+        // order (see module docs). match_enabled == false emitters are skipped
+        // outright (Phase A4) -- not even parsed/evaluated.
+        let emitters = EmitterRepo::list(&ctx.pool).await?;
+        for emitter in emitters {
+            if !emitter.match_enabled {
+                continue;
+            }
+            let rule: Rule = match serde_json::from_value(emitter.match_criteria.clone()) {
+                Ok(rule) => rule,
+                // Malformed match_criteria: treat this emitter as non-matching
+                // rather than failing the whole ingest over one bad rule.
+                Err(_) => continue,
+            };
+            // `fluxfang_core::rule::eval` is pure, in-memory structural
+            // matching of a JSON payload against a `Rule`'s conditions -- it
+            // never parses or executes code (see that function's own doc
+            // comment's explicit NOTE). Not JS/Python `eval`.
+            if eval(&rule, &emission.payload) {
+                *emission = EmissionRepo::set_emitter(&ctx.pool, emission.id, emitter.id).await?;
+                EmitterRepo::touch_seen(&ctx.pool, emitter.id, emission.observed_at).await?;
+                break;
+            }
         }
+
+        // Auto-create (Phase A4): only if auto-attach above left the emission
+        // unassigned. Self-contained (see auto_create_emitter's doc comment) --
+        // never fails ingest itself.
+        if emission.emitter_id.is_none() {
+            let force = matches!(policy, GroupingPolicy::RemoteGrouped);
+            auto_create_emitter(ctx, data_source_id, emission, force).await;
+        }
+
+        // Wifi-association enrichment: if this is a client association frame
+        // that attached to a wifi_client emitter, record the AP it connected
+        // to on that emitter (latest-wins). Self-contained, like alerts/zones
+        // below.
+        maybe_enrich_connected_ap(ctx, emission).await;
+        maybe_enrich_ap_security(ctx, emission).await;
     }
 
-    // Auto-create (Phase A4): only if auto-attach above left the emission
-    // unassigned. Self-contained (see auto_create_emitter's doc comment) --
-    // never fails ingest itself.
-    if emission.emitter_id.is_none() {
-        auto_create_emitter(ctx, data_source_id, &mut emission).await;
-    }
-
-    // Wifi-association enrichment: if this is a client association frame that
-    // attached to a wifi_client emitter, record the AP it connected to on that
-    // emitter (latest-wins). Self-contained, like alerts/zones below.
-    maybe_enrich_connected_ap(ctx, &emission).await;
-    maybe_enrich_ap_security(ctx, &emission).await;
-
-    alerts::evaluate_alerts(ctx, &emission).await;
-    zones::update_target_zones(ctx, &emission).await;
+    alerts::evaluate_alerts(ctx, emission).await;
+    zones::update_target_zones(ctx, emission).await;
 
     // No subscribers is a normal, expected state (see doc comment above) --
     // deliberately not propagated as an ingest failure.
     let _ = ctx.events.send(Event::Emission(emission.clone()));
 
-    Ok(emission)
+    Ok(())
 }
 
 /// Phase A4's auto-create: classify `emission`'s payload and, if the
@@ -350,15 +436,21 @@ pub async fn ingest(
 /// `zones::update_target_zones` -- a DB hiccup here must leave the emission
 /// exactly as auto-attach left it (persisted, unassigned), never fail
 /// `ingest` itself or drop the emission.
-async fn auto_create_emitter(ctx: &IngestCtx, data_source_id: Uuid, emission: &mut Emission) {
+async fn auto_create_emitter(
+    ctx: &IngestCtx,
+    data_source_id: Uuid,
+    emission: &mut Emission,
+    force: bool,
+) {
     let Ok(Some(data_source)) = DataSourceRepo::get(&ctx.pool, data_source_id).await else {
         return;
     };
-    let auto_create_enabled = data_source
-        .config
-        .get("auto_create_emitters")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+    let auto_create_enabled = force
+        || data_source
+            .config
+            .get("auto_create_emitters")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
     if !auto_create_enabled {
         return;
     }
@@ -690,6 +782,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let obs = wifi_obs("aa:bb:cc:dd:ee:ff", base);
@@ -720,6 +813,41 @@ mod tests {
         }
     }
 
+    /// Phase 5-A: every locally-captured emission is tagged with this node's
+    /// own `IngestCtx::node_sensor_id`, not a hardcoded `"local"` -- confirms
+    /// `ingest`'s `NewEmission { sensor_id: ctx.node_sensor_id.clone(), .. }`
+    /// wiring actually reaches the persisted `Emission`.
+    #[tokio::test]
+    async fn local_ingest_tags_node_sensor_id() {
+        let pool = fresh_pool().await;
+        let ds = seed_wifi_source(&pool).await;
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let fix = a_fix(base);
+        let (manager, provider) = session_with_fix(pool.clone(), fix.clone()).await;
+
+        let (events_tx, _events_rx) = broadcast::channel(8);
+        let ctx = IngestCtx {
+            pool: pool.clone(),
+            sessions: Some(Arc::new(manager)),
+            location: provider.clone(),
+            events: events_tx,
+            secret_key: [0x11u8; 32],
+            node_sensor_id: "base".to_string(),
+        };
+
+        let obs = wifi_obs("aa:bb:cc:dd:ee:ff", base);
+        let emission = ingest(&ctx, ds, obs).await.expect("ingest should succeed");
+
+        assert_eq!(emission.sensor_id, "base");
+
+        // Persisted, not just returned in-memory.
+        let got = EmissionRepo::get(&pool, emission.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.sensor_id, "base");
+    }
+
     /// Task 5: a fix that exists but is older than
     /// [`location::FRESH_FIX_MAX_AGE_SECONDS`] as of the observation's own
     /// `observed_at` must tag the emission `location_quality: "stale"` with
@@ -743,6 +871,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let obs = wifi_obs("aa:bb:cc:dd:ee:ff", base + ChronoDuration::seconds(30));
@@ -771,6 +900,7 @@ mod tests {
             location: Arc::new(LocationProvider::new()),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
@@ -817,6 +947,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let emission = ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", base))
@@ -897,6 +1028,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let emission = ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", base))
@@ -962,6 +1094,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let emission = ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", base))
@@ -996,6 +1129,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let bssid = "aa:bb:cc:dd:ee:ff";
@@ -1061,6 +1195,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let bssid = "aa:bb:cc:dd:ee:ff";
@@ -1155,6 +1290,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         // First octet 0x3a has bit 0x02 set -> locally-administered/randomized.
@@ -1198,6 +1334,7 @@ mod tests {
                 location: provider.clone(),
                 events: events_tx,
                 secret_key: [0x11u8; 32],
+                node_sensor_id: "local".to_string(),
             };
 
             let emission = ingest(&ctx, ds, beacon_obs("11:22:33:44:55:66", "SomeNet", base))
@@ -1258,6 +1395,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let emission = ingest(&ctx, ds, beacon_obs(bssid, "HomeNet", base))
@@ -1299,6 +1437,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         // No `frame_type` at all -- classify_wifi's match falls through to
@@ -1374,6 +1513,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let obs = association_obs("3a:de:ad:be:ef:00", "aa:bb:cc:dd:ee:ff", "HomeNet", base);
@@ -1410,6 +1550,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let obs = association_obs("3a:de:ad:be:ef:00", "aa:bb:cc:dd:ee:ff", "HomeNet", base);
@@ -1437,6 +1578,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let obs = association_obs("3a:de:ad:be:ef:00", "aa:bb:cc:dd:ee:ff", "HomeNet", base);
@@ -1465,6 +1607,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let obs = RawObservation {
@@ -1509,6 +1652,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let first = ingest(

@@ -28,6 +28,8 @@ use uuid::Uuid;
 
 use fluxfang_db::{DataSourceRepo, SensorRepo};
 
+use crate::ingest::IngestCtx;
+
 /// Per-datasource enrollment-window expiry (monotonic). Absent/past = closed.
 pub(crate) type WindowMap = Arc<tokio::sync::Mutex<HashMap<Uuid, Instant>>>;
 
@@ -47,15 +49,21 @@ pub struct SensorListenerManager {
     pool: PgPool,
     running: Mutex<HashMap<Uuid, ListenerHandle>>,
     windows: WindowMap,
+    /// Carried through to each listener's [`EnrollState`] so the
+    /// `/sensor/ingest` handler (Task 6) can call `ingest::ingest_remote`.
+    /// Unused until then.
+    ingest: IngestCtx,
 }
 
 /// State shared into a listener's router: the DB pool, THIS listener's
-/// datasource id, and the enrollment-window map.
+/// datasource id, the enrollment-window map, and the `IngestCtx` used by the
+/// (Task 6) `/sensor/ingest` handler.
 #[derive(Clone)]
 pub(crate) struct EnrollState {
     pub pool: PgPool,
     pub data_source_id: Uuid,
     pub windows: WindowMap,
+    pub ingest: IngestCtx,
 }
 
 #[derive(Deserialize)]
@@ -80,7 +88,94 @@ fn listener_router(state: EnrollState) -> Router {
             get(|| async { axum::http::StatusCode::OK }),
         )
         .route("/sensor/enroll", post(enroll))
+        .route("/sensor/ingest", post(ingest_handler))
         .with_state(state)
+}
+
+/// Replay-window skew tolerance for `POST /sensor/ingest` batches.
+const MAX_SKEW_MS: i64 = 300_000;
+
+/// A permanent ingest failure (a DB constraint/check violation) can never
+/// succeed on retry — ACK it so an at-least-once forwarder drops the poison
+/// pill instead of retrying forever. `anyhow::Error` from `ingest_remote`
+/// wraps the underlying `sqlx::Error`; a `Database` variant is a
+/// constraint/data problem (permanent), anything else (IO/pool/timeout) is
+/// transient.
+fn is_permanent_ingest_error(err: &anyhow::Error) -> bool {
+    matches!(
+        err.downcast_ref::<sqlx::Error>(),
+        Some(sqlx::Error::Database(_))
+    )
+}
+
+/// `POST /sensor/ingest` — an approved sensor forwards an AEAD-sealed batch
+/// of emissions. A successful AEAD open under the claimed sensor's stored
+/// key IS the authentication (the `X-Sensor-Id` header is non-authoritative,
+/// only used to look up which key to try). Never panics on attacker input:
+/// the body is raw bytes, every fallible step returns early with an error
+/// response instead of unwrapping.
+async fn ingest_handler(
+    State(st): State<EnrollState>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    // 1. Identify the claimed sensor (non-authoritative header) + its key.
+    let Some(sensor_id) = headers.get("X-Sensor-Id").and_then(|v| v.to_str().ok()) else {
+        return (StatusCode::BAD_REQUEST, "missing X-Sensor-Id").into_response();
+    };
+    let sensor = match SensorRepo::get_by_sensor_id(&st.pool, st.data_source_id, sensor_id).await
+    {
+        Ok(Some(s)) if s.status == "approved" => s,
+        Ok(_) => return (StatusCode::FORBIDDEN, "unknown or unapproved sensor").into_response(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let Ok(key) = fluxfang_sensor_proto::decode_key(&sensor.key) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+
+    // 2. AEAD-open the batch (a successful open IS authentication).
+    let batch = match fluxfang_sensor_proto::open_batch(&key, &body) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::UNAUTHORIZED, "decrypt failed").into_response(),
+    };
+    // Body sensor_id must match the header/looked-up sensor.
+    if batch.sensor_id != sensor.sensor_id {
+        return (StatusCode::BAD_REQUEST, "sensor_id mismatch").into_response();
+    }
+    // 3. Replay window.
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    if !fluxfang_sensor_proto::within_replay_window(batch.sent_at_ms, now_ms, MAX_SKEW_MS) {
+        return (StatusCode::BAD_REQUEST, "stale batch").into_response();
+    }
+
+    // 4. Ingest each emission; dedup handled by insert_remote.
+    let mut accepted = Vec::new();
+    for em in batch.emissions {
+        let id = em.id;
+        match crate::ingest::ingest_remote(
+            &st.ingest,
+            st.data_source_id,
+            &sensor.sensor_id,
+            sensor.auto_group_emitters,
+            em,
+        )
+        .await
+        {
+            Ok(_) => accepted.push(id), // accept whether newly-inserted or a dup
+            Err(e) if is_permanent_ingest_error(&e) => accepted.push(id), // drop poison pill, don't retry forever
+            Err(_) => { /* transient — omit from accepted so the sensor retries */ }
+        }
+    }
+    let _ = SensorRepo::touch_last_seen(&st.pool, sensor.id).await; // heartbeat
+
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "accepted": accepted })),
+    )
+        .into_response()
 }
 
 /// `POST /sensor/enroll` — a sensor self-registers `{sensor_id, key}` during
@@ -199,11 +294,12 @@ fn parse_bind(config: &Value) -> Option<SocketAddr> {
 }
 
 impl SensorListenerManager {
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(pool: PgPool, ingest: IngestCtx) -> Self {
         Self {
             pool,
             running: Mutex::new(HashMap::new()),
             windows: Arc::new(Mutex::new(HashMap::new())),
+            ingest,
         }
     }
 
@@ -248,6 +344,7 @@ impl SensorListenerManager {
             pool: self.pool.clone(),
             data_source_id: id,
             windows: self.windows.clone(),
+            ingest: self.ingest.clone(),
         };
         let (shutdown, shutdown_rx) = oneshot::channel::<()>();
         let task = tokio::spawn(async move {

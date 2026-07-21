@@ -19,6 +19,9 @@ use axum::body::Body;
 use axum::http::{Request, Response, StatusCode};
 use axum::Router;
 use fluxfang_api::capture::CapturerFactory;
+use fluxfang_api::ingest::location::LocationProvider;
+use fluxfang_api::ingest::IngestCtx;
+use fluxfang_api::sensor_listener::SensorListenerManager;
 use fluxfang_api::{app, AppState};
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
@@ -162,7 +165,7 @@ pub async fn test_app() -> Router {
 /// without threading a second connection through `AppState`.
 pub async fn test_app_with_factory(factory: Arc<dyn CapturerFactory>) -> (Router, PgPool) {
     let pool = fresh_pool().await;
-    let state = AppState::with_capture(pool.clone(), TEST_SECRET_KEY, factory);
+    let state = AppState::with_capture(pool.clone(), TEST_SECRET_KEY, factory, "local".to_string());
     (app(state), pool)
 }
 
@@ -174,13 +177,32 @@ pub async fn test_app_with_factory(factory: Arc<dyn CapturerFactory>) -> (Router
 /// process restart: the in-memory supervisor state resets while the DB
 /// persists.
 pub fn state_with_factory(pool: PgPool, factory: Arc<dyn CapturerFactory>) -> AppState {
-    AppState::with_capture(pool, TEST_SECRET_KEY, factory)
+    AppState::with_capture(pool, TEST_SECRET_KEY, factory, "local".to_string())
 }
 
 /// A fresh, schema-isolated, migrated pool — exposed so a test can hand the
 /// *same* pool to two [`state_with_factory`] calls (see its doc comment).
 pub async fn fresh_pool_shared() -> PgPool {
     fresh_pool().await
+}
+
+/// Build a `SensorListenerManager` wired with a minimal test `IngestCtx` —
+/// `sensor_listener.rs`/`sensor_enroll.rs` don't exercise the (Task 6)
+/// `/sensor/ingest` path, so this just needs to satisfy the constructor:
+/// no active session, a throwaway `LocationProvider` (never classifies
+/// anything here), a private broadcast channel no test subscribes to, and
+/// the same fixed test key used elsewhere in this harness.
+pub fn sensor_manager(pool: PgPool) -> SensorListenerManager {
+    let (events, _rx) = tokio::sync::broadcast::channel(16);
+    let ingest = IngestCtx {
+        pool: pool.clone(),
+        sessions: None,
+        location: Arc::new(LocationProvider::new()),
+        events,
+        secret_key: TEST_SECRET_KEY,
+        node_sensor_id: "local".to_string(),
+    };
+    SensorListenerManager::new(pool, ingest)
 }
 
 /// Run a request against the app via `tower::ServiceExt::oneshot`.

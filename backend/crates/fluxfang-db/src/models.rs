@@ -156,8 +156,8 @@ pub struct Emission {
     pub data_source_id: Option<Uuid>,
     pub emitter_id: Option<Uuid>,
     /// Nullable in the DB (`ON DELETE SET NULL` when the referenced
-    /// session is deleted), even though [`NewEmission::session_id`] is
-    /// required at insert time.
+    /// session is deleted), and also optional at insert time (see
+    /// [`NewEmission::session_id`]) for emissions with no local session.
     pub session_id: Option<Uuid>,
     pub observed_at: DateTime<Utc>,
     pub signal_strength: Option<i32>,
@@ -166,6 +166,11 @@ pub struct Emission {
     /// Why `location` is what it is: `"fresh"` | `"stale"` | `"none"` (see
     /// migration `0009_location_quality_and_datasource_health.sql`).
     pub location_quality: String,
+    /// The id of the sensor that captured this emission: `"local"` for
+    /// captures on the node's own `node_sensor_id`, or the originating
+    /// distributed Sensor's id for remote captures. See migration
+    /// `0015_emission_sensor_id.sql`.
+    pub sensor_id: String,
     /// Longitude, decoded from `ST_X(location::geometry)`. `None` when
     /// `location` is NULL.
     pub lon: Option<f64>,
@@ -174,15 +179,16 @@ pub struct Emission {
     pub lat: Option<f64>,
 }
 
-/// Fields required to create a new `emission`. `session_id` is required
-/// here (unlike the DB column, which is nullable to tolerate the
-/// referenced session later being deleted) — capture always happens within
-/// a known survey session.
+/// Fields required to create a new `emission`. `session_id` is `Option<Uuid>`
+/// (mirroring the DB column, which is nullable to tolerate the referenced
+/// session later being deleted) — local captures happen within a known
+/// survey session, but emissions relayed from a distributed Sensor node may
+/// arrive with no local session at all.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewEmission {
     pub data_source_id: Option<Uuid>,
     pub emitter_id: Option<Uuid>,
-    pub session_id: Uuid,
+    pub session_id: Option<Uuid>,
     pub observed_at: DateTime<Utc>,
     pub signal_strength: Option<i32>,
     /// `(lon, lat)`. `None` when the emission wasn't geo-located.
@@ -191,23 +197,31 @@ pub struct NewEmission {
     pub location_quality: String,
     pub kind: String,
     pub payload: serde_json::Value,
+    /// The id of the sensor that captured this emission: `"local"` for
+    /// captures on the node's own `node_sensor_id`, or the originating
+    /// distributed Sensor's id for remote captures. See migration
+    /// `0015_emission_sensor_id.sql`.
+    pub sensor_id: String,
 }
 
 impl NewEmission {
     /// Convenience constructor for a wifi emission captured right now, with
-    /// no emitter/signal/location set yet. Callers that need those fields
-    /// populated at insert time should build `NewEmission` directly.
+    /// no emitter/signal/location set yet, tagged as a local capture
+    /// (`sensor_id: "local"`). Callers that need those fields populated at
+    /// insert time, or that need a non-local `sensor_id`, should build
+    /// `NewEmission` directly.
     pub fn wifi(data_source_id: Uuid, session_id: Uuid, payload: serde_json::Value) -> Self {
         Self {
             data_source_id: Some(data_source_id),
             emitter_id: None,
-            session_id,
+            session_id: Some(session_id),
             observed_at: Utc::now(),
             signal_strength: None,
             location: None,
             location_quality: "none".to_string(),
             kind: "wifi".to_string(),
             payload,
+            sensor_id: "local".to_string(),
         }
     }
 }
