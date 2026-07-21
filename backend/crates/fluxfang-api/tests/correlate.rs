@@ -82,13 +82,14 @@ async fn insert_tpms(
         NewEmission {
             data_source_id: Some(ds),
             emitter_id: Some(emitter),
-            session_id: session,
+            session_id: Some(session),
             observed_at: at,
             signal_strength: Some(-40),
             location: Some((lon, lat)),
             location_quality: "fresh".to_string(),
             kind: "tpms".to_string(),
             payload: json!({"id": "x", "type": "TPMS"}),
+            sensor_id: "local".to_string(),
         },
     )
     .await

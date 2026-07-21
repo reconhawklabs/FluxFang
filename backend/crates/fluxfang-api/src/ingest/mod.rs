@@ -150,6 +150,9 @@ pub struct IngestCtx {
     /// struct) is Task 6.2's job; this struct just needs the parsed 32
     /// bytes, however the caller obtained them.
     pub secret_key: [u8; 32],
+    /// This node's own sensor id (from app_config.settings.node_sensor_id,
+    /// default "local") — every locally-captured emission is tagged with it.
+    pub node_sensor_id: String,
 }
 
 /// Turn one capture-layer [`RawObservation`] into a persisted, auto-attached,
@@ -232,13 +235,14 @@ pub async fn ingest(
     let new = NewEmission {
         data_source_id: Some(data_source_id),
         emitter_id: None,
-        session_id,
+        session_id: Some(session_id),
         observed_at: obs.observed_at,
         signal_strength: obs.signal_strength,
         location,
         location_quality: location_quality.as_str().to_string(),
         kind: obs.kind,
         payload: obs.payload,
+        sensor_id: ctx.node_sensor_id.clone(),
     };
 
     let mut emission = EmissionRepo::insert(&ctx.pool, new).await?;
@@ -690,6 +694,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let obs = wifi_obs("aa:bb:cc:dd:ee:ff", base);
@@ -720,6 +725,41 @@ mod tests {
         }
     }
 
+    /// Phase 5-A: every locally-captured emission is tagged with this node's
+    /// own `IngestCtx::node_sensor_id`, not a hardcoded `"local"` -- confirms
+    /// `ingest`'s `NewEmission { sensor_id: ctx.node_sensor_id.clone(), .. }`
+    /// wiring actually reaches the persisted `Emission`.
+    #[tokio::test]
+    async fn local_ingest_tags_node_sensor_id() {
+        let pool = fresh_pool().await;
+        let ds = seed_wifi_source(&pool).await;
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let fix = a_fix(base);
+        let (manager, provider) = session_with_fix(pool.clone(), fix.clone()).await;
+
+        let (events_tx, _events_rx) = broadcast::channel(8);
+        let ctx = IngestCtx {
+            pool: pool.clone(),
+            sessions: Some(Arc::new(manager)),
+            location: provider.clone(),
+            events: events_tx,
+            secret_key: [0x11u8; 32],
+            node_sensor_id: "base".to_string(),
+        };
+
+        let obs = wifi_obs("aa:bb:cc:dd:ee:ff", base);
+        let emission = ingest(&ctx, ds, obs).await.expect("ingest should succeed");
+
+        assert_eq!(emission.sensor_id, "base");
+
+        // Persisted, not just returned in-memory.
+        let got = EmissionRepo::get(&pool, emission.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.sensor_id, "base");
+    }
+
     /// Task 5: a fix that exists but is older than
     /// [`location::FRESH_FIX_MAX_AGE_SECONDS`] as of the observation's own
     /// `observed_at` must tag the emission `location_quality: "stale"` with
@@ -743,6 +783,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let obs = wifi_obs("aa:bb:cc:dd:ee:ff", base + ChronoDuration::seconds(30));
@@ -771,6 +812,7 @@ mod tests {
             location: Arc::new(LocationProvider::new()),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
@@ -817,6 +859,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let emission = ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", base))
@@ -897,6 +940,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let emission = ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", base))
@@ -962,6 +1006,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let emission = ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", base))
@@ -996,6 +1041,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let bssid = "aa:bb:cc:dd:ee:ff";
@@ -1061,6 +1107,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let bssid = "aa:bb:cc:dd:ee:ff";
@@ -1155,6 +1202,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         // First octet 0x3a has bit 0x02 set -> locally-administered/randomized.
@@ -1198,6 +1246,7 @@ mod tests {
                 location: provider.clone(),
                 events: events_tx,
                 secret_key: [0x11u8; 32],
+                node_sensor_id: "local".to_string(),
             };
 
             let emission = ingest(&ctx, ds, beacon_obs("11:22:33:44:55:66", "SomeNet", base))
@@ -1258,6 +1307,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let emission = ingest(&ctx, ds, beacon_obs(bssid, "HomeNet", base))
@@ -1299,6 +1349,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         // No `frame_type` at all -- classify_wifi's match falls through to
@@ -1374,6 +1425,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let obs = association_obs("3a:de:ad:be:ef:00", "aa:bb:cc:dd:ee:ff", "HomeNet", base);
@@ -1410,6 +1462,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let obs = association_obs("3a:de:ad:be:ef:00", "aa:bb:cc:dd:ee:ff", "HomeNet", base);
@@ -1437,6 +1490,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let obs = association_obs("3a:de:ad:be:ef:00", "aa:bb:cc:dd:ee:ff", "HomeNet", base);
@@ -1465,6 +1519,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let obs = RawObservation {
@@ -1509,6 +1564,7 @@ mod tests {
             location: provider.clone(),
             events: events_tx,
             secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
         };
 
         let first = ingest(

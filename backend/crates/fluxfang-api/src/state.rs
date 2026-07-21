@@ -133,24 +133,34 @@ impl AppState {
     /// [`AppState::with_capture`] instead, supplying a real key and/or a
     /// `MockCapturerFactory`.
     pub fn new(pool: PgPool) -> Self {
-        Self::with_capture(pool, PLACEHOLDER_SECRET_KEY, Arc::new(RealCapturerFactory))
+        Self::with_capture(
+            pool,
+            PLACEHOLDER_SECRET_KEY,
+            Arc::new(RealCapturerFactory),
+            "local".to_string(),
+        )
     }
 
     /// Full constructor: `secret_key` is the parsed 32-byte
-    /// `FLUXFANG_SECRET_KEY` (production) or a fixed test key (tests), and
+    /// `FLUXFANG_SECRET_KEY` (production) or a fixed test key (tests),
     /// `factory` is the `CapturerFactory` the `CaptureSupervisor` uses to
     /// build capturers on `start` — `RealCapturerFactory` in production,
-    /// `MockCapturerFactory` in `tests/data_sources.rs`.
+    /// `MockCapturerFactory` in `tests/data_sources.rs` — and
+    /// `node_sensor_id` is this node's own sensor id (from
+    /// `app_config.settings.node_sensor_id`, default `"local"`), threaded
+    /// into every `IngestCtx` the `CaptureSupervisor` builds.
     pub fn with_capture(
         pool: PgPool,
         secret_key: [u8; 32],
         factory: Arc<dyn CapturerFactory>,
+        node_sensor_id: String,
     ) -> Self {
         let (events_tx, _events_rx) = broadcast::channel::<Event>(EVENTS_CHANNEL_CAPACITY);
         let capture = Arc::new(CaptureSupervisor::new(
             pool.clone(),
             events_tx,
             secret_key,
+            node_sensor_id,
             factory,
         ));
         let sensor_listeners = Arc::new(SensorListenerManager::new(pool.clone()));

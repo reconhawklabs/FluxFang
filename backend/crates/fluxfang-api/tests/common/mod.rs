@@ -162,7 +162,7 @@ pub async fn test_app() -> Router {
 /// without threading a second connection through `AppState`.
 pub async fn test_app_with_factory(factory: Arc<dyn CapturerFactory>) -> (Router, PgPool) {
     let pool = fresh_pool().await;
-    let state = AppState::with_capture(pool.clone(), TEST_SECRET_KEY, factory);
+    let state = AppState::with_capture(pool.clone(), TEST_SECRET_KEY, factory, "local".to_string());
     (app(state), pool)
 }
 
@@ -174,7 +174,7 @@ pub async fn test_app_with_factory(factory: Arc<dyn CapturerFactory>) -> (Router
 /// process restart: the in-memory supervisor state resets while the DB
 /// persists.
 pub fn state_with_factory(pool: PgPool, factory: Arc<dyn CapturerFactory>) -> AppState {
-    AppState::with_capture(pool, TEST_SECRET_KEY, factory)
+    AppState::with_capture(pool, TEST_SECRET_KEY, factory, "local".to_string())
 }
 
 /// A fresh, schema-isolated, migrated pool — exposed so a test can hand the

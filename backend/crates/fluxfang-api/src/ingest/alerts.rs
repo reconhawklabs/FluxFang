@@ -304,7 +304,10 @@ mod tests {
     /// Open a fresh session and a `LocationProvider` pre-loaded with `fix`
     /// (what the pump would feed at runtime) -- identical rationale to
     /// `ingest::tests::session_with_fix`.
-    async fn session_with_fix(pool: PgPool, fix: GpsFix) -> (SessionManager, Arc<LocationProvider>) {
+    async fn session_with_fix(
+        pool: PgPool,
+        fix: GpsFix,
+    ) -> (SessionManager, Arc<LocationProvider>) {
         let manager = SessionManager::open(pool)
             .await
             .expect("open SessionManager");
@@ -350,6 +353,7 @@ mod tests {
             location,
             events: events_tx,
             secret_key: test_key(),
+            node_sensor_id: "local".to_string(),
         };
         (ctx, events_rx)
     }

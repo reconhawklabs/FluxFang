@@ -159,6 +159,7 @@ mod tests {
             location_quality: "none".to_string(),
             lon: None,
             lat: None,
+            sensor_id: "local".to_string(),
         }
     }
 
