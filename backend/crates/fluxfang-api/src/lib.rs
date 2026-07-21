@@ -61,6 +61,7 @@ pub mod middleware;
 pub mod notifications;
 pub mod notify;
 pub mod sensor_listener;
+pub mod sensors;
 pub mod state;
 pub mod system;
 #[cfg(test)]
@@ -103,6 +104,7 @@ pub fn app(state: AppState) -> Router {
         .merge(entities::protected_routes())
         .merge(gps_status::protected_routes())
         .merge(notifications::protected_routes())
+        .merge(sensors::protected_routes())
         .merge(system::protected_routes())
         .merge(ws::protected_routes())
         .merge(zones::protected_routes())

@@ -74,6 +74,7 @@ pub fn protected_routes() -> Router<AppState> {
         )
         .route("/api/data-sources/:id/start", post(start_data_source))
         .route("/api/data-sources/:id/stop", post(stop_data_source))
+        .route("/api/data-sources/:id/allow-sensors", post(allow_sensors))
 }
 
 #[derive(Debug, Deserialize)]
@@ -253,6 +254,20 @@ async fn stop_data_source(
         .await?
         .ok_or(ApiError::NotFound)?;
     Ok(Json(current))
+}
+
+async fn allow_sensors(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Some(source) = DataSourceRepo::get(&state.pool, id).await? else {
+        return Err(ApiError::NotFound);
+    };
+    if source.kind != "sensor" {
+        return Err(ApiError::BadRequest("not a sensor datasource".to_string()));
+    }
+    let remaining = state.sensor_listeners.open_enrollment_window(id).await.unwrap_or(0);
+    Ok(Json(serde_json::json!({ "remaining_secs": remaining })))
 }
 
 /// Small internal error type, same convention as `auth_routes::ApiError`:
