@@ -48,3 +48,18 @@ test('sensor shows only Dashboard, Data Sources, Emissions', async () => {
   expect(screen.queryByRole('link', { name: 'Entities' })).not.toBeInTheDocument();
   expect(screen.queryByRole('link', { name: 'Co-Travel' })).not.toBeInTheDocument();
 });
+
+test('standalone shows the Sensors nav item; sensor role does not', async () => {
+  renderShell({ role: 'standalone', node_sensor_id: 'local' });
+  expect(await screen.findByRole('link', { name: 'Sensors' })).toBeInTheDocument();
+});
+
+test('sensor role hides the Sensors nav item', async () => {
+  renderShell({ role: 'sensor', node_sensor_id: 'frontgate' });
+  // As with the narrowed-nav test above, the nav renders the full
+  // (standalone) item set while `useConfig`'s fetch is in flight, so wait
+  // for the sensor role to settle (Sensors disappearing) rather than a
+  // one-shot `queryByRole` that could observe the pre-load render.
+  await waitFor(() => expect(screen.queryByRole('link', { name: 'Sensors' })).not.toBeInTheDocument());
+  expect(screen.getByRole('link', { name: 'Dashboard' })).toBeInTheDocument();
+});

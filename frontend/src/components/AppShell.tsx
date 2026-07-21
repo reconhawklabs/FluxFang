@@ -15,6 +15,7 @@ const SENSOR_PATHS: ReadonlySet<string> = new Set(['/dashboard', '/data-sources'
 const NAV_ITEMS: ReadonlyArray<{ to: string; label: string }> = [
   { to: '/dashboard', label: 'Dashboard' },
   { to: '/data-sources', label: 'Data Sources' },
+  { to: '/sensors', label: 'Sensors' },
   { to: '/emissions', label: 'Emissions' },
   { to: '/emitters', label: 'Emitters' },
   { to: '/co-travel', label: 'Co-Travel' },

@@ -49,6 +49,7 @@ export const queryKeys = {
   notifications: ['notifications'] as const,
   aiAudit: ['aiAudit'] as const,
   gpsStatus: ['gpsStatus'] as const,
+  sensors: ['sensors'] as const,
   coTravel: ['coTravel'] as const,
   coTravelIgnored: ['coTravelIgnored'] as const,
   catalog: (kind: string) => ['catalog', kind] as const,

@@ -14,7 +14,13 @@
 //     `BAUD_RATES` (the backend's `ALLOWED_BAUD_RATES`)
 import { del, get, patch, post } from "./client";
 
-export type DataSourceKind = "wifi" | "gps" | "bluetooth" | "rtl_sdr";
+// "sensor" is not a kind the Add-Data-Source form creates directly — it's
+// the backend-managed listener datasource a distributed Sensor node
+// registers against (`fluxfang-api::data_sources`/`sensor_listener`,
+// `source.kind == "sensor"`). Included here so pages that read the general
+// datasource list (e.g. the Sensors page's "Allow new Sensors" gating) can
+// narrow on it without an unsound comparison.
+export type DataSourceKind = "wifi" | "gps" | "bluetooth" | "rtl_sdr" | "sensor";
 export type DataSourceMode = "monitor" | "scan" | "gpsd" | "serial" | "tpms" | "manual";
 export type DataSourceStatus = "stopped" | "starting" | "running" | "error";
 
