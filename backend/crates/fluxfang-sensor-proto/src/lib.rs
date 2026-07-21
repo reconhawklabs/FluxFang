@@ -5,9 +5,9 @@
 //! fingerprint. Consumed by the Standalone listener (enrollment/ingest) and
 //! the Sensor forwarder in later phases; nothing here does networking.
 
-// mod batch; // added in Task 2/3
+mod batch;
 mod error;
-// mod fingerprint; // added in Task 2/3
+mod fingerprint;
 mod key;
 mod seal;
 
@@ -20,8 +20,8 @@ pub const NONCE_LEN: usize = 24;
 /// config/API boundary (see [`encode_key`]/[`decode_key`]).
 pub type Key = [u8; KEY_LEN];
 
-// pub use batch::{open_batch, seal_batch, within_replay_window, SensorBatch, WireEmission}; // added in Task 2/3
+pub use batch::{open_batch, seal_batch, within_replay_window, SensorBatch, WireEmission};
 pub use error::ProtoError;
-// pub use fingerprint::fingerprint; // added in Task 2/3
+pub use fingerprint::fingerprint;
 pub use key::{decode_key, encode_key, generate_key};
 pub use seal::{open, seal};
