@@ -45,6 +45,7 @@ pub mod alert_rules;
 pub mod auth_routes;
 pub mod capture;
 pub mod catalog_routes;
+pub mod config_routes;
 pub mod correlate;
 pub mod cotravel;
 pub mod data_sources;
@@ -92,6 +93,7 @@ pub fn app(state: AppState) -> Router {
         .merge(alert_methods::protected_routes())
         .merge(alert_rules::protected_routes())
         .merge(catalog_routes::protected_routes())
+        .merge(config_routes::protected_routes())
         .merge(cotravel::protected_routes())
         .merge(data_sources::protected_routes())
         .merge(emissions::protected_routes())
