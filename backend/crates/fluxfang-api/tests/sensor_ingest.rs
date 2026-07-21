@@ -10,7 +10,15 @@ async fn free_port() -> u16 {
     p
 }
 
-async fn setup(auto_group: bool) -> (sqlx::PgPool, SensorListenerManager, uuid::Uuid, u16, fluxfang_sensor_proto::Key) {
+async fn setup(
+    auto_group: bool,
+) -> (
+    sqlx::PgPool,
+    SensorListenerManager,
+    uuid::Uuid,
+    u16,
+    fluxfang_sensor_proto::Key,
+) {
     let pool = common::fresh_pool_shared().await;
     let port = free_port().await;
     let ds = DataSourceRepo::insert(
@@ -314,6 +322,85 @@ async fn missing_sensor_id_header_is_rejected_with_400() {
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 400);
+
+    mgr.stop(ds_id).await;
+}
+
+/// A sensor that was approved and then revoked must be refused (403), same
+/// as a never-approved (pending) one -- confirms the non-approved gate covers
+/// `revoked` specifically, not just `pending`.
+#[tokio::test]
+async fn revoked_sensor_is_rejected_with_403() {
+    let (pool, mgr, ds_id, port, key) = setup(false).await;
+
+    let sensor = SensorRepo::get_by_sensor_id(&pool, ds_id, "frontgate")
+        .await
+        .unwrap()
+        .unwrap();
+    SensorRepo::set_status(&pool, sensor.id, "revoked", false)
+        .await
+        .unwrap();
+
+    let em_id = uuid::Uuid::new_v4();
+    let sealed = sealed_one_emission_batch(&key, em_id);
+    let url = format!("http://127.0.0.1:{port}/sensor/ingest");
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .header("X-Sensor-Id", "frontgate")
+        .body(sealed)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 403);
+
+    assert!(EmissionRepo::get(&pool, em_id).await.unwrap().is_none());
+
+    mgr.stop(ds_id).await;
+}
+
+/// An out-of-range coordinate (lat outside [-90,90]) must not fail the
+/// `::geography` insert -- the coordinate is dropped and the emission is
+/// stored with no location (`location_quality: "none"`) and still ACKed
+/// (200). If this instead errored, the handler would skip the ACK and an
+/// at-least-once forwarder would retry the emission forever.
+#[tokio::test]
+async fn out_of_range_coordinate_is_stored_without_location() {
+    let (pool, mgr, ds_id, port, key) = setup(false).await;
+
+    let em_id = uuid::Uuid::new_v4();
+    let batch = fluxfang_sensor_proto::SensorBatch {
+        sensor_id: "frontgate".into(),
+        sent_at_ms: chrono::Utc::now().timestamp_millis(),
+        emissions: vec![fluxfang_sensor_proto::WireEmission {
+            id: em_id,
+            kind: "wifi".into(),
+            signal_strength: Some(-40),
+            lat: Some(91.0), // invalid: outside [-90, 90]
+            lon: Some(0.0),
+            observed_at: chrono::Utc::now(),
+            payload: serde_json::json!({"bssid":"aa:bb:cc:dd:ee:ff"}),
+        }],
+    };
+    let sealed = fluxfang_sensor_proto::seal_batch(&key, &batch).unwrap();
+    let url = format!("http://127.0.0.1:{port}/sensor/ingest");
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .header("X-Sensor-Id", "frontgate")
+        .body(sealed)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let j: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(j["accepted"].as_array().unwrap().len(), 1);
+
+    let em = EmissionRepo::get(&pool, em_id)
+        .await
+        .unwrap()
+        .expect("emission must still be stored, just without a location");
+    assert_eq!(em.lat, None);
+    assert_eq!(em.lon, None);
+    assert_eq!(em.location_quality, "none");
 
     mgr.stop(ds_id).await;
 }

@@ -261,22 +261,29 @@ pub(crate) async fn ingest_remote(
     auto_group: bool,
     em: fluxfang_sensor_proto::WireEmission,
 ) -> anyhow::Result<bool> {
+    // A WireEmission's coordinate is only trusted when BOTH lon/lat are
+    // present AND within PostGIS's valid geography range -- an out-of-range
+    // value (e.g. lat > 90) makes the `::geography` insert ERROR, which would
+    // make this whole fn return Err, the handler skip the ACK, and an
+    // at-least-once forwarder retry that emission forever. Dropping the
+    // coordinate (storing the emission with no location, "none" quality)
+    // instead still inserts and gets ACKed.
+    let coord = match (em.lon, em.lat) {
+        (Some(lon), Some(lat))
+            if (-180.0..=180.0).contains(&lon) && (-90.0..=90.0).contains(&lat) =>
+        {
+            Some((lon, lat))
+        }
+        _ => None,
+    };
     let new = NewEmission {
         data_source_id: Some(data_source_id),
         emitter_id: None,
         session_id: None,
         observed_at: em.observed_at,
         signal_strength: em.signal_strength,
-        location: match (em.lon, em.lat) {
-            (Some(lon), Some(lat)) => Some((lon, lat)),
-            _ => None,
-        },
-        location_quality: if em.lat.is_some() && em.lon.is_some() {
-            "fresh"
-        } else {
-            "none"
-        }
-        .to_string(),
+        location: coord,
+        location_quality: if coord.is_some() { "fresh" } else { "none" }.to_string(),
         kind: em.kind,
         payload: em.payload,
         sensor_id: sensor_id.to_string(),
