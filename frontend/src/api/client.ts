@@ -111,6 +111,15 @@ export type NodeRole = 'standalone' | 'sensor';
 export interface AppConfig {
   role: NodeRole;
   node_sensor_id: string;
+  sensor?: { host: string; port: number; cache_ttl_secs: number } | null;
+}
+
+/** `PATCH /api/config` partial body — omitted fields keep their stored value;
+ * an omitted `sensor.key` keeps the current key (the key is never returned). */
+export interface ConfigPatch {
+  node_sensor_id?: string;
+  role?: NodeRole;
+  sensor?: { host?: string; port?: number; key?: string; cache_ttl_secs?: number };
 }
 
 /** A sensor node's connection block, sent only when `role === 'sensor'`. */
@@ -134,6 +143,7 @@ export const api = {
   setupStatus: (): Promise<SetupStatus> => get<SetupStatus>('/api/setup/status'),
   setup: (req: SetupRequest): Promise<void> => post<void>('/api/setup', req),
   config: (): Promise<AppConfig> => get<AppConfig>('/api/config'),
+  updateConfig: (patchBody: ConfigPatch): Promise<AppConfig> => patch<AppConfig>('/api/config', patchBody),
   login: (password: string): Promise<void> => post<void>('/api/login', { password }),
   logout: (): Promise<void> => post<void>('/api/logout'),
 };
