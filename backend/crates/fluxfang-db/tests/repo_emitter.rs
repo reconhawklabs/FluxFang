@@ -1581,13 +1581,14 @@ async fn list_auto_correlate_tpms_filters_by_type_and_data_source_config() {
         NewEmission {
             data_source_id: Some(auto_ds.id),
             emitter_id: Some(eligible.id),
-            session_id: session,
+            session_id: Some(session),
             observed_at: now,
             signal_strength: None,
             location: None,
             location_quality: "none".to_string(),
             kind: "tpms".to_string(),
             payload: serde_json::json!({}),
+            sensor_id: "local".to_string(),
         },
     )
     .await
@@ -1612,13 +1613,14 @@ async fn list_auto_correlate_tpms_filters_by_type_and_data_source_config() {
         NewEmission {
             data_source_id: Some(plain_ds.id),
             emitter_id: Some(non_auto.id),
-            session_id: session,
+            session_id: Some(session),
             observed_at: now,
             signal_strength: None,
             location: None,
             location_quality: "none".to_string(),
             kind: "tpms".to_string(),
             payload: serde_json::json!({}),
+            sensor_id: "local".to_string(),
         },
     )
     .await
@@ -1655,13 +1657,14 @@ async fn list_auto_correlate_tpms_filters_by_type_and_data_source_config() {
         NewEmission {
             data_source_id: Some(malformed_ds.id),
             emitter_id: Some(malformed.id),
-            session_id: session,
+            session_id: Some(session),
             observed_at: now,
             signal_strength: None,
             location: None,
             location_quality: "none".to_string(),
             kind: "tpms".to_string(),
             payload: serde_json::json!({}),
+            sensor_id: "local".to_string(),
         },
     )
     .await
@@ -1686,13 +1689,14 @@ async fn list_auto_correlate_tpms_filters_by_type_and_data_source_config() {
         NewEmission {
             data_source_id: Some(auto_ds.id),
             emitter_id: Some(stale.id),
-            session_id: session,
+            session_id: Some(session),
             observed_at: since - Duration::hours(1),
             signal_strength: None,
             location: None,
             location_quality: "none".to_string(),
             kind: "tpms".to_string(),
             payload: serde_json::json!({}),
+            sensor_id: "local".to_string(),
         },
     )
     .await
