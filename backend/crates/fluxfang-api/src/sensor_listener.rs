@@ -88,7 +88,80 @@ fn listener_router(state: EnrollState) -> Router {
             get(|| async { axum::http::StatusCode::OK }),
         )
         .route("/sensor/enroll", post(enroll))
+        .route("/sensor/ingest", post(ingest_handler))
         .with_state(state)
+}
+
+/// Replay-window skew tolerance for `POST /sensor/ingest` batches.
+const MAX_SKEW_MS: i64 = 300_000;
+
+/// `POST /sensor/ingest` — an approved sensor forwards an AEAD-sealed batch
+/// of emissions. A successful AEAD open under the claimed sensor's stored
+/// key IS the authentication (the `X-Sensor-Id` header is non-authoritative,
+/// only used to look up which key to try). Never panics on attacker input:
+/// the body is raw bytes, every fallible step returns early with an error
+/// response instead of unwrapping.
+async fn ingest_handler(
+    State(st): State<EnrollState>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    // 1. Identify the claimed sensor (non-authoritative header) + its key.
+    let Some(sensor_id) = headers.get("X-Sensor-Id").and_then(|v| v.to_str().ok()) else {
+        return (StatusCode::BAD_REQUEST, "missing X-Sensor-Id").into_response();
+    };
+    let sensor = match SensorRepo::get_by_sensor_id(&st.pool, st.data_source_id, sensor_id).await
+    {
+        Ok(Some(s)) if s.status == "approved" => s,
+        Ok(_) => return (StatusCode::FORBIDDEN, "unknown or unapproved sensor").into_response(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let Ok(key) = fluxfang_sensor_proto::decode_key(&sensor.key) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+
+    // 2. AEAD-open the batch (a successful open IS authentication).
+    let batch = match fluxfang_sensor_proto::open_batch(&key, &body) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::UNAUTHORIZED, "decrypt failed").into_response(),
+    };
+    // Body sensor_id must match the header/looked-up sensor.
+    if batch.sensor_id != sensor.sensor_id {
+        return (StatusCode::BAD_REQUEST, "sensor_id mismatch").into_response();
+    }
+    // 3. Replay window.
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    if !fluxfang_sensor_proto::within_replay_window(batch.sent_at_ms, now_ms, MAX_SKEW_MS) {
+        return (StatusCode::BAD_REQUEST, "stale batch").into_response();
+    }
+
+    // 4. Ingest each emission; dedup handled by insert_remote.
+    let mut accepted = Vec::new();
+    for em in batch.emissions {
+        let id = em.id;
+        match crate::ingest::ingest_remote(
+            &st.ingest,
+            st.data_source_id,
+            &sensor.sensor_id,
+            sensor.auto_group_emitters,
+            em,
+        )
+        .await
+        {
+            Ok(_) => accepted.push(id), // accept whether newly-inserted or a dup
+            Err(_) => { /* skip this one; keep going */ }
+        }
+    }
+    let _ = SensorRepo::touch_last_seen(&st.pool, sensor.id).await; // heartbeat
+
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "accepted": accepted })),
+    )
+        .into_response()
 }
 
 /// `POST /sensor/enroll` — a sensor self-registers `{sensor_id, key}` during

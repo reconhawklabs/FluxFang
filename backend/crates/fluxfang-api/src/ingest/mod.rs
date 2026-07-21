@@ -250,6 +250,49 @@ pub async fn ingest(
     Ok(emission)
 }
 
+/// Ingest one remote emission from an approved sensor: insert with the
+/// sensor-supplied id (deduped), tag `sensor_id`, use the sensor's location
+/// (`location_quality='fresh'`, no host GPS), then finalize per the sensor's
+/// grouping policy. Returns Ok(true) if newly inserted, Ok(false) if a dup.
+pub(crate) async fn ingest_remote(
+    ctx: &IngestCtx,
+    data_source_id: Uuid,
+    sensor_id: &str,
+    auto_group: bool,
+    em: fluxfang_sensor_proto::WireEmission,
+) -> anyhow::Result<bool> {
+    let new = NewEmission {
+        data_source_id: Some(data_source_id),
+        emitter_id: None,
+        session_id: None,
+        observed_at: em.observed_at,
+        signal_strength: em.signal_strength,
+        location: match (em.lon, em.lat) {
+            (Some(lon), Some(lat)) => Some((lon, lat)),
+            _ => None,
+        },
+        location_quality: if em.lat.is_some() && em.lon.is_some() {
+            "fresh"
+        } else {
+            "none"
+        }
+        .to_string(),
+        kind: em.kind,
+        payload: em.payload,
+        sensor_id: sensor_id.to_string(),
+    };
+    let Some(mut emission) = EmissionRepo::insert_remote(&ctx.pool, em.id, new).await? else {
+        return Ok(false); // duplicate — already ingested
+    };
+    let policy = if auto_group {
+        GroupingPolicy::RemoteGrouped
+    } else {
+        GroupingPolicy::RemoteStray
+    };
+    finalize_emission(ctx, data_source_id, &mut emission, policy).await?;
+    Ok(true)
+}
+
 /// How a just-inserted emission should be grouped into emitters.
 pub(crate) enum GroupingPolicy {
     /// Local capture: auto-attach to a matching emitter always; auto-create
