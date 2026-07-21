@@ -526,8 +526,45 @@ pub(crate) fn validate_data_source(
             }
             Ok(())
         }
+        "sensor" => {
+            if mode != "listener" {
+                return Err(format!(
+                    "sensor data sources must use mode 'listener', got '{mode}'"
+                ));
+            }
+            let bind_ip_ok = config
+                .get("bind_ip")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.parse::<std::net::IpAddr>().is_ok());
+            if !bind_ip_ok {
+                return Err(
+                    "sensor listener config requires a valid 'bind_ip' IP address".to_string(),
+                );
+            }
+            let port_ok = config
+                .get("bind_port")
+                .and_then(|v| v.as_u64())
+                .is_some_and(|p| p >= 1 && p <= u16::MAX as u64);
+            if !port_ok {
+                return Err(
+                    "sensor listener config requires a numeric 'bind_port' between 1 and 65535"
+                        .to_string(),
+                );
+            }
+            let window_ok = config
+                .get("enrollment_window_secs")
+                .and_then(|v| v.as_u64())
+                .is_some_and(|w| w > 0);
+            if !window_ok {
+                return Err(
+                    "sensor listener config requires a positive 'enrollment_window_secs'"
+                        .to_string(),
+                );
+            }
+            Ok(())
+        }
         other => Err(format!(
-            "unknown data source kind '{other}'; expected 'wifi', 'gps', 'bluetooth', or 'rtl_sdr'"
+            "unknown data source kind '{other}'; expected 'wifi', 'gps', 'bluetooth', 'rtl_sdr', or 'sensor'"
         )),
     }
 }
@@ -1156,6 +1193,52 @@ mod validate_data_source_tests {
     fn gps_manual_rejects_missing_coord() {
         let err = validate_data_source("gps", "manual", None, &json!({"lat": 37.7})).unwrap_err();
         assert!(err.contains("lon"), "message should mention lon: {err}");
+    }
+
+    #[test]
+    fn validate_sensor_listener_accepts_valid_config() {
+        let cfg = serde_json::json!({
+            "bind_ip": "0.0.0.0", "bind_port": 9000, "enrollment_window_secs": 900
+        });
+        assert!(validate_data_source("sensor", "listener", None, &cfg).is_ok());
+    }
+
+    #[test]
+    fn validate_sensor_rejects_non_listener_mode() {
+        let cfg =
+            serde_json::json!({"bind_ip":"0.0.0.0","bind_port":9000,"enrollment_window_secs":900});
+        assert!(validate_data_source("sensor", "monitor", None, &cfg).is_err());
+    }
+
+    #[test]
+    fn validate_sensor_rejects_bad_ip_port_window() {
+        // bad ip
+        assert!(validate_data_source("sensor", "listener", None,
+            &serde_json::json!({"bind_ip":"not-an-ip","bind_port":9000,"enrollment_window_secs":900})).is_err());
+        // port 0
+        assert!(validate_data_source(
+            "sensor",
+            "listener",
+            None,
+            &serde_json::json!({"bind_ip":"0.0.0.0","bind_port":0,"enrollment_window_secs":900})
+        )
+        .is_err());
+        // window 0
+        assert!(validate_data_source(
+            "sensor",
+            "listener",
+            None,
+            &serde_json::json!({"bind_ip":"0.0.0.0","bind_port":9000,"enrollment_window_secs":0})
+        )
+        .is_err());
+        // missing bind_ip
+        assert!(validate_data_source(
+            "sensor",
+            "listener",
+            None,
+            &serde_json::json!({"bind_port":9000,"enrollment_window_secs":900})
+        )
+        .is_err());
     }
 }
 
