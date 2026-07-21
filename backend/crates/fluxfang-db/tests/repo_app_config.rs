@@ -155,3 +155,44 @@ async fn node_config_returns_stored_config_after_complete_setup() {
 
     assert_eq!(AppConfigRepo::node_config(&pool).await.unwrap(), Some(node));
 }
+
+#[tokio::test]
+async fn set_node_config_overwrites_settings() {
+    let pool = common::fresh_pool().await;
+    // A row must exist first (settings starts '{}'); complete_setup creates it.
+    let node0 = fluxfang_db::node_config::NodeConfig {
+        role: fluxfang_db::NodeRole::Standalone,
+        node_sensor_id: "local".into(),
+        sensor: None,
+    };
+    fluxfang_db::AppConfigRepo::complete_setup(&pool, "hash", &node0)
+        .await
+        .unwrap();
+
+    let node1 = fluxfang_db::node_config::NodeConfig {
+        role: fluxfang_db::NodeRole::Sensor,
+        node_sensor_id: "frontgate".into(),
+        sensor: Some(fluxfang_db::node_config::SensorConfig {
+            host: "base".into(),
+            port: 9000,
+            key: "a2V5".into(),
+            cache_ttl_secs: 3600,
+        }),
+    };
+    fluxfang_db::AppConfigRepo::set_node_config(&pool, &node1)
+        .await
+        .unwrap();
+    let got = fluxfang_db::AppConfigRepo::node_config(&pool)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got, node1);
+    // password_hash must be UNTOUCHED by a settings update.
+    assert_eq!(
+        fluxfang_db::AppConfigRepo::password_hash(&pool)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("hash")
+    );
+}

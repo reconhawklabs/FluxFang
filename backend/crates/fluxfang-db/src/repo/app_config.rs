@@ -136,4 +136,17 @@ impl AppConfigRepo {
         .fetch_optional(pool)
         .await
     }
+
+    /// Overwrite the node-role config (settings jsonb) without touching the
+    /// password hash — the post-setup "edit settings" path. Requires the
+    /// singleton row to already exist (setup completed).
+    pub async fn set_node_config(pool: &PgPool, node: &crate::node_config::NodeConfig) -> Result<(), sqlx::Error> {
+        let settings = serde_json::to_value(node).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
+        sqlx::query("UPDATE app_config SET settings = $2 WHERE id = $1")
+            .bind(SINGLETON_ID)
+            .bind(settings)
+            .execute(pool)
+            .await
+            .map(|_| ())
+    }
 }

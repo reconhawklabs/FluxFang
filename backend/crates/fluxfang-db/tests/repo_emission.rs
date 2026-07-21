@@ -858,3 +858,23 @@ async fn insert_remote_is_idempotent_by_id() {
     let dup = fluxfang_db::EmissionRepo::insert_remote(&pool, id, mk()).await.unwrap();
     assert!(dup.is_none(), "second insert with the same id is a no-op (deduped)");
 }
+
+#[tokio::test]
+async fn counts_by_sensor_since_groups_by_sensor_id() {
+    let pool = common::fresh_pool().await;
+    let ds = fluxfang_db::DataSourceRepo::insert(&pool, fluxfang_db::NewDataSource::wifi_monitor("wlan0")).await.unwrap();
+    let mk = |sensor: &str| fluxfang_db::models::NewEmission {
+        data_source_id: Some(ds.id), emitter_id: None, session_id: None,
+        observed_at: chrono::Utc::now(), signal_strength: None, location: None,
+        location_quality: "none".into(), kind: "wifi".into(), payload: serde_json::json!({}),
+        sensor_id: sensor.into(),
+    };
+    fluxfang_db::EmissionRepo::insert(&pool, mk("frontgate")).await.unwrap();
+    fluxfang_db::EmissionRepo::insert(&pool, mk("frontgate")).await.unwrap();
+    fluxfang_db::EmissionRepo::insert(&pool, mk("backlot")).await.unwrap();
+
+    let since = chrono::Utc::now() - chrono::Duration::hours(24);
+    let mut counts = fluxfang_db::EmissionRepo::counts_by_sensor_since(&pool, since).await.unwrap();
+    counts.sort();
+    assert_eq!(counts, vec![("backlot".to_string(), 1), ("frontgate".to_string(), 2)]);
+}
