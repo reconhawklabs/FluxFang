@@ -72,18 +72,32 @@ async fn main() {
         // TTL. Sensor nodes don't run their own sensor listeners or TPMS
         // correlation — that's the Standalone's job once it receives the
         // forwarded emissions.
-        if let Some(sensor_cfg) = node.as_ref().and_then(|n| n.sensor.clone()) {
-            match fluxfang_api::forwarder::SensorForwarder::new(
+        //
+        // Review fix (Phase 4-A): the pruner must run even when sensor
+        // config is absent/invalid, or `cached_emission` grows unbounded
+        // with no forwarder able to drain it. Only the forwarder is
+        // conditional on config; the pruner always runs, falling back to a
+        // 7-day default TTL when there's no configured `cache_ttl_secs`.
+        let sensor_cfg = node.as_ref().and_then(|n| n.sensor.clone());
+        let ttl = sensor_cfg
+            .as_ref()
+            .map(|c| c.cache_ttl_secs)
+            .unwrap_or(604_800);
+        fluxfang_api::forwarder::spawn_pruner(pool.clone(), ttl);
+        match sensor_cfg {
+            Some(cfg) => match fluxfang_api::forwarder::SensorForwarder::new(
                 pool.clone(),
-                &sensor_cfg,
+                &cfg,
                 node_sensor_id.clone(),
             ) {
                 Ok(fwd) => fluxfang_api::forwarder::spawn_forwarder(fwd),
                 Err(e) => eprintln!("SensorForwarder disabled: {e}"),
+            },
+            None => {
+                eprintln!(
+                    "sensor role but no sensor config — forwarder disabled (pruner still running)"
+                )
             }
-            fluxfang_api::forwarder::spawn_pruner(pool.clone(), sensor_cfg.cache_ttl_secs);
-        } else {
-            eprintln!("sensor role but no sensor config — forwarder disabled");
         }
     } else {
         // Standalone node: rebind any sensor listeners the user left running
@@ -102,11 +116,8 @@ async fn main() {
             let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 ticker.tick().await;
-                match fluxfang_api::correlate::run_correlation_pass(
-                    &corr_pool,
-                    chrono::Utc::now(),
-                )
-                .await
+                match fluxfang_api::correlate::run_correlation_pass(&corr_pool, chrono::Utc::now())
+                    .await
                 {
                     Ok(n) if n > 0 => eprintln!("TPMS correlation: added {n} association(s)"),
                     Ok(_) => {}

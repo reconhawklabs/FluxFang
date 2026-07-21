@@ -695,7 +695,13 @@ impl CaptureSupervisor {
         Arc::new(move |fix: GpsFix| {
             let ctx = ctx.clone();
             Box::pin(async move {
-                update_host_zones(&ctx, &fix).await;
+                // On a Sensor node (`sensor_mode`), full zone/alert analysis
+                // never runs locally -- per spec §7 that's a Standalone-only
+                // concern. Mirrors the `ingest`-vs-`cache_observation`
+                // branch in `start_wifi`'s reader task above.
+                if !ctx.sensor_mode {
+                    update_host_zones(&ctx, &fix).await;
+                }
             })
         })
     }
@@ -1350,6 +1356,118 @@ mod reconcile_tests {
         assert_eq!(
             after.status, "running",
             "reconcile_once should (re)start a desired-running source that isn't running"
+        );
+    }
+}
+
+#[cfg(test)]
+mod host_zone_hook_tests {
+    use std::sync::Arc;
+
+    use chrono::{TimeZone, Utc};
+    use fluxfang_db::models::NewZone;
+    use fluxfang_db::{ZoneMembershipRepo, ZoneRepo};
+    use tokio::sync::broadcast;
+
+    use super::{CaptureSupervisor, GpsFix, MockCapturerFactory};
+    use crate::test_support::fresh_pool;
+
+    /// Zone center: roughly downtown San Francisco (arbitrary -- just needs
+    /// to match the fix below).
+    const CENTER: (f64, f64) = (-122.4194, 37.7749);
+    const RADIUS_M: f64 = 1000.0;
+
+    async fn seed_zone(pool: &sqlx::PgPool) -> uuid::Uuid {
+        ZoneRepo::insert(
+            pool,
+            NewZone {
+                name: "host_zone_hook_tests zone".to_string(),
+                center: CENTER,
+                radius_m: RADIUS_M,
+                notes: None,
+            },
+        )
+        .await
+        .unwrap()
+        .id
+    }
+
+    fn inside_fix(at: chrono::DateTime<Utc>) -> GpsFix {
+        GpsFix {
+            at,
+            lon: CENTER.0,
+            lat: CENTER.1,
+            altitude: None,
+            speed: None,
+            heading: None,
+            quality: 1,
+        }
+    }
+
+    fn supervisor(pool: sqlx::PgPool, sensor_mode: bool) -> CaptureSupervisor {
+        let (events_tx, _events_rx) = broadcast::channel(8);
+        CaptureSupervisor::new(
+            pool,
+            events_tx,
+            [0u8; 32],
+            "local".to_string(),
+            sensor_mode,
+            Arc::new(MockCapturerFactory::new()),
+        )
+    }
+
+    /// Phase 4-A review fix: a Sensor node's `host_zone_hook` must not run
+    /// zone/alert analysis locally -- per spec §7, full analysis (zone
+    /// membership transitions + alert firing) is a Standalone-only concern.
+    /// Builds the hook directly off a `sensor_mode: true` supervisor and
+    /// feeds it a fix squarely inside a seeded zone; the guard must suppress
+    /// `update_host_zones` entirely, so no `zone_membership` row for the
+    /// `host`/zone pair is ever created.
+    #[tokio::test]
+    async fn sensor_mode_hook_does_not_run_host_zone_analysis() {
+        let pool = fresh_pool().await;
+        let zone_id = seed_zone(&pool).await;
+        let sup = supervisor(pool.clone(), true);
+
+        let hook = sup.host_zone_hook();
+        hook(inside_fix(
+            Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+        ))
+        .await;
+
+        let membership = ZoneMembershipRepo::get(&pool, "host", None, zone_id)
+            .await
+            .unwrap();
+        assert!(
+            membership.is_none(),
+            "sensor_mode must suppress update_host_zones -- no zone_membership row should \
+             have been created"
+        );
+    }
+
+    /// Standalone control for the fix above: the same hook, off a
+    /// `sensor_mode: false` supervisor, must still run the analysis --
+    /// proves the new guard doesn't regress existing Standalone behavior
+    /// (mirrors `zones::tests::host_enters_and_leaves_zone_fire_once_each_via_update_host_zones`,
+    /// but exercised through the actual `host_zone_hook` production path).
+    #[tokio::test]
+    async fn standalone_mode_hook_still_runs_host_zone_analysis() {
+        let pool = fresh_pool().await;
+        let zone_id = seed_zone(&pool).await;
+        let sup = supervisor(pool.clone(), false);
+
+        let hook = sup.host_zone_hook();
+        hook(inside_fix(
+            Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+        ))
+        .await;
+
+        let membership = ZoneMembershipRepo::get(&pool, "host", None, zone_id)
+            .await
+            .unwrap();
+        assert!(
+            membership.is_some(),
+            "standalone mode (sensor_mode: false) must still run update_host_zones"
         );
     }
 }
