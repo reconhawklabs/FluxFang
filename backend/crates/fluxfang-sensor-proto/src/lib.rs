@@ -9,7 +9,7 @@
 mod error;
 // mod fingerprint; // added in Task 2/3
 mod key;
-// mod seal; // added in Task 2/3
+mod seal;
 
 /// Symmetric key length in bytes (XChaCha20-Poly1305 uses a 256-bit key).
 pub const KEY_LEN: usize = 32;
@@ -24,4 +24,4 @@ pub type Key = [u8; KEY_LEN];
 pub use error::ProtoError;
 // pub use fingerprint::fingerprint; // added in Task 2/3
 pub use key::{decode_key, encode_key, generate_key};
-// pub use seal::{open, seal}; // added in Task 2/3
+pub use seal::{open, seal};
