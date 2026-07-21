@@ -60,6 +60,7 @@ pub mod mcp;
 pub mod middleware;
 pub mod notifications;
 pub mod notify;
+pub mod sensor_listener;
 pub mod state;
 pub mod system;
 #[cfg(test)]

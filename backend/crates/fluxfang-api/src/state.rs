@@ -10,6 +10,7 @@ use tokio::sync::broadcast;
 
 use crate::capture::{CaptureSupervisor, CapturerFactory, RealCapturerFactory};
 use crate::ingest::Event;
+use crate::sensor_listener::SensorListenerManager;
 
 /// How many failed `/api/login` attempts are tolerated inside
 /// [`LOGIN_RATE_LIMIT_WINDOW`] before further attempts get `429 Too Many
@@ -107,6 +108,11 @@ pub struct AppState {
     /// Task 6.2's data-source start/stop orchestrator. See `crate::capture`
     /// module docs for the full design.
     pub capture: Arc<CaptureSupervisor>,
+    /// Phase 2B's `sensor`-kind datasource orchestrator: binds/tears-down a
+    /// dedicated network listener per enabled sensor datasource, mirroring
+    /// `capture`'s role for `wifi`/`gps`/`bluetooth`/`rtl_sdr` kinds. See
+    /// `crate::sensor_listener` module docs.
+    pub sensor_listeners: Arc<SensorListenerManager>,
     /// AES-256-GCM key used to encrypt/decrypt `alert_method.config_encrypted`
     /// (Task 6.6). The same 32 bytes handed to `CaptureSupervisor`/`IngestCtx`
     /// for alert dispatch during ingest — duplicated here (rather than routed
@@ -147,10 +153,12 @@ impl AppState {
             secret_key,
             factory,
         ));
+        let sensor_listeners = Arc::new(SensorListenerManager::new(pool.clone()));
         Self {
             pool,
             login_limiter: Arc::new(LoginLimiter::default()),
             capture,
+            sensor_listeners,
             secret_key,
         }
     }

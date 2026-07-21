@@ -44,6 +44,13 @@ async fn main() {
         startup.capture.resume_running().await;
     });
 
+    // Rebind any sensor listeners the user left running (mirrors the capture
+    // supervisor's resume_running for capture datasources).
+    let startup_listeners = state.clone();
+    tokio::spawn(async move {
+        startup_listeners.sensor_listeners.resume_running().await;
+    });
+
     // Periodic TPMS correlation pass (Spec B). Runs every minute; a pass is a
     // no-op unless some tpms_sensor emitter belongs to an auto-correlate data
     // source. Errors are logged, never fatal.

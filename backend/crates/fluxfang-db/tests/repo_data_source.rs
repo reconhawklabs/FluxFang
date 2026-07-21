@@ -119,6 +119,46 @@ async fn set_status_updates_status_and_last_error() {
 }
 
 #[tokio::test]
+async fn sensor_listener_datasource_can_be_inserted() {
+    let pool = fresh_pool().await;
+    let src = DataSourceRepo::insert(
+        &pool,
+        NewDataSource {
+            kind: "sensor".to_string(),
+            mode: "listener".to_string(),
+            interface: None,
+            config: serde_json::json!({
+                "bind_ip": "0.0.0.0", "bind_port": 9000, "enrollment_window_secs": 900
+            }),
+        },
+    )
+    .await
+    .expect("insert sensor listener datasource");
+    assert_eq!(src.kind, "sensor");
+    assert_eq!(src.mode, "listener");
+    assert_eq!(src.status, "stopped");
+}
+
+#[tokio::test]
+async fn sensor_datasource_rejects_non_listener_mode() {
+    let pool = fresh_pool().await;
+    let err = DataSourceRepo::insert(
+        &pool,
+        NewDataSource {
+            kind: "sensor".to_string(),
+            mode: "monitor".to_string(),
+            interface: None,
+            config: serde_json::json!({}),
+        },
+    )
+    .await;
+    assert!(
+        err.is_err(),
+        "sensor kind must reject non-listener mode via CHECK constraint"
+    );
+}
+
+#[tokio::test]
 async fn delete_removes_the_row() {
     let pool = fresh_pool().await;
     let inserted = DataSourceRepo::insert(&pool, NewDataSource::wifi_monitor("wlan0"))
