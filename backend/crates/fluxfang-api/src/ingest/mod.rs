@@ -246,53 +246,85 @@ pub async fn ingest(
     };
 
     let mut emission = EmissionRepo::insert(&ctx.pool, new).await?;
+    finalize_emission(ctx, data_source_id, &mut emission, GroupingPolicy::Local).await?;
+    Ok(emission)
+}
 
-    // Auto-attach: first match wins, in EmitterRepo::list's created_at ASC
-    // order (see module docs). match_enabled == false emitters are skipped
-    // outright (Phase A4) -- not even parsed/evaluated.
-    let emitters = EmitterRepo::list(&ctx.pool).await?;
-    for emitter in emitters {
-        if !emitter.match_enabled {
-            continue;
+/// How a just-inserted emission should be grouped into emitters.
+pub(crate) enum GroupingPolicy {
+    /// Local capture: auto-attach to a matching emitter always; auto-create
+    /// only if the data_source's `config.auto_create_emitters` is set.
+    Local,
+    /// Remote sensor with `auto_group_emitters=true`: attach; else create
+    /// unconditionally (the sensor's flag IS the gate, not the datasource).
+    RemoteGrouped,
+    /// Remote sensor with `auto_group_emitters=false`: no attach, no create --
+    /// the emission is a stray. Alerts/zones/broadcast still run.
+    RemoteStray,
+}
+
+/// Shared post-insert pipeline for both local and remote emissions: auto-
+/// attach/auto-create (gated by `policy`), enrichment, alerts, zones, and
+/// broadcast. Extracted from [`ingest`] (Phase 5-A Task 3) so remote-sensor
+/// ingest paths can share this tail without duplicating it -- see
+/// [`GroupingPolicy`] for the per-policy behavior differences.
+pub(crate) async fn finalize_emission(
+    ctx: &IngestCtx,
+    data_source_id: Uuid,
+    emission: &mut Emission,
+    policy: GroupingPolicy,
+) -> anyhow::Result<()> {
+    let group = !matches!(policy, GroupingPolicy::RemoteStray);
+    if group {
+        // Auto-attach: first match wins, in EmitterRepo::list's created_at ASC
+        // order (see module docs). match_enabled == false emitters are skipped
+        // outright (Phase A4) -- not even parsed/evaluated.
+        let emitters = EmitterRepo::list(&ctx.pool).await?;
+        for emitter in emitters {
+            if !emitter.match_enabled {
+                continue;
+            }
+            let rule: Rule = match serde_json::from_value(emitter.match_criteria.clone()) {
+                Ok(rule) => rule,
+                // Malformed match_criteria: treat this emitter as non-matching
+                // rather than failing the whole ingest over one bad rule.
+                Err(_) => continue,
+            };
+            // `fluxfang_core::rule::eval` is pure, in-memory structural
+            // matching of a JSON payload against a `Rule`'s conditions -- it
+            // never parses or executes code (see that function's own doc
+            // comment's explicit NOTE). Not JS/Python `eval`.
+            if eval(&rule, &emission.payload) {
+                *emission = EmissionRepo::set_emitter(&ctx.pool, emission.id, emitter.id).await?;
+                EmitterRepo::touch_seen(&ctx.pool, emitter.id, emission.observed_at).await?;
+                break;
+            }
         }
-        let rule: Rule = match serde_json::from_value(emitter.match_criteria.clone()) {
-            Ok(rule) => rule,
-            // Malformed match_criteria: treat this emitter as non-matching
-            // rather than failing the whole ingest over one bad rule.
-            Err(_) => continue,
-        };
-        // `fluxfang_core::rule::eval` is pure, in-memory structural
-        // matching of a JSON payload against a `Rule`'s conditions -- it
-        // never parses or executes code (see that function's own doc
-        // comment's explicit NOTE). Not JS/Python `eval`.
-        if eval(&rule, &emission.payload) {
-            emission = EmissionRepo::set_emitter(&ctx.pool, emission.id, emitter.id).await?;
-            EmitterRepo::touch_seen(&ctx.pool, emitter.id, emission.observed_at).await?;
-            break;
+
+        // Auto-create (Phase A4): only if auto-attach above left the emission
+        // unassigned. Self-contained (see auto_create_emitter's doc comment) --
+        // never fails ingest itself.
+        if emission.emitter_id.is_none() {
+            let force = matches!(policy, GroupingPolicy::RemoteGrouped);
+            auto_create_emitter(ctx, data_source_id, emission, force).await;
         }
+
+        // Wifi-association enrichment: if this is a client association frame
+        // that attached to a wifi_client emitter, record the AP it connected
+        // to on that emitter (latest-wins). Self-contained, like alerts/zones
+        // below.
+        maybe_enrich_connected_ap(ctx, emission).await;
+        maybe_enrich_ap_security(ctx, emission).await;
     }
 
-    // Auto-create (Phase A4): only if auto-attach above left the emission
-    // unassigned. Self-contained (see auto_create_emitter's doc comment) --
-    // never fails ingest itself.
-    if emission.emitter_id.is_none() {
-        auto_create_emitter(ctx, data_source_id, &mut emission).await;
-    }
-
-    // Wifi-association enrichment: if this is a client association frame that
-    // attached to a wifi_client emitter, record the AP it connected to on that
-    // emitter (latest-wins). Self-contained, like alerts/zones below.
-    maybe_enrich_connected_ap(ctx, &emission).await;
-    maybe_enrich_ap_security(ctx, &emission).await;
-
-    alerts::evaluate_alerts(ctx, &emission).await;
-    zones::update_target_zones(ctx, &emission).await;
+    alerts::evaluate_alerts(ctx, emission).await;
+    zones::update_target_zones(ctx, emission).await;
 
     // No subscribers is a normal, expected state (see doc comment above) --
     // deliberately not propagated as an ingest failure.
     let _ = ctx.events.send(Event::Emission(emission.clone()));
 
-    Ok(emission)
+    Ok(())
 }
 
 /// Phase A4's auto-create: classify `emission`'s payload and, if the
@@ -354,15 +386,21 @@ pub async fn ingest(
 /// `zones::update_target_zones` -- a DB hiccup here must leave the emission
 /// exactly as auto-attach left it (persisted, unassigned), never fail
 /// `ingest` itself or drop the emission.
-async fn auto_create_emitter(ctx: &IngestCtx, data_source_id: Uuid, emission: &mut Emission) {
+async fn auto_create_emitter(
+    ctx: &IngestCtx,
+    data_source_id: Uuid,
+    emission: &mut Emission,
+    force: bool,
+) {
     let Ok(Some(data_source)) = DataSourceRepo::get(&ctx.pool, data_source_id).await else {
         return;
     };
-    let auto_create_enabled = data_source
-        .config
-        .get("auto_create_emitters")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+    let auto_create_enabled = force
+        || data_source
+            .config
+            .get("auto_create_emitters")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
     if !auto_create_enabled {
         return;
     }
