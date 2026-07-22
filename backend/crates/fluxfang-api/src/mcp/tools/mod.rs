@@ -41,6 +41,30 @@ impl From<sqlx::Error> for ToolError {
 }
 
 /// Every registered tool's schema, for `tools/list`. Grows in Phase 3.
+/// JSON-Schema fragment for the shared `mac_persistence` filter argument.
+///
+/// The `enum` is generated from
+/// `fluxfang_core::classify::PERSISTENCE_FILTER_TOKENS`, so the tool schema
+/// can't drift from what the parser actually accepts. The description
+/// spells out the badge-vs-class distinction because it's the one part a
+/// model reliably gets wrong: `randomized` is the *short-lived* bucket, not
+/// "any randomized address".
+fn mac_persistence_schema() -> Value {
+    json!({
+        "type": "string",
+        "enum": fluxfang_core::classify::PERSISTENCE_FILTER_TOKENS,
+        "description": "Filter by how long the emitter's address persists. \
+            'randomized' = short-lived only (ephemeral + unlinkable: Wi-Fi probe MACs, BLE \
+            resolvable private addresses, rotating every few minutes). \
+            'randomized-longterm' = randomized but trackable (per_network + session: Wi-Fi \
+            association MACs that persist per-SSID for months, BLE static-random addresses \
+            that persist until the device reboots). \
+            Or name one exact class: stable, per_network, session, ephemeral, unlinkable. \
+            Note 'randomized' does NOT mean 'any randomized address' -- for that, query both \
+            badges."
+    })
+}
+
 pub fn tool_list() -> Vec<ToolSchema> {
     vec![
         ToolSchema {
@@ -64,10 +88,12 @@ pub fn tool_list() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "list_emissions",
-            description: "List emissions with full raw payload + signal. Filter by emitter_id, kind, time_from/time_to, text.",
+            description: "List emissions with full raw payload + signal. Filter by emitter_id, kind, time_from/time_to, text, mac_persistence.",
             input_schema: json!({"type":"object","properties":{
                 "emitter_id":{"type":"string"},"kind":{"type":"string"},"time_from":{"type":"string"},
-                "time_to":{"type":"string"},"text":{"type":"string"},"limit":{"type":"integer"},"offset":{"type":"integer"}}}),
+                "time_to":{"type":"string"},"text":{"type":"string"},
+                "mac_persistence":mac_persistence_schema(),
+                "limit":{"type":"integer"},"offset":{"type":"integer"}}}),
         },
         ToolSchema {
             name: "get_emission",
@@ -76,9 +102,10 @@ pub fn tool_list() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "list_emitters",
-            description: "List emitters with attributes/identity/match rule; filter by search, entity_id, emitter_type.",
+            description: "List emitters with attributes/identity/match rule; filter by search, entity_id, emitter_type, mac_persistence.",
             input_schema: json!({"type":"object","properties":{
                 "search":{"type":"string"},"entity_id":{"type":"string"},"emitter_type":{"type":"string"},
+                "mac_persistence":mac_persistence_schema(),
                 "limit":{"type":"integer"},"offset":{"type":"integer"}}}),
         },
         ToolSchema {

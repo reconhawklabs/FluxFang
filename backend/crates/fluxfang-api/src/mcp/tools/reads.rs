@@ -22,9 +22,24 @@ pub async fn list_entities(pool: &PgPool, args: Value) -> Result<Value, ToolErro
     }))
 }
 
+/// Expand an optional `mac_persistence` tool argument into the emitter
+/// attribute values it selects, or `None` when the argument is absent.
+/// Rejects an unrecognized token with the same message the REST filter
+/// uses, so the model gets told the allowed set instead of silently
+/// receiving an empty list.
+fn mac_persistence_arg(args: &Value) -> Result<Option<Vec<String>>, ToolError> {
+    match args.get("mac_persistence").and_then(Value::as_str) {
+        Some(token) => crate::emissions::parse_mac_persistence(token)
+            .map(Some)
+            .map_err(ToolError::InvalidParams),
+        None => Ok(None),
+    }
+}
+
 fn emission_filter(args: &Value, unassigned: bool) -> Result<EmissionFilter, ToolError> {
     Ok(EmissionFilter {
         unassigned,
+        mac_persistence: mac_persistence_arg(args)?,
         emitter_id: match args.get("emitter_id").and_then(Value::as_str) {
             Some(_) => Some(shape::parse_uuid(args, "emitter_id")?),
             None => None,
@@ -73,6 +88,7 @@ pub async fn list_emitters(pool: &PgPool, args: Value) -> Result<Value, ToolErro
             None => None,
         },
         emitter_type: shape::opt_str(&args, "emitter_type"),
+        mac_persistence: mac_persistence_arg(&args)?,
         limit: shape::clamp_limit(&args),
         offset: shape::offset(&args),
         ..Default::default()

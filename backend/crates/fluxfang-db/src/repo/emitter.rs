@@ -157,6 +157,14 @@ pub struct EmitterListFilter {
     pub search: Option<String>,
     pub entity_id: Option<Uuid>,
     pub emitter_type: Option<String>,
+    /// MAC persistence classes to include, already expanded from the
+    /// caller's filter token by
+    /// `fluxfang_core::classify::persistence_filter_classes` (so
+    /// `"randomized"` arrives here as `["ephemeral", "unlinkable"]`).
+    /// Matches `attributes->>'mac_persistence'`; emitters classified before
+    /// this attribute existed, and types that never carry one (TPMS), have
+    /// a NULL there and so match no filter value.
+    pub mac_persistence: Option<Vec<String>>,
     pub field_conditions: Vec<Condition>,
     pub match_mode: MatchMode,
     pub limit: i64,
@@ -171,6 +179,7 @@ impl Default for EmitterListFilter {
             search: None,
             entity_id: None,
             emitter_type: None,
+            mac_persistence: None,
             field_conditions: Vec::new(),
             match_mode: MatchMode::All,
             limit: 50,
@@ -551,6 +560,15 @@ impl EmitterRepo {
             clauses.push(format!("emitter_type = ${next_bind}"));
             next_bind += 1;
         }
+        if filter.mac_persistence.is_some() {
+            // The classes are an allow-listed, already-expanded set (see the
+            // field's docs), bound as a single text[] rather than
+            // interpolated.
+            clauses.push(format!(
+                "attributes->>'mac_persistence' = ANY(${next_bind})"
+            ));
+            next_bind += 1;
+        }
 
         // Attribute conditions over the `attributes` JSONB column, validated
         // against the selected emitter type's catalog. Translated *last* (like
@@ -597,6 +615,9 @@ impl EmitterRepo {
                 }
                 if let Some(ref emitter_type) = filter.emitter_type {
                     q = q.bind(emitter_type.clone());
+                }
+                if let Some(ref classes) = filter.mac_persistence {
+                    q = q.bind(classes.clone());
                 }
                 for v in &attr_binds {
                     let text = match v {
@@ -821,6 +842,54 @@ impl EmitterRepo {
     /// `WHERE` clause, no confirmation of its own (the caller/UI gates this
     /// with a confirm dialog). Every emission previously assigned to any
     /// emitter survives, just unassigned (`ON DELETE SET NULL`).
+    /// Delete ephemeral-class emitters that have gone unseen since
+    /// `cutoff`, together with their emissions. Returns how many emitters
+    /// were removed.
+    ///
+    /// An emitter is only eligible when **every** emission attached to it
+    /// came from a data source with `config.age_out_ephemeral = true`. A
+    /// single emission from a source that hasn't opted in protects the
+    /// whole emitter — age-out is destructive and irreversible, so it must
+    /// never reach data an operator didn't opt to discard. Emitters with no
+    /// emissions at all are likewise left alone: there is no source to have
+    /// consented on their behalf.
+    ///
+    /// `emission.emitter_id` is `ON DELETE SET NULL`, so the emissions are
+    /// deleted explicitly in the same statement rather than left behind as
+    /// unattributable stray rows. The data-modifying CTE always runs to
+    /// completion even though the outer query doesn't read it.
+    pub async fn age_out_ephemeral(
+        pool: &PgPool,
+        cutoff: DateTime<Utc>,
+    ) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            "WITH eligible AS (
+                 SELECT e.id
+                 FROM emitter e
+                 WHERE e.attributes->>'mac_persistence' = 'ephemeral'
+                   AND e.last_seen_at IS NOT NULL
+                   AND e.last_seen_at < $1
+                   AND EXISTS (SELECT 1 FROM emission em WHERE em.emitter_id = e.id)
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM emission em
+                       LEFT JOIN data_source ds ON ds.id = em.data_source_id
+                       WHERE em.emitter_id = e.id
+                         AND COALESCE(ds.config->'age_out_ephemeral', 'false'::jsonb)
+                             <> 'true'::jsonb
+                   )
+             ),
+             deleted_emissions AS (
+                 DELETE FROM emission WHERE emitter_id IN (SELECT id FROM eligible)
+             )
+             DELETE FROM emitter WHERE id IN (SELECT id FROM eligible)",
+        )
+        .bind(cutoff)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn delete_all(pool: &PgPool) -> Result<u64, sqlx::Error> {
         let result = sqlx::query("DELETE FROM emitter").execute(pool).await?;
         Ok(result.rows_affected())

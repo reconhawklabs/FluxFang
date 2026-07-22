@@ -41,6 +41,7 @@
 
 pub mod ai_audit;
 pub mod alert_methods;
+pub mod ageout;
 pub mod alert_rules;
 pub mod auth_routes;
 pub mod capture;

@@ -189,7 +189,9 @@ test('add source: wifi kind with enumerated interfaces shows a Mode dropdown and
     kind: 'wifi',
     mode: 'scan',
     interface: 'wlan2',
-    config: { auto_create_emitters: false },
+    // `mac_retention_level` is omitted when left at the default "Store
+    // everything" — an absent key is what means "no filtering".
+    config: { auto_create_emitters: false, age_out_ephemeral: false },
   });
 });
 
@@ -239,7 +241,7 @@ test('add source: wifi kind — checking "Automatically create emitters" posts c
     kind: 'wifi',
     mode: 'monitor',
     interface: 'wlan0',
-    config: { auto_create_emitters: true },
+    config: { auto_create_emitters: true, age_out_ephemeral: false },
   });
 });
 
@@ -335,7 +337,7 @@ test('add source: bluetooth kind — picking an adapter and enabling Active Scan
     kind: 'bluetooth',
     mode: 'scan',
     interface: 'hci0',
-    config: { auto_create_emitters: false, active_scan: true },
+    config: { auto_create_emitters: false, active_scan: true, age_out_ephemeral: false },
   });
 });
 

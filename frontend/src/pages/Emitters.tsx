@@ -51,6 +51,7 @@ import { SortableTh, type SortDir } from "../components/SortableTh";
 import { useRowSelection } from "../hooks/useRowSelection";
 import type { Condition } from "../types/rule";
 import {
+  MAC_PERSISTENCE_FILTER_OPTIONS,
   MacIdentityCell,
   TypeBadge,
   formatCompact,
@@ -75,6 +76,10 @@ export default function Emitters() {
   const [q, setQ] = useState("");
   const [entityId, setEntityId] = useState("");
   const [emitterType, setEmitterType] = useState(ALL_TYPES_VALUE);
+  // MAC persistence filter — independent of `emitterType` (it reads an
+  // attribute every classified type carries), so unlike `conditions` it
+  // survives a type change.
+  const [macPersistence, setMacPersistence] = useState("");
   // Attribute conditions from the advanced filter builder below (Task 4),
   // scoped to whatever `emitterType` is currently selected — its fields are
   // type-specific, so a type change drops these (see
@@ -91,13 +96,24 @@ export default function Emitters() {
     if (trimmedQ.length > 0) params.search = trimmedQ;
     if (entityId.length > 0) params.entity_id = entityId;
     if (emitterType.length > 0) params.emitter_type = emitterType;
+    if (macPersistence.length > 0) params.mac_persistence = macPersistence;
     if (emitterType.length > 0 && conditions.length > 0) {
       params.cond = conditionsToCondParams(conditions);
     }
     params.sort = sortKey;
     params.dir = sortDir;
     return params;
-  }, [q, entityId, emitterType, conditions, limit, offset, sortKey, sortDir]);
+  }, [
+    q,
+    entityId,
+    emitterType,
+    macPersistence,
+    conditions,
+    limit,
+    offset,
+    sortKey,
+    sortDir,
+  ]);
 
   const emittersQuery = useQuery({
     queryKey: [...queryKeys.emitters, JSON.stringify(queryParams)],
@@ -296,6 +312,26 @@ export default function Emitters() {
           <option value={ALL_TYPES_VALUE}>All types</option>
           {typeOptions.map((option) => (
             <option key={option.key} value={option.key}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+        <label htmlFor="emitters-persistence-filter" className="sr-only">
+          Filter by MAC persistence
+        </label>
+        <select
+          id="emitters-persistence-filter"
+          aria-label="Filter by MAC persistence"
+          value={macPersistence}
+          onChange={(event) => {
+            setMacPersistence(event.target.value);
+            setOffset(0);
+          }}
+          className={selectClassName}
+        >
+          <option value="">All MAC types</option>
+          {MAC_PERSISTENCE_FILTER_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
               {option.label}
             </option>
           ))}

@@ -85,6 +85,12 @@ async fn main() {
             pool.clone(),
         ));
     } else {
+        // Standalone node: emitters only exist here (a Sensor caches raw
+        // observations and never classifies), so the ephemeral age-out
+        // sweep runs on this side. It no-ops until a data source opts in
+        // via `config.age_out_ephemeral`.
+        fluxfang_api::ageout::spawn_ageout(pool.clone());
+
         // Standalone node: rebind any sensor listeners the user left running
         // (mirrors the capture supervisor's resume_running for capture
         // datasources).

@@ -12,6 +12,7 @@ pub mod catalog;
 pub mod classify;
 pub mod correlate;
 pub mod cotravel;
+pub mod retention;
 pub mod rule;
 pub mod rule_sql;
 pub mod secrets;
@@ -20,10 +21,15 @@ pub use auth::{hash_password, verify_password};
 pub use bluetooth::{appearance_device_type, cod_device_type, company_name, oui_vendor};
 pub use catalog::{catalog_for, FieldDef, FieldType};
 pub use classify::{
-    catalog_kind_for, classify, emitter_category, emitter_type_label, emitter_types_for_kind,
-    is_known_emitter_type, is_randomized_mac, Classification, EmitterTypeInfo,
+    bluetooth_persistence, catalog_kind_for, classify, emitter_category, emitter_type_label,
+    emitter_types_for_kind, is_known_emitter_type, is_randomized_mac, wifi_persistence,
+    Classification, EmitterTypeInfo, MacPersistence,
 };
 pub use cotravel::{score as cotravel_score, CoTravelMetrics, CoTravelScore, Tier as CoTravelTier};
+pub use retention::{
+    from_config as mac_retention_from_config, supports_mac_retention, MacRetention,
+    AGE_OUT_AFTER_SECS,
+};
 pub use rule::{Condition, MatchMode, Op, Rule};
 pub use rule_sql::{conditions_to_sql, conditions_to_sql_checked, RuleSqlError};
 pub use secrets::{decrypt, encrypt, key_from_base64, SecretError};

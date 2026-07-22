@@ -90,6 +90,66 @@ export function isRandomizedMac(attributes: Record<string, unknown>): boolean {
   return attributes.randomized_mac === true;
 }
 
+/** The five MAC persistence classes the backend assigns
+ * (`fluxfang_core::classify::MacPersistence`), most- to least-persistent. */
+export const MAC_PERSISTENCE_CLASSES = [
+  "stable",
+  "per_network",
+  "session",
+  "ephemeral",
+  "unlinkable",
+] as const;
+
+export type MacPersistence = (typeof MAC_PERSISTENCE_CLASSES)[number];
+
+/** Human-readable blurb per class, for the retention dropdown and the badge
+ * tooltip. Mirrors the doc comments on the Rust enum. */
+export const MAC_PERSISTENCE_LABELS: Record<MacPersistence, string> = {
+  stable: "Stable — real vendor MAC, never randomized",
+  per_network: "Per-network — randomized, persists per network for months",
+  session: "Session — randomized, persists until the device reboots",
+  ephemeral: "Ephemeral — randomized, rotates every few minutes",
+  unlinkable: "Unlinkable — randomized, cannot be correlated at all",
+};
+
+/** Options for the `mac_persistence` filter dropdown on the Emitters and
+ * Emissions pages, in menu order. The values must stay in step with
+ * `fluxfang_core::classify::PERSISTENCE_FILTER_TOKENS` — the backend
+ * rejects anything else with a 400 rather than matching nothing.
+ *
+ * The two badges come first (they're what the table shows), then the exact
+ * classes for when badge granularity isn't enough. */
+export const MAC_PERSISTENCE_FILTER_OPTIONS: ReadonlyArray<{
+  value: string;
+  label: string;
+}> = [
+  { value: "randomized", label: "Randomized — short-lived" },
+  { value: "randomized-longterm", label: "Randomized — long-term" },
+  { value: "stable", label: "Class: stable" },
+  { value: "per_network", label: "Class: per-network" },
+  { value: "session", label: "Class: session" },
+  { value: "ephemeral", label: "Class: ephemeral" },
+  { value: "unlinkable", label: "Class: unlinkable" },
+];
+
+/** The badge an emitter shows for its persistence class, or `null` for
+ * none. Mirrors `MacPersistence::badge` on the backend: the two classes
+ * that persist long enough to be worth tracking (`per_network`, `session`)
+ * read "randomized-longterm", the short-lived ones read "randomized".
+ *
+ * Falls back to the legacy `randomized_mac` boolean for emitters
+ * classified before `mac_persistence` existed, which can't be resolved any
+ * finer than "randomized". */
+export function macPersistenceBadge(
+  attributes: Record<string, unknown>,
+): "randomized" | "randomized-longterm" | null {
+  const cls = attributes.mac_persistence;
+  if (cls === "per_network" || cls === "session") return "randomized-longterm";
+  if (cls === "ephemeral" || cls === "unlinkable") return "randomized";
+  if (cls === "stable") return null;
+  return isRandomizedMac(attributes) ? "randomized" : null;
+}
+
 /** Renders any attribute value as text for the expanded panel's full
  * key/value dump — most values here are strings/booleans (`ssid`,
  * `bssid`, `src_mac`, `randomized_mac`), but this stays permissive for
@@ -137,15 +197,29 @@ export function MacIdentityCell({ emitter }: { emitter: Emitter }) {
 
   if (!mac) return <span className="text-slate-500">—</span>;
 
+  const badge = macPersistenceBadge(attributes);
+  const cls = attributes.mac_persistence;
+  // A long-term address is a *tracking* signal, not noise, so it's coloured
+  // apart from the throwaway one rather than sharing the amber "ignore me".
+  const badgeClass =
+    badge === "randomized-longterm"
+      ? "bg-sky-500/20 text-sky-300"
+      : "bg-amber-500/20 text-amber-400";
+
   return (
     <div className="flex items-center gap-1.5 whitespace-nowrap">
       <span className="font-mono text-xs text-slate-300">{mac}</span>
-      {isRandomizedMac(attributes) && (
+      {badge && (
         <span
           data-testid={`emitter-randomized-badge-${emitter.id}`}
-          className="inline-block rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-400"
+          title={
+            typeof cls === "string" && cls in MAC_PERSISTENCE_LABELS
+              ? MAC_PERSISTENCE_LABELS[cls as MacPersistence]
+              : undefined
+          }
+          className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-medium ${badgeClass}`}
         >
-          randomized
+          {badge}
         </span>
       )}
     </div>
