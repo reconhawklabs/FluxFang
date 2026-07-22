@@ -631,6 +631,54 @@ test('Edit modal pre-fills lat/lon and PATCHes the source with the new values on
   });
 });
 
+test('add source: sensor kind — submits a sensor/listener source with bind_ip/bind_port/enrollment_window_secs', async () => {
+  const created: DataSource = {
+    id: 'new-sensor',
+    created_at: '2026-01-01T00:00:00Z',
+    kind: 'sensor',
+    mode: 'listener',
+    interface: null,
+    status: 'stopped',
+    config: { bind_ip: '0.0.0.0', bind_port: 9000, enrollment_window_secs: 900 },
+    last_error: null,
+    desired_state: 'stopped',
+    last_ok_at: null,
+  };
+  const fetchMock = mockMethodRoutes({
+    'GET /api/data-sources': () => [],
+    'GET /api/system/capture-devices': () => captureDevices([], []),
+    'POST /api/data-sources': () => created,
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<DataSources />, { wrapper });
+  await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+
+  fireEvent.click(screen.getByRole('button', { name: /add data source/i }));
+  fireEvent.change(screen.getByLabelText(/^kind$/i), { target: { value: 'sensor' } });
+
+  // Sensor is a pure network bind — no hardware enumeration/select shown.
+  expect(await screen.findByLabelText(/bind ip/i)).toBeInTheDocument();
+  expect(screen.queryByText(/no compatible/i)).not.toBeInTheDocument();
+
+  // Defaults are pre-filled and already valid.
+  const submitButton = screen.getByRole('button', { name: /^add$|^create$|^save$/i });
+  expect(submitButton).not.toBeDisabled();
+  fireEvent.click(submitButton);
+
+  await waitFor(() => expect(screen.queryByLabelText(/bind ip/i)).not.toBeInTheDocument());
+
+  const postCall = fetchMock.mock.calls.find(([, init]) => init?.method === 'POST');
+  expect(postCall).toBeDefined();
+  const [url, init] = postCall as [RequestInfo | URL, RequestInit];
+  expect(String(url)).toBe('/api/data-sources');
+  expect(JSON.parse(init.body as string)).toEqual({
+    kind: 'sensor',
+    mode: 'listener',
+    config: { bind_ip: '0.0.0.0', bind_port: 9000, enrollment_window_secs: 900 },
+  });
+});
+
 test('Start button on a stopped source calls the start endpoint', async () => {
   const stopped = SOURCES[0]; // wifi-1, status stopped
   const started: DataSource = { ...stopped, status: 'starting' };

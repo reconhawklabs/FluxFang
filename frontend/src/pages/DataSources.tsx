@@ -154,7 +154,7 @@ function ConfigSummary({ source }: { source: DataSource }) {
   return <span className="text-slate-500">—</span>;
 }
 
-type FormKind = 'wifi' | 'gps' | 'bluetooth' | 'rtl_sdr';
+type FormKind = 'wifi' | 'gps' | 'bluetooth' | 'rtl_sdr' | 'sensor';
 type FormWifiMode = 'monitor' | 'scan';
 type FormGpsMode = 'gpsd' | 'serial' | 'manual';
 
@@ -180,6 +180,11 @@ const BT_MODE_HELP = 'Passive BLE advertisement scanning via a host HCI adapter.
 /** RTL-SDR ships with a single mode (TPMS, via rtl_433) for this spec — same
  * static-dropdown rationale as `BT_MODE_HELP`. */
 const RTL_MODE_HELP = 'TPMS decodes tire-pressure sensor reports via rtl_433.';
+
+/** Sensor ships with a single mode (listener) — same static-dropdown
+ * rationale as `BT_MODE_HELP`/`RTL_MODE_HELP`. */
+const SENSOR_MODE_HELP =
+  'A network listener that accepts connections from distributed Sensor nodes. Start it, then approve sensors on the Sensors page.';
 
 interface AddSourceFormProps {
   onCancel: () => void;
@@ -212,6 +217,10 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
   const [rtlFrequency, setRtlFrequency] = useState<RtlFrequency>('315M');
   const [rtlSerial, setRtlSerial] = useState('');
   const [tpmsAutoCorrelate, setTpmsAutoCorrelate] = useState(false);
+  // Sensor listener state — a pure network bind, no hardware interface.
+  const [bindIp, setBindIp] = useState('0.0.0.0');
+  const [bindPort, setBindPort] = useState('9000');
+  const [enrollmentWindowSecs, setEnrollmentWindowSecs] = useState('900');
 
   // Hardware enumeration (Task devdropdown) — the Add form no longer takes
   // free-text interface/device names; it offers only what
@@ -270,6 +279,19 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
       return;
     }
 
+    if (kind === 'sensor') {
+      onSubmit({
+        kind: 'sensor',
+        mode: 'listener',
+        config: {
+          bind_ip: bindIp.trim(),
+          bind_port: Number(bindPort),
+          enrollment_window_secs: Number(enrollmentWindowSecs),
+        },
+      });
+      return;
+    }
+
     if (gpsMode === 'gpsd') {
       onSubmit({ kind: 'gps', mode: 'gpsd', config: { host, port: Number(port) } });
       return;
@@ -303,6 +325,18 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
       !devicesLoading &&
       !devicesErrored &&
       rtlDevices.some((d) => d.serial === rtlSerial);
+  } else if (kind === 'sensor') {
+    // No hardware enumeration for a pure network listener — validate the
+    // form fields directly instead of gating on `devicesQuery`.
+    const portNum = Number(bindPort);
+    const windowNum = Number(enrollmentWindowSecs);
+    canSubmit =
+      bindIp.trim() !== '' &&
+      Number.isFinite(portNum) &&
+      portNum >= 1 &&
+      portNum <= 65535 &&
+      Number.isFinite(windowNum) &&
+      windowNum > 0;
   } else if (gpsMode === 'serial') {
     canSubmit = !devicesLoading && !devicesErrored && serialDevices.includes(device);
   } else if (gpsMode === 'manual') {
@@ -366,6 +400,7 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
             <option value="gps">GPS</option>
             <option value="bluetooth">Bluetooth</option>
             <option value="rtl_sdr">RTL-SDR</option>
+            <option value="sensor">Sensor (listener)</option>
           </select>
         </div>
 
@@ -595,6 +630,60 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
                 together into the same vehicle. (Manual associations are always available on each
                 sensor's detail page.)
               </p>
+            </div>
+          </>
+        )}
+
+        {kind === 'sensor' && (
+          <>
+            <div className="space-y-1">
+              <label htmlFor="ds-sensor-mode" className={labelClassName}>
+                Mode
+              </label>
+              <select id="ds-sensor-mode" value="listener" disabled className={inputClassName}>
+                <option value="listener">Listener</option>
+              </select>
+              <p className="text-xs text-slate-500">{SENSOR_MODE_HELP}</p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <label htmlFor="ds-sensor-bind-ip" className={labelClassName}>
+                  Bind IP
+                </label>
+                <input
+                  id="ds-sensor-bind-ip"
+                  type="text"
+                  value={bindIp}
+                  onChange={(event) => setBindIp(event.target.value)}
+                  className={`font-mono ${inputClassName}`}
+                />
+              </div>
+              <div className="space-y-1">
+                <label htmlFor="ds-sensor-bind-port" className={labelClassName}>
+                  Bind port
+                </label>
+                <input
+                  id="ds-sensor-bind-port"
+                  type="number"
+                  value={bindPort}
+                  onChange={(event) => setBindPort(event.target.value)}
+                  className={inputClassName}
+                />
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <label htmlFor="ds-sensor-enrollment-window" className={labelClassName}>
+                Enrollment window (seconds)
+              </label>
+              <input
+                id="ds-sensor-enrollment-window"
+                type="number"
+                value={enrollmentWindowSecs}
+                onChange={(event) => setEnrollmentWindowSecs(event.target.value)}
+                className={inputClassName}
+              />
             </div>
           </>
         )}
