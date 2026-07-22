@@ -73,32 +73,17 @@ async fn main() {
         // correlation — that's the Standalone's job once it receives the
         // forwarded emissions.
         //
-        // Review fix (Phase 4-A): the pruner must run even when sensor
-        // config is absent/invalid, or `cached_emission` grows unbounded
-        // with no forwarder able to drain it. Only the forwarder is
-        // conditional on config; the pruner always runs, falling back to a
-        // 7-day default TTL when there's no configured `cache_ttl_secs`.
-        let sensor_cfg = node.as_ref().and_then(|n| n.sensor.clone());
-        let ttl = sensor_cfg
-            .as_ref()
-            .map(|c| c.cache_ttl_secs)
-            .unwrap_or(604_800);
-        fluxfang_api::forwarder::spawn_pruner(pool.clone(), ttl);
-        match sensor_cfg {
-            Some(cfg) => match fluxfang_api::forwarder::SensorForwarder::new(
-                pool.clone(),
-                &cfg,
-                node_sensor_id.clone(),
-            ) {
-                Ok(fwd) => fluxfang_api::forwarder::spawn_forwarder(fwd),
-                Err(e) => eprintln!("SensorForwarder disabled: {e}"),
-            },
-            None => {
-                eprintln!(
-                    "sensor role but no sensor config — forwarder disabled (pruner still running)"
-                )
-            }
-        }
+        // Both tasks re-read the node config from the DB each cycle, so they
+        // run unconditionally for a Sensor node and self-heal live: the pruner
+        // (falling back to a 7-day TTL when unset) keeps `cached_emission`
+        // bounded even with no valid forwarder config, and the forwarder pauses
+        // until a valid key/host/port is saved in Settings — then picks it up
+        // within one cycle, no restart. (This is why an invalid key at boot no
+        // longer disables forwarding permanently.)
+        fluxfang_api::forwarder::spawn_pruner(pool.clone());
+        fluxfang_api::forwarder::spawn_forwarder(fluxfang_api::forwarder::SensorForwarder::new(
+            pool.clone(),
+        ));
     } else {
         // Standalone node: rebind any sensor listeners the user left running
         // (mirrors the capture supervisor's resume_running for capture

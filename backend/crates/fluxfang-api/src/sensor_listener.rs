@@ -209,14 +209,7 @@ async fn enroll(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    // 1. Window gate.
-    {
-        let map = st.windows.lock().await;
-        if !window_is_open(&map, st.data_source_id) {
-            return (StatusCode::FORBIDDEN, "enrollment window is closed").into_response();
-        }
-    }
-    // 2. Slug + fingerprint validity (fail closed, no panic). The key is NOT
+    // 1. Slug + fingerprint validity (fail closed, no panic). The key is NOT
     // present in the request — only its one-way fingerprint.
     if !is_valid_sensor_id(&req.sensor_id) {
         return (StatusCode::BAD_REQUEST, "invalid sensor_id").into_response();
@@ -227,12 +220,47 @@ async fn enroll(
     let fingerprint = req.fingerprint.clone();
     let source_ip = peer.ip().to_string();
 
-    // 3. Upsert policy by current status.
+    // 2. Look up any existing row for this (datasource, sensor_id).
     let existing = SensorRepo::get_by_sensor_id(&st.pool, st.data_source_id, &req.sensor_id).await;
     let existing = match existing {
         Ok(e) => e,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
+
+    // 3. Already-approved sensors may re-enroll ANY time — this is their
+    // liveness heartbeat, so it must NOT be gated on the enrollment window
+    // (which auto-closes on approval). It only bumps `last_seen_at`; no new
+    // registration happens. A DIFFERENT fingerprint means a node is squatting
+    // an approved id with another key — refuse. Fingerprints are public
+    // (one-way hashes), so a plain compare is fine here.
+    if let Some(s) = existing.as_ref() {
+        if s.status == "approved" {
+            if req.fingerprint == s.fingerprint {
+                let _ = SensorRepo::touch_last_seen(&st.pool, s.id).await;
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({ "status": "approved", "fingerprint": fingerprint })),
+                )
+                    .into_response();
+            }
+            return (
+                StatusCode::CONFLICT,
+                "sensor_id already approved with a different key",
+            )
+                .into_response();
+        }
+    }
+
+    // 4. Everything else (a NEW or still-pending registration) requires an
+    // open enrollment window.
+    {
+        let map = st.windows.lock().await;
+        if !window_is_open(&map, st.data_source_id) {
+            return (StatusCode::FORBIDDEN, "enrollment window is closed").into_response();
+        }
+    }
+
+    // 5. Upsert policy by current status.
     let result = match existing {
         None => SensorRepo::insert_pending(
             &st.pool,
@@ -263,25 +291,8 @@ async fn enroll(
                 Err(e) => Err(e),
             }
         }
-        Some(s) if s.status == "approved" => {
-            // Already approved: the operator verified this fingerprint and
-            // supplied the matching key at approval. A re-enroll simply
-            // confirms liveness — but only if the claimed fingerprint still
-            // matches the one on file. A DIFFERENT fingerprint means a node is
-            // squatting an approved id with another key: refuse. Fingerprints
-            // are public (one-way hashes), so a plain compare is fine here.
-            if req.fingerprint == s.fingerprint {
-                let _ = SensorRepo::touch_last_seen(&st.pool, s.id).await;
-                Ok((StatusCode::OK, "approved".to_string()))
-            } else {
-                return (
-                    StatusCode::CONFLICT,
-                    "sensor_id already approved with a different key",
-                )
-                    .into_response();
-            }
-        }
-        // revoked / rejected -> refuse; do not resurrect.
+        // revoked / rejected -> refuse; do not resurrect. (approved is handled
+        // above, before the window gate.)
         Some(_) => {
             return (StatusCode::FORBIDDEN, "sensor is not permitted to enroll").into_response()
         }

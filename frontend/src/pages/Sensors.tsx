@@ -44,7 +44,11 @@ export default function Sensors() {
   });
 
   useEffect(() => {
-    if (windowExpiresAt === null) return;
+    // Cleared (expired or approval closed the window) — hide the countdown.
+    if (windowExpiresAt === null) {
+      setRemainingSecs(0);
+      return;
+    }
     function tick(): void {
       const secs = Math.max(0, Math.ceil((windowExpiresAt! - Date.now()) / 1000));
       setRemainingSecs(secs);
@@ -157,7 +161,13 @@ export default function Sensors() {
         <ApproveDialog
           sensor={approving}
           onClose={() => setApproving(null)}
-          onApproved={() => { setApproving(null); invalidate(); }}
+          onApproved={() => {
+            setApproving(null);
+            // Approving closes the enrollment window server-side, so clear the
+            // client-side countdown/message too (it's local timer state).
+            setWindowExpiresAt(null);
+            invalidate();
+          }}
         />
       )}
 
