@@ -48,6 +48,10 @@ export default function Settings() {
       if (host.trim() === '' || !Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
         setError('Enter a valid standalone host and port.'); return;
       }
+      if (!config?.sensor && key.trim() === '') {
+        setError('An encryption key is required when switching this node to Sensor role.');
+        return;
+      }
       patch.sensor = { host: host.trim(), port: portNum, cache_ttl_secs: Number(ttl) || 604800 };
       if (key.length > 0) patch.sensor.key = key; // only send if changed
     }
@@ -87,8 +91,9 @@ export default function Settings() {
               <input id="s-port" inputMode="numeric" value={port} onChange={(e) => setPort(e.target.value)} className={input} /></div>
             <div className="space-y-1"><label htmlFor="s-ttl" className={label}>Cache TTL (seconds)</label>
               <input id="s-ttl" inputMode="numeric" value={ttl} onChange={(e) => setTtl(e.target.value)} className={input} /></div>
-            <div className="space-y-1"><label htmlFor="s-key" className={label}>Encryption key (blank = keep current)</label>
-              <input id="s-key" value={key} onChange={(e) => setKey(e.target.value)} placeholder="•••••• (unchanged)" className={input} /></div>
+            <div className="space-y-1"><label htmlFor="s-key" className={label}>Encryption key</label>
+              <input id="s-key" value={key} onChange={(e) => setKey(e.target.value)} placeholder="•••••• (unchanged)" className={input} />
+              <p className="text-xs text-slate-500">{config?.sensor ? 'Leave blank to keep the current key.' : 'Required when switching to Sensor role.'}</p></div>
           </>
         )}
 

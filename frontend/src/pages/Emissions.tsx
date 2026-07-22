@@ -330,7 +330,7 @@ type AssignTarget = { mode: "bulk" } | { mode: "single"; emission: Emission };
  * shape `SensorDashboard`'s "Recent captures" section shows. */
 function CachedEmissionsView() {
   const cached = useQuery({
-    queryKey: queryKeys.cachedEmissions,
+    queryKey: [...queryKeys.cachedEmissions, 100],
     queryFn: () => api.cachedEmissions(100),
     refetchInterval: 4000,
   });

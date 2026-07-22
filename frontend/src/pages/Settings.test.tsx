@@ -33,6 +33,27 @@ test('sensor node: save omits key when blank, includes host', async () => {
   expect(body.sensor.key).toBeUndefined(); // blank key omitted
 });
 
+test('switching a standalone node to sensor role requires a key', async () => {
+  const calls: Array<{ url: string; body: unknown }> = [];
+  mock({ role: 'standalone', node_sensor_id: 'local', sensor: null }, calls);
+  render(<Settings />, { wrapper });
+  await waitFor(() => expect((screen.getByLabelText(/node sensor id/i) as HTMLInputElement).value).toBe('local'));
+
+  fireEvent.click(screen.getByRole('radio', { name: /sensor/i }));
+  fireEvent.change(screen.getByLabelText(/standalone host/i), { target: { value: 'base' } });
+  fireEvent.change(screen.getByLabelText(/port/i), { target: { value: '9000' } });
+  fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(/key is required/i);
+  expect(calls.length).toBe(0);
+
+  fireEvent.change(screen.getByLabelText(/encryption key/i), { target: { value: 'sekret' } });
+  fireEvent.click(screen.getByRole('button', { name: /save/i }));
+  await waitFor(() => expect(calls.length).toBe(1));
+  const body = calls[0].body as { sensor: { key?: string } };
+  expect(body.sensor.key).toBe('sekret');
+});
+
 test('rejects a node id with a space', async () => {
   const calls: Array<{ url: string; body: unknown }> = [];
   mock({ role: 'standalone', node_sensor_id: 'local', sensor: null }, calls);

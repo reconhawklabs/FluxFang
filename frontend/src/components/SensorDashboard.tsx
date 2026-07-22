@@ -7,7 +7,7 @@ import { api } from '../api/client';
 
 export default function SensorDashboard() {
   const status = useSensorStatus();
-  const cached = useQuery({ queryKey: queryKeys.cachedEmissions, queryFn: () => api.cachedEmissions(50), refetchInterval: 4000 });
+  const cached = useQuery({ queryKey: [...queryKeys.cachedEmissions, 50], queryFn: () => api.cachedEmissions(50), refetchInterval: 4000 });
   const s = status.data;
   const rows = cached.data ?? [];
 
