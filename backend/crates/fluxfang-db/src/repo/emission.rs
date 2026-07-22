@@ -701,6 +701,7 @@ impl EmissionRepo {
         pool: &PgPool,
         emitter_id: Uuid,
         since: DateTime<Utc>,
+        limit: i64,
     ) -> Result<Vec<LocatedSignal>, sqlx::Error> {
         sqlx::query_as::<_, LocatedSignal>(
             "SELECT ST_X(location::geometry) AS lon, ST_Y(location::geometry) AS lat, \
@@ -708,10 +709,12 @@ impl EmissionRepo {
              FROM emission \
              WHERE emitter_id = $1 AND location IS NOT NULL AND signal_strength IS NOT NULL \
                AND observed_at >= $2 \
-             ORDER BY observed_at DESC",
+             ORDER BY observed_at DESC \
+             LIMIT $3",
         )
         .bind(emitter_id)
         .bind(since)
+        .bind(limit)
         .fetch_all(pool)
         .await
     }

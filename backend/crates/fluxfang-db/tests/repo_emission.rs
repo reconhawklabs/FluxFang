@@ -946,7 +946,7 @@ async fn located_signal_for_emitter_filters_and_orders_newest_first() {
     // no signal -> excluded
     EmissionRepo::insert(&pool, mk(None, Some((-71.0, 42.0)), base)).await.unwrap();
 
-    let rows = EmissionRepo::located_signal_for_emitter(&pool, e.id, base - Duration::hours(1))
+    let rows = EmissionRepo::located_signal_for_emitter(&pool, e.id, base - Duration::hours(1), 10_000)
         .await
         .unwrap();
     assert_eq!(rows.len(), 2, "only located+signal rows");
