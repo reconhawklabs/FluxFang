@@ -15,6 +15,7 @@ import type { FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError } from '../api/client';
 import { queryKeys } from '../api/queryKeys';
+import { useConfig } from '../hooks/useConfig';
 import {
   BAUD_RATES,
   RTL_FREQUENCIES,
@@ -194,6 +195,13 @@ interface AddSourceFormProps {
 }
 
 function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSourceFormProps) {
+  // A Sensor node only captures and forwards raw emissions — it never hosts a
+  // sensor listener (that's the Standalone's ingest point) and never builds
+  // emitters (grouping happens on the Standalone at approval). So on a Sensor
+  // node we hide the "Sensor" datasource kind and the auto-create-emitters
+  // option entirely.
+  const { data: config } = useConfig();
+  const isSensor = config?.role === 'sensor';
   const [kind, setKind] = useState<FormKind>('wifi');
   const [wifiMode, setWifiMode] = useState<FormWifiMode>('monitor');
   const [iface, setIface] = useState('');
@@ -395,7 +403,7 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
             <option value="gps">GPS</option>
             <option value="bluetooth">Bluetooth</option>
             <option value="rtl_sdr">RTL-SDR</option>
-            <option value="sensor">Sensor (listener)</option>
+            {!isSensor && <option value="sensor">Sensor (listener)</option>}
           </select>
         </div>
 
@@ -442,22 +450,24 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
               )}
             </div>
 
-            <div className="space-y-1">
-              <label className="flex items-center gap-2 text-sm text-slate-200">
-                <input
-                  id="ds-auto-create-emitters"
-                  type="checkbox"
-                  checked={autoCreateEmitters}
-                  onChange={(event) => setAutoCreateEmitters(event.target.checked)}
-                  className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
-                />
-                Automatically create emitters (by AP BSSID / client MAC)
-              </label>
-              <p className="text-xs text-slate-500">
-                When enabled, each new access point or client device seen on this source is
-                auto-registered as an emitter with a visible, toggleable match rule.
-              </p>
-            </div>
+            {!isSensor && (
+              <div className="space-y-1">
+                <label className="flex items-center gap-2 text-sm text-slate-200">
+                  <input
+                    id="ds-auto-create-emitters"
+                    type="checkbox"
+                    checked={autoCreateEmitters}
+                    onChange={(event) => setAutoCreateEmitters(event.target.checked)}
+                    className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
+                  />
+                  Automatically create emitters (by AP BSSID / client MAC)
+                </label>
+                <p className="text-xs text-slate-500">
+                  When enabled, each new access point or client device seen on this source is
+                  auto-registered as an emitter with a visible, toggleable match rule.
+                </p>
+              </div>
+            )}
           </>
         )}
 
@@ -498,22 +508,24 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
               )}
             </div>
 
-            <div className="space-y-1">
-              <label className="flex items-center gap-2 text-sm text-slate-200">
-                <input
-                  id="ds-bt-auto-create-emitters"
-                  type="checkbox"
-                  checked={autoCreateEmitters}
-                  onChange={(event) => setAutoCreateEmitters(event.target.checked)}
-                  className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
-                />
-                Automatically create emitters (by device address)
-              </label>
-              <p className="text-xs text-slate-500">
-                When enabled, each new Bluetooth device seen on this source is auto-registered as
-                an emitter with a visible, toggleable match rule.
-              </p>
-            </div>
+            {!isSensor && (
+              <div className="space-y-1">
+                <label className="flex items-center gap-2 text-sm text-slate-200">
+                  <input
+                    id="ds-bt-auto-create-emitters"
+                    type="checkbox"
+                    checked={autoCreateEmitters}
+                    onChange={(event) => setAutoCreateEmitters(event.target.checked)}
+                    className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
+                  />
+                  Automatically create emitters (by device address)
+                </label>
+                <p className="text-xs text-slate-500">
+                  When enabled, each new Bluetooth device seen on this source is auto-registered as
+                  an emitter with a visible, toggleable match rule.
+                </p>
+              </div>
+            )}
 
             <div className="space-y-1">
               <label className="flex items-center gap-2 text-sm text-slate-200">
@@ -592,22 +604,24 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
               )}
             </div>
 
-            <div className="space-y-1">
-              <label className="flex items-center gap-2 text-sm text-slate-200">
-                <input
-                  id="ds-rtl-auto-create-emitters"
-                  type="checkbox"
-                  checked={autoCreateEmitters}
-                  onChange={(event) => setAutoCreateEmitters(event.target.checked)}
-                  className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
-                />
-                Automatically create emitters (one per TPMS sensor id)
-              </label>
-              <p className="text-xs text-slate-500">
-                When enabled, each new tire-sensor id seen on this source is auto-registered as a
-                TPMS Sensor emitter named TPMS_&lt;id&gt;.
-              </p>
-            </div>
+            {!isSensor && (
+              <div className="space-y-1">
+                <label className="flex items-center gap-2 text-sm text-slate-200">
+                  <input
+                    id="ds-rtl-auto-create-emitters"
+                    type="checkbox"
+                    checked={autoCreateEmitters}
+                    onChange={(event) => setAutoCreateEmitters(event.target.checked)}
+                    className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
+                  />
+                  Automatically create emitters (one per TPMS sensor id)
+                </label>
+                <p className="text-xs text-slate-500">
+                  When enabled, each new tire-sensor id seen on this source is auto-registered as a
+                  TPMS Sensor emitter named TPMS_&lt;id&gt;.
+                </p>
+              </div>
+            )}
 
             <div className="space-y-1">
               <label className="flex items-center gap-2 text-sm text-slate-200">

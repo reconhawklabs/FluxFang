@@ -243,6 +243,29 @@ test('add source: wifi kind — checking "Automatically create emitters" posts c
   });
 });
 
+test('add source on a Sensor node: hides the "Sensor" kind and the auto-create-emitters toggle', async () => {
+  const fetchMock = mockMethodRoutes({
+    'GET /api/data-sources': () => [],
+    'GET /api/system/capture-devices': () => captureDevices(['wlan0'], []),
+    'GET /api/config': () => ({ role: 'sensor', node_sensor_id: 'edge-1' }),
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<DataSources />, { wrapper });
+  await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole('button', { name: /add data source/i }));
+  await screen.findByLabelText(/interface/i); // wifi (default) form rendered
+
+  // A Sensor never hosts a listener nor builds emitters — both are gone once
+  // its role config resolves.
+  await waitFor(() =>
+    expect(screen.queryByLabelText(/automatically create emitters/i)).not.toBeInTheDocument(),
+  );
+  expect(
+    screen.queryByRole('option', { name: /sensor \(listener\)/i }),
+  ).not.toBeInTheDocument();
+});
+
 test('add source: wifi kind — SSID Scan mode also shows the auto-create checkbox', async () => {
   const fetchMock = mockMethodRoutes({
     'GET /api/data-sources': () => [],
