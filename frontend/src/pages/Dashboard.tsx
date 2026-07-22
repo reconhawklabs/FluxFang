@@ -36,7 +36,9 @@ import { listNotifications } from "../api/notifications";
 import type { GpsSourceStatus, GpsStatus } from "../api/gps";
 import { getGpsStatus } from "../api/gps";
 import { useSensors } from "../hooks/useSensors";
+import { useConfig } from "../hooks/useConfig";
 import StatTile from "../components/StatTile";
+import SensorDashboard from "../components/SensorDashboard";
 import MapView from "./MapView";
 
 /** Page size for the feed query — a landing-page glance, not a full browse
@@ -157,7 +159,22 @@ function payloadText(payload: Record<string, unknown>, key: string): string {
     : "—";
 }
 
+// Role gate: a plain top-level `if` here (before the standalone hooks below)
+// would change how many hooks this component calls between the "config
+// still loading" render and the "role: sensor" render, which React treats
+// as a hard error (hook count must be stable across renders of the same
+// component instance) rather than a lint nitpick. Delegating the standalone
+// body to its own child component sidesteps that: `Dashboard` itself only
+// ever calls one hook (`useConfig`), and `StandaloneDashboard`/
+// `SensorDashboard` each mount/unmount independently with their own stable
+// hook counts.
 export default function Dashboard() {
+  const { data: config } = useConfig();
+  if (config?.role === "sensor") return <SensorDashboard />;
+  return <StandaloneDashboard />;
+}
+
+function StandaloneDashboard() {
   const [rangeId, setRangeId] = useState<TimeRangeId>(DEFAULT_RANGE_ID);
   // `feedSourceId === null` is the default "All Emissions" tab; otherwise it's
   // a specific data source's id (a per-source feed tab).

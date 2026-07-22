@@ -15,6 +15,7 @@ import type { Emission } from "../api/emissions";
 import type { Emitter } from "../api/emitters";
 import type { DataSource } from "../api/dataSources";
 import type { FieldDef } from "../types/catalog";
+import type { AppConfig, CachedEmission } from "../api/client";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -172,6 +173,37 @@ const DATA_SOURCE_2: DataSource = {
   last_ok_at: null,
 };
 
+const CONFIG_STANDALONE: AppConfig = {
+  role: "standalone",
+  node_sensor_id: "local",
+  sensor: null,
+};
+
+const CONFIG_SENSOR: AppConfig = {
+  role: "sensor",
+  node_sensor_id: "frontgate",
+  sensor: { host: "base.local", port: 9000, cache_ttl_secs: 3600 },
+};
+
+const CACHED_EMISSION_1: CachedEmission = {
+  id: "cached-1",
+  created_at: "2026-07-20T00:00:00Z",
+  kind: "wifi",
+  signal_strength: -40,
+  lat: null,
+  lon: null,
+  observed_at: "2026-07-20T00:05:00Z",
+  payload: {},
+  data_source_id: "ds-1",
+  delivered: false,
+};
+
+const CACHED_EMISSION_2: CachedEmission = {
+  ...CACHED_EMISSION_1,
+  id: "cached-2",
+  delivered: true,
+};
+
 /** The default routes every test needs at minimum (emissions/emitters/
  * catalog/data-sources) — individual tests spread over this and override/
  * add routes (emitter-types, preview, POST/bulk-delete/clear) as needed. */
@@ -183,6 +215,7 @@ function baseRoutes(
     "GET /api/emitters": () => ({ items: [EMITTER_1], total: 1 }),
     "GET /api/catalog/wifi": () => WIFI_CATALOG,
     "GET /api/data-sources": () => [DATA_SOURCE_1, DATA_SOURCE_2],
+    "GET /api/config": () => CONFIG_STANDALONE,
     ...overrides,
   };
 }
@@ -661,4 +694,25 @@ test("declining the confirm dialog does not call bulk-delete", async () => {
       String(input).includes("bulk-delete"),
     ),
   ).toBeUndefined();
+});
+
+test("sensor role renders cached emissions instead of the standalone browse/filter view", async () => {
+  const fetchMock = mockRoutes({
+    "GET /api/config": () => CONFIG_SENSOR,
+    "GET /api/cached-emissions": () => [CACHED_EMISSION_1, CACHED_EMISSION_2],
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<Emissions />, { wrapper });
+
+  const row1 = await screen.findByTestId("cached-emission-row-cached-1");
+  expect(within(row1).getByText("pending")).toBeInTheDocument();
+  const row2 = screen.getByTestId("cached-emission-row-cached-2");
+  expect(within(row2).getByText("delivered")).toBeInTheDocument();
+
+  // Standalone-only browse/filter chrome must not render for a sensor node.
+  expect(
+    screen.queryByPlaceholderText("Search emissions…"),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByTestId("emissions-total")).not.toBeInTheDocument();
 });

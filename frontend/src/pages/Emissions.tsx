@@ -34,8 +34,10 @@
 import { useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ApiError } from "../api/client";
+import { ApiError, api } from "../api/client";
+import type { CachedEmission } from "../api/client";
 import { queryKeys } from "../api/queryKeys";
+import { useConfig } from "../hooks/useConfig";
 import type { Emission } from "../api/emissions";
 import {
   bulkDeleteEmissions,
@@ -320,7 +322,80 @@ function AssignModal({
  * booleans) so the two flows can never both render a modal at once. */
 type AssignTarget = { mode: "bulk" } | { mode: "single"; emission: Emission };
 
+/** The Emissions page shown on a Sensor node: a Sensor has no local
+ * `/api/emissions` browse/filter/assign backend (that's standalone-only —
+ * emitters/assignment live on the standalone node it forwards to), so this
+ * renders a compact read-only list of what's actually stored locally: the
+ * forwarding cache (`GET /api/cached-emissions`), same `kind`/delivered
+ * shape `SensorDashboard`'s "Recent captures" section shows. */
+function CachedEmissionsView() {
+  const cached = useQuery({
+    queryKey: queryKeys.cachedEmissions,
+    queryFn: () => api.cachedEmissions(100),
+    refetchInterval: 4000,
+  });
+  const rows = cached.data ?? [];
+
+  return (
+    <div className="space-y-4">
+      <h1 className="text-xl font-semibold text-slate-100">Emissions</h1>
+      {cached.isLoading && (
+        <p className="text-sm text-slate-500">Loading emissions…</p>
+      )}
+      {cached.isError && (
+        <p className="text-sm text-red-400">Failed to load emissions.</p>
+      )}
+      {cached.data && rows.length === 0 && (
+        <p className="text-sm text-slate-500">No captures yet.</p>
+      )}
+      {rows.length > 0 && (
+        <table className="w-full border-collapse text-left text-sm">
+          <thead>
+            <tr className="border-b border-slate-800 text-xs uppercase tracking-wide text-slate-500">
+              <th className="py-2 pr-4 font-medium">Kind</th>
+              <th className="py-2 pr-4 font-medium">Observed At</th>
+              <th className="py-2 pr-2 font-medium">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row: CachedEmission) => (
+              <tr
+                key={row.id}
+                data-testid={`cached-emission-row-${row.id}`}
+                className="border-b border-slate-900 align-top"
+              >
+                <td className="py-2 pr-4 font-mono text-slate-300">
+                  {row.kind}
+                </td>
+                <td className="py-2 pr-4 text-slate-300">
+                  {formatObservedAt(row.observed_at)}
+                </td>
+                <td
+                  className={`py-2 pr-2 ${row.delivered ? "text-emerald-400" : "text-amber-400"}`}
+                >
+                  {row.delivered ? "delivered" : "pending"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+// Role gate: mirrors `Dashboard.tsx`'s pattern — `Emissions` itself only
+// ever calls `useConfig`, so its hook count stays stable across the
+// "config loading" -> "role known" transition; the standalone body lives in
+// its own child component (`StandaloneEmissions`) instead of being inlined
+// after a conditional return.
 export default function Emissions() {
+  const { data: config } = useConfig();
+  if (config?.role === "sensor") return <CachedEmissionsView />;
+  return <StandaloneEmissions />;
+}
+
+function StandaloneEmissions() {
   const queryClient = useQueryClient();
   const [dataSourceId, setDataSourceId] = useState("");
   const [q, setQ] = useState("");

@@ -22,6 +22,7 @@ import type { GpsStatus } from "../api/gps";
 import type { NotificationsPage } from "../api/notifications";
 import type { Zone } from "../api/zones";
 import type { Sensor } from "../api/sensors";
+import type { AppConfig, CachedEmission, SensorStatus } from "../api/client";
 
 // `jumpTo`/`flyTo` back the embedded `MapView`'s center-on-user-load /
 // "recenter to me" button (Phase 5) — spies so a test could assert on them,
@@ -253,6 +254,38 @@ const GPS_STATUS_ACTIVE: GpsStatus = {
   status: "active",
 };
 
+const CONFIG_STANDALONE: AppConfig = {
+  role: "standalone",
+  node_sensor_id: "local",
+  sensor: null,
+};
+
+const CONFIG_SENSOR: AppConfig = {
+  role: "sensor",
+  node_sensor_id: "frontgate",
+  sensor: { host: "base.local", port: 9000, cache_ttl_secs: 3600 },
+};
+
+const SENSOR_STATUS: SensorStatus = {
+  role: "sensor",
+  node_sensor_id: "frontgate",
+  cache: { total: 12, undelivered: 3 },
+  sensor: { host: "base.local", port: 9000 },
+};
+
+const CACHED_EMISSION_1: CachedEmission = {
+  id: "cached-1",
+  created_at: "2026-07-20T00:00:00Z",
+  kind: "wifi",
+  signal_strength: -40,
+  lat: null,
+  lon: null,
+  observed_at: "2026-07-20T00:00:00Z",
+  payload: {},
+  data_source_id: "ds-1",
+  delivered: false,
+};
+
 /** Distinguishes the Dashboard's own feed fetch (small `limit`) from
  * `MapView`'s heatmap fetch (`limit=500`, see that component's module doc
  * comment) since both hit `GET /api/emissions`. */
@@ -277,6 +310,7 @@ function baseRoutes(
     "GET /api/emissions": emissionsHandler({ items: [EMISSION_1], total: 1 }),
     "GET /api/gps/status": () => GPS_STATUS_DISABLED,
     "GET /api/sensors": () => [],
+    "GET /api/config": () => CONFIG_STANDALONE,
     ...overrides,
   };
 }
@@ -547,4 +581,29 @@ test("sensors tile shows online/offline counts and 24h total when sensors exist"
   expect(
     within(tile).getByRole("link", { name: /details/i }),
   ).toHaveAttribute("href", "/sensors");
+});
+
+test("sensor role renders the forwarding-status dashboard instead of the standalone KPI tiles", async () => {
+  const fetchMock = mockRoutes({
+    "GET /api/config": () => CONFIG_SENSOR,
+    "GET /api/sensor/status": () => SENSOR_STATUS,
+    "GET /api/cached-emissions": () => [CACHED_EMISSION_1],
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<Dashboard />, { wrapper });
+
+  const status = await screen.findByTestId("forwarding-status");
+  await waitFor(() => expect(within(status).getByText("12")).toBeInTheDocument());
+  expect(within(status).getByText("3")).toBeInTheDocument();
+  expect(within(status).getByText("base.local:9000")).toBeInTheDocument();
+
+  expect(
+    await screen.findByTestId("cached-cached-1"),
+  ).toBeInTheDocument();
+
+  // Standalone-only pieces must not render for a sensor node.
+  expect(
+    screen.queryByTestId("stat-tile-Active Data Sources"),
+  ).not.toBeInTheDocument();
 });
