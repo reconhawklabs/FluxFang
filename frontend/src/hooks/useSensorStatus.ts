@@ -11,6 +11,9 @@ export function useSensorStatus(enabled = true) {
     queryKey: queryKeys.sensorStatus,
     queryFn: () => api.sensorStatus(),
     enabled,
-    refetchInterval: 4000,
+    // Every 30s: the endpoint does a live connectivity probe to the Standalone
+    // (checked at least once a minute, per the Dashboard's connection metric),
+    // and this refreshes cache depth + last-hour throughput.
+    refetchInterval: 30000,
   });
 }

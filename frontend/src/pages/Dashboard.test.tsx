@@ -270,6 +270,8 @@ const SENSOR_STATUS: SensorStatus = {
   role: "sensor",
   node_sensor_id: "frontgate",
   cache: { total: 12, undelivered: 3 },
+  delivered_last_hour: 7,
+  connected: true,
   sensor: { host: "base.local", port: 9000 },
 };
 

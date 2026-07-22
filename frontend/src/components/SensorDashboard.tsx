@@ -16,6 +16,21 @@ export default function SensorDashboard() {
       <h1 className="text-xl font-semibold text-slate-100">Sensor</h1>
       <section data-testid="forwarding-status" className="grid grid-cols-2 gap-4 sm:grid-cols-3">
         <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
+          <div className="text-xs uppercase tracking-wide text-slate-500">Standalone</div>
+          {s?.connected == null ? (
+            <div className="text-2xl font-semibold text-slate-500">—</div>
+          ) : (
+            <div className={`flex items-center gap-2 text-2xl font-semibold ${s.connected ? 'text-emerald-400' : 'text-red-400'}`}>
+              <span className={`inline-block h-2.5 w-2.5 rounded-full ${s.connected ? 'bg-emerald-400' : 'bg-red-400'}`} aria-hidden="true" />
+              {s.connected ? 'Connected' : 'Offline'}
+            </div>
+          )}
+        </div>
+        <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
+          <div className="text-xs uppercase tracking-wide text-slate-500">Delivered (1h)</div>
+          <div className="text-2xl font-semibold text-slate-100">{s?.delivered_last_hour ?? 0}</div>
+        </div>
+        <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
           <div className="text-xs uppercase tracking-wide text-slate-500">Cached</div>
           <div className="text-2xl font-semibold text-slate-100">{s?.cache.total ?? 0}</div>
         </div>

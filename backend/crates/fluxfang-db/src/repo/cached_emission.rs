@@ -36,9 +36,33 @@ impl CachedEmissionRepo {
 
     pub async fn mark_delivered(pool: &PgPool, ids: &[Uuid]) -> Result<u64, sqlx::Error> {
         if ids.is_empty() { return Ok(0); }
-        let res = sqlx::query("UPDATE cached_emission SET delivered = true WHERE id = ANY($1)")
-            .bind(ids).execute(pool).await?;
+        // Stamp delivered_at only on the transition, so re-marking an already
+        // delivered row doesn't move its delivery time (keeps the "last hour"
+        // throughput metric honest).
+        let res = sqlx::query(
+            "UPDATE cached_emission SET delivered = true, \
+                delivered_at = COALESCE(delivered_at, now()) \
+             WHERE id = ANY($1)",
+        )
+        .bind(ids)
+        .execute(pool)
+        .await?;
         Ok(res.rows_affected())
+    }
+
+    /// Count of emissions forwarded (delivered) at or after `since` — the
+    /// Sensor Dashboard's recent-throughput metric.
+    pub async fn delivered_count_since(
+        pool: &PgPool,
+        since: DateTime<Utc>,
+    ) -> Result<i64, sqlx::Error> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM cached_emission WHERE delivered = true AND delivered_at >= $1",
+        )
+        .bind(since)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
     }
 
     /// Delete rows created before `cutoff` (TTL prune). Returns deleted count.

@@ -144,6 +144,10 @@ export interface SensorStatus {
   role: NodeRole | null;
   node_sensor_id: string | null;
   cache: { total: number; undelivered: number };
+  /** Emissions forwarded to the Standalone in the last hour. */
+  delivered_last_hour: number;
+  /** Live reachability of the Standalone listener; null if not a sensor. */
+  connected: boolean | null;
   sensor: { host: string; port: number } | null;
 }
 

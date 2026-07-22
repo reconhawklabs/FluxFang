@@ -19,14 +19,44 @@ pub fn protected_routes() -> Router<AppState> {
 async fn status(State(state): State<AppState>) -> Result<Json<Value>, StatusCode> {
     let node = AppConfigRepo::node_config(&state.pool).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let stats = CachedEmissionRepo::stats(&state.pool).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let sensor = node.as_ref().and_then(|n| n.sensor.as_ref())
-        .map(|s| json!({ "host": s.host, "port": s.port }));
+    let since = chrono::Utc::now() - chrono::Duration::hours(1);
+    let delivered_last_hour = CachedEmissionRepo::delivered_count_since(&state.pool, since)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let sensor_cfg = node.as_ref().and_then(|n| n.sensor.as_ref());
+    let sensor = sensor_cfg.map(|s| json!({ "host": s.host, "port": s.port }));
+    // Live connectivity check to the Standalone's listener (the Dashboard
+    // polls this ~every minute). None when this isn't a configured sensor.
+    let connected = match sensor_cfg {
+        Some(s) => Some(standalone_reachable(&s.host, s.port).await),
+        None => None,
+    };
     Ok(Json(json!({
         "role": node.as_ref().map(|n| n.role),
         "node_sensor_id": node.as_ref().map(|n| n.node_sensor_id.clone()),
         "cache": { "total": stats.total, "undelivered": stats.undelivered },
+        "delivered_last_hour": delivered_last_hour,
+        "connected": connected,
         "sensor": sensor,
     })))
+}
+
+/// Best-effort reachability probe of the Standalone's sensor listener. A quick,
+/// short-timeout GET of its public `/sensor/health` — any successful response
+/// means the listener is up and routable from here.
+async fn standalone_reachable(host: &str, port: u16) -> bool {
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    else {
+        return false;
+    };
+    client
+        .get(format!("http://{host}:{port}/sensor/health"))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
 }
 
 #[derive(Deserialize)]

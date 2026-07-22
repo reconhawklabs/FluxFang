@@ -264,11 +264,14 @@ pub fn spawn_forwarder(forwarder: SensorForwarder) {
                         // Nothing to forward. Heartbeat if it's been a while so
                         // the Standalone keeps us "online"; an approved re-enroll
                         // just bumps last_seen (it bypasses the window).
+                        //
+                        // Best-effort: a failed heartbeat (a transient blip, or
+                        // a Standalone not yet running the approved-bypass code)
+                        // must NOT drop approval or stop forwarding. Only an
+                        // ingest 403 below authoritatively means we lost it.
                         if last_contact.elapsed() >= HEARTBEAT_INTERVAL {
-                            match forwarder.enroll(&target).await {
-                                EnrollResult::Approved => last_contact = std::time::Instant::now(),
-                                // Lost approval (revoked) — drop back to enrolling.
-                                EnrollResult::Pending => approved = false,
+                            if let EnrollResult::Approved = forwarder.enroll(&target).await {
+                                last_contact = std::time::Instant::now();
                             }
                         }
                         FORWARD_IDLE
