@@ -36,6 +36,12 @@ import type { FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, api } from "../api/client";
 import type { CachedEmission } from "../api/client";
+import {
+  formatObservedAt,
+  payloadRecord,
+  payloadText,
+  payloadTextAny,
+} from "../lib/emissionPayload";
 import { queryKeys } from "../api/queryKeys";
 import { useConfig } from "../hooks/useConfig";
 import type { Emission } from "../api/emissions";
@@ -66,33 +72,6 @@ const labelClassName =
   "block text-xs font-medium uppercase tracking-wide text-slate-500";
 const selectClassName =
   "rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 focus:border-amber-500 focus:outline-none";
-
-function formatObservedAt(iso: string): string {
-  const date = new Date(iso);
-  return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
-}
-
-/** Reads a payload key defensively — `payload`'s shape depends on `kind`
- * (see `Emission`'s doc comment), so any of these may be absent. */
-function payloadText(payload: Record<string, unknown>, key: string): string {
-  const value = payload[key];
-  return typeof value === "string" || typeof value === "number"
-    ? String(value)
-    : "—";
-}
-
-/** Like `payloadText`, but tries each key in turn — the first that's a
- * string/number wins. Lets one column render either kind's payload shape
- * (e.g. wifi's `src_mac` or bluetooth's `address`) without a `kind` branch. */
-function payloadTextAny(payload: Record<string, unknown>, keys: string[]): string {
-  for (const key of keys) {
-    const value = payload[key];
-    if (typeof value === "string" || typeof value === "number") {
-      return String(value);
-    }
-  }
-  return "—";
-}
 
 /** A `DataSource`'s label in the filter dropdown: kind plus whatever
  * identifies it (its interface, when set — wifi monitor sources — or
@@ -349,36 +328,59 @@ function CachedEmissionsView() {
         <p className="text-sm text-slate-500">No captures yet.</p>
       )}
       {rows.length > 0 && (
-        <table className="w-full border-collapse text-left text-sm">
-          <thead>
-            <tr className="border-b border-slate-800 text-xs uppercase tracking-wide text-slate-500">
-              <th className="py-2 pr-4 font-medium">Kind</th>
-              <th className="py-2 pr-4 font-medium">Observed At</th>
-              <th className="py-2 pr-2 font-medium">Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row: CachedEmission) => (
-              <tr
-                key={row.id}
-                data-testid={`cached-emission-row-${row.id}`}
-                className="border-b border-slate-900 align-top"
-              >
-                <td className="py-2 pr-4 font-mono text-slate-300">
-                  {row.kind}
-                </td>
-                <td className="py-2 pr-4 text-slate-300">
-                  {formatObservedAt(row.observed_at)}
-                </td>
-                <td
-                  className={`py-2 pr-2 ${row.delivered ? "text-emerald-400" : "text-amber-400"}`}
-                >
-                  {row.delivered ? "delivered" : "pending"}
-                </td>
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse text-left text-sm">
+            <thead>
+              <tr className="border-b border-slate-800 text-xs uppercase tracking-wide text-slate-500">
+                <th className="py-2 pr-4 font-medium">Kind</th>
+                <th className="py-2 pr-4 font-medium">Observed At</th>
+                <th className="py-2 pr-4 font-medium">BSSID</th>
+                <th className="py-2 pr-4 font-medium">Src MAC</th>
+                <th className="py-2 pr-4 font-medium">SSID/Name</th>
+                <th className="py-2 pr-4 font-medium">Ch/Freq</th>
+                <th className="py-2 pr-4 font-medium">RSSI</th>
+                <th className="py-2 pr-2 font-medium">Status</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {rows.map((row: CachedEmission) => {
+                const payload = payloadRecord(row.payload);
+                return (
+                  <tr
+                    key={row.id}
+                    data-testid={`cached-emission-row-${row.id}`}
+                    className="border-b border-slate-900 align-top"
+                  >
+                    <td className="py-2 pr-4 font-mono text-slate-300">{row.kind}</td>
+                    <td className="py-2 pr-4 text-slate-300">
+                      {formatObservedAt(row.observed_at)}
+                    </td>
+                    <td className="py-2 pr-4 font-mono text-slate-300">
+                      {payloadText(payload, "bssid")}
+                    </td>
+                    <td className="py-2 pr-4 font-mono text-slate-300">
+                      {payloadTextAny(payload, ["src_mac", "address"])}
+                    </td>
+                    <td className="py-2 pr-4 text-slate-300">
+                      {payloadTextAny(payload, ["ssid", "name"])}
+                    </td>
+                    <td className="py-2 pr-4 text-slate-300">
+                      {payloadTextAny(payload, ["channel", "frequency"])}
+                    </td>
+                    <td className="py-2 pr-4 font-mono text-slate-300">
+                      {row.signal_strength ?? "—"}
+                    </td>
+                    <td
+                      className={`py-2 pr-2 ${row.delivered ? "text-emerald-400" : "text-amber-400"}`}
+                    >
+                      {row.delivered ? "delivered" : "pending"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );

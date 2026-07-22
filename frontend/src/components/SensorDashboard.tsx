@@ -4,10 +4,18 @@ import { useQuery } from '@tanstack/react-query';
 import { useSensorStatus } from '../hooks/useSensorStatus';
 import { queryKeys } from '../api/queryKeys';
 import { api } from '../api/client';
+import {
+  formatObservedAt,
+  payloadRecord,
+  payloadTextAny,
+} from '../lib/emissionPayload';
+
+/** Recent-captures feed cap — a dashboard glance, not the full Emissions page. */
+const FEED_LIMIT = 10;
 
 export default function SensorDashboard() {
   const status = useSensorStatus();
-  const cached = useQuery({ queryKey: [...queryKeys.cachedEmissions, 50], queryFn: () => api.cachedEmissions(50), refetchInterval: 4000 });
+  const cached = useQuery({ queryKey: [...queryKeys.cachedEmissions, FEED_LIMIT], queryFn: () => api.cachedEmissions(FEED_LIMIT), refetchInterval: 4000 });
   const s = status.data;
   const rows = cached.data ?? [];
 
@@ -49,14 +57,41 @@ export default function SensorDashboard() {
         {rows.length === 0 ? (
           <p className="text-sm text-slate-500">No captures yet.</p>
         ) : (
-          <ul className="divide-y divide-slate-800 rounded border border-slate-800 text-sm">
-            {rows.map((r) => (
-              <li key={r.id} data-testid={`cached-${r.id}`} className="flex justify-between px-3 py-2">
-                <span className="font-mono text-slate-300">{r.kind}</span>
-                <span className={r.delivered ? 'text-emerald-400' : 'text-amber-400'}>{r.delivered ? 'delivered' : 'pending'}</span>
-              </li>
-            ))}
-          </ul>
+          <div className="overflow-x-auto rounded border border-slate-800">
+            <table className="w-full border-collapse text-left text-sm">
+              <thead>
+                <tr className="border-b border-slate-800 text-xs uppercase tracking-wide text-slate-500">
+                  <th className="px-3 py-2 font-medium">Kind</th>
+                  <th className="px-3 py-2 font-medium">Identity</th>
+                  <th className="px-3 py-2 font-medium">SSID/Name</th>
+                  <th className="px-3 py-2 font-medium">RSSI</th>
+                  <th className="px-3 py-2 font-medium">Seen</th>
+                  <th className="px-3 py-2 font-medium">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => {
+                  const payload = payloadRecord(r.payload);
+                  return (
+                    <tr key={r.id} data-testid={`cached-${r.id}`} className="border-b border-slate-900 last:border-0">
+                      <td className="px-3 py-2 font-mono text-slate-300">{r.kind}</td>
+                      <td className="px-3 py-2 font-mono text-slate-300">
+                        {payloadTextAny(payload, ['bssid', 'src_mac', 'address'])}
+                      </td>
+                      <td className="px-3 py-2 text-slate-300">
+                        {payloadTextAny(payload, ['ssid', 'name'])}
+                      </td>
+                      <td className="px-3 py-2 font-mono text-slate-300">{r.signal_strength ?? '—'}</td>
+                      <td className="px-3 py-2 text-slate-400">{formatObservedAt(r.observed_at)}</td>
+                      <td className={`px-3 py-2 ${r.delivered ? 'text-emerald-400' : 'text-amber-400'}`}>
+                        {r.delivered ? 'delivered' : 'pending'}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
       </section>
     </div>
