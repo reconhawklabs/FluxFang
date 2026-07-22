@@ -26,7 +26,6 @@ async fn insert_pending_then_get_and_list() {
         &pool,
         ds,
         "frontgate",
-        "a2V5",
         "4F-A2-09-EE",
         Some("5.6.7.8"),
     )
@@ -34,6 +33,7 @@ async fn insert_pending_then_get_and_list() {
     .unwrap();
     assert_eq!(s.status, "pending");
     assert_eq!(s.sensor_id, "frontgate");
+    assert_eq!(s.key, "", "a pending sensor is stored with no key yet");
     assert!(s.auto_group_emitters, "default auto_group_emitters is true");
 
     let got = SensorRepo::get_by_sensor_id(&pool, ds, "frontgate")
@@ -48,7 +48,7 @@ async fn insert_pending_then_get_and_list() {
 async fn approve_sets_status_and_auto_group_and_timestamp() {
     let pool = common::fresh_pool().await;
     let ds = a_sensor_datasource(&pool).await;
-    let s = SensorRepo::insert_pending(&pool, ds, "frontgate", "a2V5", "FP", None)
+    let s = SensorRepo::insert_pending(&pool, ds, "frontgate", "FP", None)
         .await
         .unwrap();
 
@@ -67,7 +67,7 @@ async fn approve_sets_status_and_auto_group_and_timestamp() {
 async fn rotate_key_updates_key_and_fingerprint() {
     let pool = common::fresh_pool().await;
     let ds = a_sensor_datasource(&pool).await;
-    let s = SensorRepo::insert_pending(&pool, ds, "frontgate", "oldkey", "OLD", None)
+    let s = SensorRepo::insert_pending(&pool, ds, "frontgate", "OLD", None)
         .await
         .unwrap();
     let rotated = SensorRepo::set_key(&pool, s.id, "newkey", "NEW")
@@ -78,10 +78,10 @@ async fn rotate_key_updates_key_and_fingerprint() {
 }
 
 #[tokio::test]
-async fn update_pending_key_does_not_touch_a_non_pending_row() {
+async fn update_pending_fingerprint_does_not_touch_a_non_pending_row() {
     let pool = common::fresh_pool().await;
     let ds = a_sensor_datasource(&pool).await;
-    let s = SensorRepo::insert_pending(&pool, ds, "frontgate", "keyA", "fpA", None)
+    let s = SensorRepo::insert_pending(&pool, ds, "frontgate", "fpA", None)
         .await
         .unwrap();
 
@@ -89,7 +89,7 @@ async fn update_pending_key_does_not_touch_a_non_pending_row() {
         .await
         .unwrap();
 
-    let result = SensorRepo::update_pending_key(&pool, s.id, "keyB", "fpB", Some("9.9.9.9"))
+    let result = SensorRepo::update_pending_fingerprint(&pool, s.id, "fpB", Some("9.9.9.9"))
         .await
         .unwrap();
     assert!(
@@ -98,7 +98,7 @@ async fn update_pending_key_does_not_touch_a_non_pending_row() {
     );
 
     let got = SensorRepo::get(&pool, s.id).await.unwrap().unwrap();
-    assert_eq!(got.key, "keyA", "key must be unchanged");
+    assert_eq!(got.key, "", "key must be unchanged (still empty)");
     assert_eq!(got.fingerprint, "fpA", "fingerprint must be unchanged");
     assert_eq!(got.status, "approved", "status must be unchanged");
 }
@@ -107,10 +107,10 @@ async fn update_pending_key_does_not_touch_a_non_pending_row() {
 async fn unique_sensor_id_per_datasource() {
     let pool = common::fresh_pool().await;
     let ds = a_sensor_datasource(&pool).await;
-    SensorRepo::insert_pending(&pool, ds, "frontgate", "k", "F", None)
+    SensorRepo::insert_pending(&pool, ds, "frontgate", "F", None)
         .await
         .unwrap();
-    let dup = SensorRepo::insert_pending(&pool, ds, "frontgate", "k2", "F2", None).await;
+    let dup = SensorRepo::insert_pending(&pool, ds, "frontgate", "F2", None).await;
     assert!(
         dup.is_err(),
         "duplicate (data_source_id, sensor_id) must be rejected"

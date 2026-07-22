@@ -31,8 +31,8 @@ export function listSensors(): Promise<Sensor[]> {
   return get<Sensor[]>('/api/sensors');
 }
 
-export function approveSensor(id: string, autoGroupEmitters: boolean): Promise<Sensor> {
-  return post<Sensor>(`/api/sensors/${id}/approve`, { auto_group_emitters: autoGroupEmitters });
+export function approveSensor(id: string, autoGroupEmitters: boolean, key: string): Promise<Sensor> {
+  return post<Sensor>(`/api/sensors/${id}/approve`, { auto_group_emitters: autoGroupEmitters, key });
 }
 
 export function rejectSensor(id: string): Promise<Sensor> {

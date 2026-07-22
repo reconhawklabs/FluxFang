@@ -93,7 +93,8 @@ impl SensorForwarder {
         };
 
         if resp.status() == reqwest::StatusCode::FORBIDDEN {
-            self.enroll().await;
+            // Not (or no longer) approved. The spawn loop owns re-enrollment,
+            // so just report it and let the loop drop back to enrolling.
             return ForwardOutcome::NotApproved;
         }
         if !resp.status().is_success() {
@@ -109,16 +110,46 @@ impl SensorForwarder {
         }
     }
 
-    /// Self-register with the Standalone (idempotent while pending). Best-effort.
-    async fn enroll(&self) {
-        let key_b64 = fluxfang_sensor_proto::encode_key(&self.key);
-        let _ = self
+    /// Self-register with the Standalone and learn our approval status.
+    ///
+    /// Transmits only `{sensor_id, fingerprint}` — the key NEVER leaves this
+    /// node. The operator types the key into the Standalone's approval dialog
+    /// out-of-band; the fingerprint (a one-way hash) is what lets them verify
+    /// they entered the right key. Idempotent while pending; best-effort — any
+    /// transport/HTTP error maps to `Pending` so the loop simply retries.
+    pub async fn enroll(&self) -> EnrollResult {
+        let fingerprint = fluxfang_sensor_proto::fingerprint(&self.sensor_id, &self.key);
+        let resp = self
             .client
             .post(format!("{}/sensor/enroll", self.base_url))
-            .json(&serde_json::json!({ "sensor_id": self.sensor_id, "key": key_b64 }))
+            .json(&serde_json::json!({ "sensor_id": self.sensor_id, "fingerprint": fingerprint }))
             .send()
             .await;
+        match resp {
+            Ok(r) if r.status().is_success() => match r.json::<EnrollResponse>().await {
+                Ok(body) if body.status == "approved" => EnrollResult::Approved,
+                _ => EnrollResult::Pending,
+            },
+            // Non-2xx (window closed / conflict / etc.) or a transport error:
+            // we're not approved yet — keep retrying.
+            _ => EnrollResult::Pending,
+        }
     }
+}
+
+/// Outcome of a self-enrollment attempt.
+#[derive(Debug, PartialEq, Eq)]
+pub enum EnrollResult {
+    /// The Standalone confirms this sensor is approved — ready to forward.
+    Approved,
+    /// Registered/updated but still awaiting approval (or the window is closed,
+    /// or a transient error). Keep retrying.
+    Pending,
+}
+
+#[derive(serde::Deserialize)]
+struct EnrollResponse {
+    status: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -126,18 +157,41 @@ struct AcceptResponse {
     accepted: Vec<Uuid>,
 }
 
-/// Background loop: forward continuously, backing off 30s when not-approved
-/// or on error, idling 2s when the queue is empty.
+/// Background loop.
+///
+/// While NOT approved, it proactively self-enrolls every 30s — independent of
+/// whether anything has been captured yet. This is what lets a freshly
+/// provisioned sensor (no capture hardware, empty cache) appear in the
+/// Standalone's pending list the moment its enrollment window opens; without
+/// it, a sensor with nothing to forward would never contact the Standalone and
+/// could never be approved. Once approved, it forwards continuously, dropping
+/// back to enrolling if approval is ever revoked (ingest returns 403).
 pub fn spawn_forwarder(forwarder: SensorForwarder) {
     tokio::spawn(async move {
+        let mut approved = false;
         loop {
-            let delay = match forwarder.forward_once().await {
-                ForwardOutcome::Delivered(_) => FORWARD_IDLE,
-                ForwardOutcome::Nothing => FORWARD_IDLE,
-                ForwardOutcome::NotApproved => FORWARD_BACKOFF,
-                ForwardOutcome::Error(e) => {
-                    eprintln!("SensorForwarder: {e}");
-                    FORWARD_BACKOFF
+            let delay = if !approved {
+                match forwarder.enroll().await {
+                    EnrollResult::Approved => {
+                        approved = true;
+                        // Loop straight into forwarding whatever is queued.
+                        FORWARD_IDLE
+                    }
+                    // Still pending / window not open yet / transient error.
+                    EnrollResult::Pending => FORWARD_BACKOFF,
+                }
+            } else {
+                match forwarder.forward_once().await {
+                    ForwardOutcome::Delivered(_) | ForwardOutcome::Nothing => FORWARD_IDLE,
+                    ForwardOutcome::NotApproved => {
+                        // Approval was revoked — go back to enrolling.
+                        approved = false;
+                        FORWARD_BACKOFF
+                    }
+                    ForwardOutcome::Error(e) => {
+                        eprintln!("SensorForwarder: {e}");
+                        FORWARD_BACKOFF
+                    }
                 }
             };
             tokio::time::sleep(delay).await;

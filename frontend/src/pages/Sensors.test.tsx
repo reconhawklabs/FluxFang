@@ -14,10 +14,14 @@ function wrapper({ children }: { children: ReactNode }) {
 }
 
 const PENDING: Sensor = {
-  id: 's1', data_source_id: 'ds1', sensor_id: 'frontgate', fingerprint: '4F-A2-09-EE',
+  id: 's1', data_source_id: 'ds1', sensor_id: 'frontgate', fingerprint: '4F-A2-09-EE-1B-77-C3-90',
   status: 'pending', auto_group_emitters: true, source_ip: '5.6.7.8',
   approved_at: null, last_seen_at: '2026-07-21T00:00:00Z', online: true, emissions_24h: 0,
 };
+
+// A well-formed 32-byte base64 key (btoa of 32 ASCII bytes) — passes the
+// dialog's `isValidKey` shape check so Confirm enables.
+const VALID_KEY = btoa('0123456789abcdef0123456789abcdef');
 
 function mockSensors(list: Sensor[]) {
   vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
@@ -63,13 +67,71 @@ test('approve dialog shows the fingerprint and posts the auto_group choice', asy
   // 4F-A2-09-EE"), so an unscoped getByText matches both and throws.
   const dialog = screen.getByRole('dialog');
   expect(within(dialog).getByText(/4F-A2-09-EE/)).toBeInTheDocument();
+  // Confirm stays disabled until the operator types a valid-shaped key.
+  const confirm = within(dialog).getByRole('button', { name: /confirm/i });
+  expect(confirm).toBeDisabled();
+  // A malformed key keeps Confirm disabled and surfaces a shape hint.
+  fireEvent.change(within(dialog).getByLabelText(/sensor encryption key/i), { target: { value: 'not-a-key' } });
+  expect(confirm).toBeDisabled();
+  expect(within(dialog).getByText(/doesn't look like a valid key/i)).toBeInTheDocument();
+  fireEvent.change(within(dialog).getByLabelText(/sensor encryption key/i), { target: { value: VALID_KEY } });
   // toggle auto-group OFF (defaults on) then confirm
   fireEvent.click(within(dialog).getByLabelText(/group emissions into emitters/i));
-  fireEvent.click(within(dialog).getByRole('button', { name: /confirm/i }));
+  expect(confirm).not.toBeDisabled();
+  fireEvent.click(confirm);
 
   await waitFor(() => expect(calls.some((c) => c.url.includes('/approve'))).toBe(true));
   const approve = calls.find((c) => c.url.includes('/approve'))!;
-  expect(approve.body).toEqual({ auto_group_emitters: false });
+  expect(approve.body).toEqual({ auto_group_emitters: false, key: VALID_KEY });
+});
+
+test('approve dialog shows a wrong-key error on HTTP 400', async () => {
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.toString();
+    if (init?.method === 'POST' && url.includes('/approve'))
+      return Promise.resolve(jsonResponse('nope', 400));
+    if (url.includes('/api/sensors')) return Promise.resolve(jsonResponse([PENDING]));
+    if (url.includes('/api/data-sources')) return Promise.resolve(jsonResponse([]));
+    return Promise.reject(new Error(url));
+  }));
+  render(<Sensors />, { wrapper });
+  fireEvent.click(await screen.findByRole('button', { name: /approve/i }));
+  const dialog = screen.getByRole('dialog');
+  // Valid-shaped key (so Confirm enables), but the backend rejects it 400.
+  fireEvent.change(within(dialog).getByLabelText(/sensor encryption key/i), { target: { value: VALID_KEY } });
+  fireEvent.click(within(dialog).getByRole('button', { name: /confirm/i }));
+  await waitFor(() => expect(within(dialog).getByRole('alert')).toHaveTextContent(/doesn't match this sensor's fingerprint/i));
+});
+
+test('Allow new Sensors opens a counting-down window and disables the button', async () => {
+  vi.useFakeTimers();
+  try {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (init?.method === 'POST' && url.includes('/allow-sensors'))
+        return Promise.resolve(jsonResponse({ remaining_secs: 3 }));
+      if (url.includes('/api/sensors')) return Promise.resolve(jsonResponse([]));
+      if (url.includes('/api/data-sources')) return Promise.resolve(jsonResponse([
+        { id: 'dsX', created_at: '', kind: 'sensor', mode: 'listener', interface: null, status: 'running', config: { bind_ip: '0.0.0.0', bind_port: 9000 }, last_error: null, desired_state: 'running', last_ok_at: null },
+      ]));
+      return Promise.reject(new Error(url));
+    }));
+    render(<Sensors />, { wrapper });
+    const btn = await vi.waitFor(() => {
+      const b = screen.getByRole('button', { name: /allow new sensors/i });
+      expect(b).not.toBeDisabled();
+      return b;
+    });
+    fireEvent.click(btn);
+    await vi.waitFor(() => expect(screen.getByText(/sensor enrollment window open for 3s/i)).toBeInTheDocument());
+    expect(btn).toBeDisabled();
+    // Advance past the window; the countdown clears and the button re-enables.
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(screen.queryByText(/sensor enrollment window open/i)).not.toBeInTheDocument();
+    expect(btn).not.toBeDisabled();
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test('reject posts to the reject endpoint', async () => {

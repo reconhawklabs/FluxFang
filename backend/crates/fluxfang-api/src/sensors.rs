@@ -66,6 +66,11 @@ async fn list_sensors(State(state): State<AppState>) -> Result<Json<Value>, Stat
 #[derive(Deserialize)]
 struct ApproveBody {
     auto_group_emitters: bool,
+    /// The sensor's symmetric key, typed in by the operator out-of-band (read
+    /// off the sensor's own UI). It is NEVER transmitted by the sensor — the
+    /// sensor only sent its one-way fingerprint at enrollment. We verify the
+    /// typed key reproduces that fingerprint before trusting it.
+    key: String,
 }
 
 async fn approve_sensor(
@@ -73,11 +78,50 @@ async fn approve_sensor(
     Path(id): Path<Uuid>,
     Json(body): Json<ApproveBody>,
 ) -> Result<Json<Value>, StatusCode> {
-    if SensorRepo::get(&state.pool, id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?.is_none() {
+    let Some(sensor) = SensorRepo::get(&state.pool, id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    else {
         return Err(StatusCode::NOT_FOUND);
+    };
+
+    // Only a `pending` sensor may be approved. Without this guard, approve
+    // would happily run on a `revoked`/`rejected` row (whose key+fingerprint
+    // are still on file), silently resurrecting it — contradicting the enroll
+    // handler's "do not resurrect revoked/rejected" policy. 409 = wrong state.
+    if sensor.status != "pending" {
+        return Err(StatusCode::CONFLICT);
     }
-    SensorRepo::set_auto_group(&state.pool, id, body.auto_group_emitters).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let s = SensorRepo::set_status(&state.pool, id, "approved", true).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // The operator-supplied key must decode to a valid 32-byte key AND
+    // reproduce the fingerprint the sensor claimed at enrollment. This is what
+    // lets the key stay off the wire: a matching fingerprint proves the
+    // operator entered the sensor's real key (not a typo, not an impostor's).
+    let key = fluxfang_sensor_proto::decode_key(&body.key).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let computed = fluxfang_sensor_proto::fingerprint(&sensor.sensor_id, &key);
+    if computed != sensor.fingerprint {
+        // Wrong key: does not match this sensor's fingerprint. 400 so the UI
+        // can tell the operator to re-check the key.
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    SensorRepo::set_key(&state.pool, id, &body.key, &computed)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    SensorRepo::set_auto_group(&state.pool, id, body.auto_group_emitters)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let s = SensorRepo::set_status(&state.pool, id, "approved", true)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Approving a sensor closes its listener's enrollment window (locked
+    // decision): the operator is done, so stop accepting new registrations.
+    state
+        .sensor_listeners
+        .close_enrollment_window(sensor.data_source_id)
+        .await;
+
     Ok(Json(sensor_json(&s, chrono::Utc::now(), 0)))
 }
 

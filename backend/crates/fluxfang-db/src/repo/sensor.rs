@@ -9,21 +9,26 @@ pub struct SensorRepo;
 
 impl SensorRepo {
     /// Create a new `pending` sensor for `data_source_id`.
+    ///
+    /// The symmetric key is NOT known at enrollment time — a sensor transmits
+    /// only its id + one-way `fingerprint`. The operator supplies the key in
+    /// the approval dialog, which is when [`Self::set_key`] fills it in. Until
+    /// then `key` is stored as the empty string (the codebase's "no key yet"
+    /// sentinel); an empty key can never `decode_key`, so such a row is
+    /// unusable for ingest — exactly right for a not-yet-approved sensor.
     pub async fn insert_pending(
         pool: &PgPool,
         data_source_id: Uuid,
         sensor_id: &str,
-        key: &str,
         fingerprint: &str,
         source_ip: Option<&str>,
     ) -> Result<Sensor, sqlx::Error> {
         sqlx::query_as::<_, Sensor>(
             "INSERT INTO sensor (data_source_id, sensor_id, key, fingerprint, source_ip, last_seen_at) \
-             VALUES ($1, $2, $3, $4, $5, now()) RETURNING *",
+             VALUES ($1, $2, '', $3, $4, now()) RETURNING *",
         )
         .bind(data_source_id)
         .bind(sensor_id)
-        .bind(key)
         .bind(fingerprint)
         .bind(source_ip)
         .fetch_one(pool)
@@ -57,30 +62,30 @@ impl SensorRepo {
             .await
     }
 
-    /// Update the key/fingerprint/source_ip and bump last_seen for a sensor
-    /// re-enrolling while still `pending`.
+    /// Update the fingerprint/source_ip and bump last_seen for a sensor
+    /// re-enrolling while still `pending`. The key is never carried on the
+    /// wire, so this only refreshes the claimed fingerprint (the operator
+    /// still supplies the actual key at approval).
     ///
     /// Guarded by `status = 'pending'` in the WHERE clause: without it, a
     /// TOCTOU window exists between the enroll handler's read of the sensor
     /// row and this write — if an operator approves the sensor in that gap,
     /// this write would land on the now-`approved` row and silently swap in
-    /// an attacker-supplied key/fingerprint the operator never verified. The
+    /// an attacker-supplied fingerprint the operator never verified. The
     /// guard makes that race safe: if the row is no longer `pending` by the
     /// time this UPDATE runs, it matches zero rows and we return `Ok(None)`
     /// instead of overwriting.
-    pub async fn update_pending_key(
+    pub async fn update_pending_fingerprint(
         pool: &PgPool,
         id: Uuid,
-        key: &str,
         fingerprint: &str,
         source_ip: Option<&str>,
     ) -> Result<Option<Sensor>, sqlx::Error> {
         sqlx::query_as::<_, Sensor>(
-            "UPDATE sensor SET key = $2, fingerprint = $3, source_ip = $4, last_seen_at = now() \
+            "UPDATE sensor SET fingerprint = $2, source_ip = $3, last_seen_at = now() \
              WHERE id = $1 AND status = 'pending' RETURNING *",
         )
         .bind(id)
-        .bind(key)
         .bind(fingerprint)
         .bind(source_ip)
         .fetch_optional(pool)

@@ -1,5 +1,5 @@
 mod common;
-use fluxfang_api::forwarder::{ForwardOutcome, SensorForwarder};
+use fluxfang_api::forwarder::{EnrollResult, ForwardOutcome, SensorForwarder};
 use fluxfang_db::models::NewCachedEmission;
 use fluxfang_db::node_config::SensorConfig;
 use fluxfang_db::{CachedEmissionRepo, DataSourceRepo, EmissionRepo, NewDataSource, SensorRepo};
@@ -31,9 +31,10 @@ async fn forward_once_delivers_cached_emissions_to_an_approved_listener() {
     let key = fluxfang_sensor_proto::generate_key();
     let key_b64 = fluxfang_sensor_proto::encode_key(&key);
     let fp = fluxfang_sensor_proto::fingerprint("frontgate", &key);
-    let s = SensorRepo::insert_pending(&pool, ds.id, "frontgate", &key_b64, &fp, None)
+    let s = SensorRepo::insert_pending(&pool, ds.id, "frontgate", &fp, None)
         .await
         .unwrap();
+    SensorRepo::set_key(&pool, s.id, &key_b64, &fp).await.unwrap();
     SensorRepo::set_status(&pool, s.id, "approved", true)
         .await
         .unwrap();
@@ -108,7 +109,7 @@ async fn forward_once_returns_not_approved_for_a_pending_sensor() {
     let key = fluxfang_sensor_proto::generate_key();
     let key_b64 = fluxfang_sensor_proto::encode_key(&key);
     let fp = fluxfang_sensor_proto::fingerprint("frontgate", &key);
-    SensorRepo::insert_pending(&pool, ds.id, "frontgate", &key_b64, &fp, None)
+    SensorRepo::insert_pending(&pool, ds.id, "frontgate", &fp, None)
         .await
         .unwrap();
     let mgr = common::sensor_manager(pool.clone());
@@ -156,6 +157,74 @@ async fn forward_once_returns_not_approved_for_a_pending_sensor() {
 
     // Nothing was ingested on the Standalone side either.
     assert!(EmissionRepo::get(&pool, cached.id).await.unwrap().is_none());
+
+    mgr.stop(ds.id).await;
+}
+
+#[tokio::test]
+async fn enroll_registers_pending_then_reports_approved_after_operator_approves() {
+    let pool = common::fresh_pool_shared().await;
+    let port = free_port().await;
+
+    // Stand up a Standalone sensor listener with its enrollment window open.
+    let ds = DataSourceRepo::insert(
+        &pool,
+        NewDataSource {
+            kind: "sensor".into(),
+            mode: "listener".into(),
+            interface: None,
+            config: serde_json::json!({"bind_ip":"127.0.0.1","bind_port":port,"enrollment_window_secs":900}),
+        },
+    )
+    .await
+    .unwrap();
+    let mgr = common::sensor_manager(pool.clone());
+    mgr.start(ds.id).await;
+    mgr.open_enrollment_window(ds.id).await;
+
+    // Fresh key on the Sensor side; NO cached emissions.
+    let key = fluxfang_sensor_proto::generate_key();
+    let key_b64 = fluxfang_sensor_proto::encode_key(&key);
+    let fp = fluxfang_sensor_proto::fingerprint("frontgate", &key);
+    let fwd = SensorForwarder::new(
+        pool.clone(),
+        &SensorConfig {
+            host: "127.0.0.1".into(),
+            port,
+            key: key_b64.clone(),
+            cache_ttl_secs: 604800,
+        },
+        "frontgate".into(),
+    )
+    .unwrap();
+
+    // Proactive enrollment: the sensor transmits only {sensor_id, fingerprint}.
+    let result = fwd.enroll().await;
+    assert_eq!(result, EnrollResult::Pending, "first enroll is still pending");
+
+    // A pending row now exists on the Standalone, with NO key (key arrives only
+    // at approval) and the fingerprint the sensor claimed.
+    let s = SensorRepo::get_by_sensor_id(&pool, ds.id, "frontgate")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(s.status, "pending");
+    assert_eq!(s.key, "", "the key must never be transmitted at enrollment");
+    assert_eq!(s.fingerprint, fp, "stored fingerprint must match the sensor's");
+
+    // Operator approves server-side (types the key in → set_key, then approves).
+    SensorRepo::set_key(&pool, s.id, &key_b64, &fp).await.unwrap();
+    SensorRepo::set_status(&pool, s.id, "approved", true)
+        .await
+        .unwrap();
+
+    // Re-enroll now reports Approved.
+    let result = fwd.enroll().await;
+    assert_eq!(
+        result,
+        EnrollResult::Approved,
+        "after approval the sensor learns it is approved"
+    );
 
     mgr.stop(ds.id).await;
 }
