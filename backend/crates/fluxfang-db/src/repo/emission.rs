@@ -83,6 +83,16 @@ const EMISSION_SORTS: &[(&str, &str)] =
 /// `EmissionFilter { data_source_id: Some(id), ..Default::default() }` —
 /// every field defaults to "no constraint" (`Default::default()`'s
 /// `limit`/`offset` default to a sane first page; see [`Default`] impl).
+/// One located+signal emission reading for RSSI localization: the capturing
+/// node's position and the measured signal level at that point/time.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct LocatedSignal {
+    pub lon: f64,
+    pub lat: f64,
+    pub rssi: i32,
+    pub observed_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone)]
 pub struct EmissionFilter {
     pub data_source_id: Option<Uuid>,
@@ -678,6 +688,29 @@ impl EmissionRepo {
         sqlx::query_as::<_, (String, i64)>(
             "SELECT sensor_id, count(*) FROM emission WHERE observed_at >= $1 GROUP BY sensor_id",
         )
+        .bind(since)
+        .fetch_all(pool)
+        .await
+    }
+
+    /// An emitter's emissions that carry BOTH a GPS location and a signal
+    /// level, at or after `since`, newest first — the raw input to RSSI
+    /// localization. `lon`/`lat` are the capturing node's position (`ST_X`/
+    /// `ST_Y` of `location`); rows without a location or signal are excluded.
+    pub async fn located_signal_for_emitter(
+        pool: &PgPool,
+        emitter_id: Uuid,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<LocatedSignal>, sqlx::Error> {
+        sqlx::query_as::<_, LocatedSignal>(
+            "SELECT ST_X(location::geometry) AS lon, ST_Y(location::geometry) AS lat, \
+                    signal_strength AS rssi, observed_at \
+             FROM emission \
+             WHERE emitter_id = $1 AND location IS NOT NULL AND signal_strength IS NOT NULL \
+               AND observed_at >= $2 \
+             ORDER BY observed_at DESC",
+        )
+        .bind(emitter_id)
         .bind(since)
         .fetch_all(pool)
         .await

@@ -223,7 +223,22 @@ impl From<RuleSqlError> for EmitterQueryError {
 /// name, not position, so appending them here is enough for every query
 /// built from this constant to pick them up.
 pub const EMITTER_COLUMNS: &str = "id, created_at, name, type, entity_id, match_criteria, \
-     first_seen_at, last_seen_at, emitter_type, attributes, match_enabled, identity_key, source";
+     first_seen_at, last_seen_at, emitter_type, attributes, match_enabled, identity_key, source, \
+     ST_X(est_location::geometry) AS est_lon, ST_Y(est_location::geometry) AS est_lat, \
+     est_uncertainty_m, est_bin_count, est_updated_at";
+
+/// `EMITTER_COLUMNS` qualified with a table alias, for queries that join and
+/// need `e.id` etc. Handles the `est_location` unpacking correctly (the alias
+/// goes *inside* `ST_X(...)`), which a blind `e.<col>` prefix cannot do.
+pub fn emitter_columns_qualified(a: &str) -> String {
+    format!(
+        "{a}.id, {a}.created_at, {a}.name, {a}.type, {a}.entity_id, {a}.match_criteria, \
+         {a}.first_seen_at, {a}.last_seen_at, {a}.emitter_type, {a}.attributes, \
+         {a}.match_enabled, {a}.identity_key, {a}.source, \
+         ST_X({a}.est_location::geometry) AS est_lon, ST_Y({a}.est_location::geometry) AS est_lat, \
+         {a}.est_uncertainty_m, {a}.est_bin_count, {a}.est_updated_at"
+    )
+}
 
 /// Allow-listed emitter sort keys -> SQL ordering expressions. `identity`
 /// mirrors `MacIdentityCell`'s display precedence; `emissions` orders by the
@@ -710,6 +725,49 @@ impl EmitterRepo {
         Ok(rows.into_iter().map(|(t,)| t).collect())
     }
 
+    /// Store an emitter's RSSI-localization estimate (see the localization
+    /// pass). `lon`/`lat` are packed into the `est_location` geography point.
+    pub async fn set_estimate(
+        pool: &PgPool,
+        id: Uuid,
+        lon: f64,
+        lat: f64,
+        uncertainty_m: f64,
+        bin_count: i32,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE emitter SET \
+                est_location = ST_SetSRID(ST_MakePoint($2, $3), 4326)::geography, \
+                est_uncertainty_m = $4, est_bin_count = $5, est_updated_at = now() \
+             WHERE id = $1",
+        )
+        .bind(id)
+        .bind(lon)
+        .bind(lat)
+        .bind(uncertainty_m)
+        .bind(bin_count)
+        .execute(pool)
+        .await
+        .map(|_| ())
+    }
+
+    /// Distinct `emitter_id`s that have at least one emission observed at or
+    /// after `since` — the candidate set for the localization pass so it only
+    /// recomputes emitters with recent activity.
+    pub async fn ids_with_recent_emissions(
+        pool: &PgPool,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<Uuid>, sqlx::Error> {
+        let rows: Vec<(Uuid,)> = sqlx::query_as(
+            "SELECT DISTINCT emitter_id FROM emission \
+             WHERE emitter_id IS NOT NULL AND observed_at >= $1",
+        )
+        .bind(since)
+        .fetch_all(pool)
+        .await?;
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
     /// TPMS-sensor emitters that have at least one emission — from a data
     /// source with `config.auto_correlate_tpms = true` — observed at or
     /// after `since` — the candidate set for the correlation engine (Spec
@@ -750,11 +808,7 @@ impl EmitterRepo {
              WHERE e.emitter_type = 'tpms_sensor' \
                AND ds.config->'auto_correlate_tpms' = 'true'::jsonb \
                AND em.observed_at >= $1",
-            cols = EMITTER_COLUMNS
-                .split(',')
-                .map(|c| format!("e.{}", c.trim()))
-                .collect::<Vec<_>>()
-                .join(", ")
+            cols = emitter_columns_qualified("e")
         );
         sqlx::query_as::<_, Emitter>(&sql)
             .bind(since)
