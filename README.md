@@ -92,8 +92,11 @@ connection settings are entered in the UI at setup and editable later under
    choosing **Sensor Node**. Enter:
    - a **sensor id** (a short slug, no spaces — how this node is identified),
    - the Standalone's **host and port** (the Sensor datasource's bind address),
-   - an **encryption key** (click *Generate*, or paste one), and
-   - a cache retention (TTL).
+     and
+   - an **encryption key** (click *Generate*, or paste one).
+
+   The local cache retention defaults to 7 days; change it later under
+   **Settings**.
 2. Add the sensor's own capture hardware on its **Data Sources** page. It
    captures into a local cache, self-registers with the Standalone, and
    retries every 30s until you approve it — then it forwards continuously.
@@ -101,8 +104,9 @@ connection settings are entered in the UI at setup and editable later under
    depth, undelivered backlog, target), an **Emissions** view of its local
    cache, and **Settings** to change the host/port/key/TTL.
 
-Undelivered emissions are buffered locally and pruned once they exceed the
-cache TTL, so a long outage bounds disk use rather than growing without limit.
+Captured emissions are buffered in the sensor's local cache and pruned once
+they exceed the cache TTL — so a long outage bounds disk use rather than
+growing without limit, at the cost of dropping a backlog older than the TTL.
 Delivery is at-least-once and de-duplicated by a stable id, so retries never
 create duplicate emissions on the Standalone.
 
