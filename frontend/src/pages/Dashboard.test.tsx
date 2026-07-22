@@ -145,6 +145,7 @@ const EMITTER_1: Emitter = {
   type_label: "wifi-ap",
   category: null,
   emission_count: 0,
+  estimate: null,
 };
 
 const ENTITY_1: Entity = {

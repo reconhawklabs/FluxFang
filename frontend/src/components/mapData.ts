@@ -9,6 +9,7 @@
 // directly.
 import type { Feature, FeatureCollection, Point, Polygon } from 'geojson';
 import type { Emission } from '../api/emissions';
+import type { Emitter } from '../api/emitters';
 import type { Zone } from '../api/zones';
 
 /** A bare located point — what `EmissionsHeatmap.tsx` (Task C's reusable
@@ -133,12 +134,20 @@ export function entitiesToMarkerFeatures(
 }
 
 /** Phase 6 (Map page redesign, "Layers" group's Emitters toggle): one marker
- * per emitter, placed at that emitter's most-recent LOCATED emission.
- * Structurally identical to `EntityMarker` (`id`/`name`/`lon`/`lat`/
- * `observed_at`), so it reuses `entitiesToMarkerFeatures` for the GeoJSON
- * shaping rather than needing its own — only the grouping-by-emitter-id
- * (`emitterMarkersFromEmissions` below) is new. */
-export type EmitterMarker = EntityMarker;
+ * per emitter, placed at that emitter's estimated position (Phase C emitter
+ * localization) when known, else its most-recent LOCATED emission. Extends
+ * `EntityMarker` (`id`/`name`/`lon`/`lat`/`observed_at`), so it reuses
+ * `entitiesToMarkerFeatures` for the point-marker GeoJSON shaping rather than
+ * needing its own — the grouping-by-emitter-id (`emitterMarkersFromEmissions`
+ * / `emitterMarkers` below) and the optional uncertainty radius are the only
+ * additions. */
+export interface EmitterMarker extends EntityMarker {
+  /** Radius (in METERS) of the localization uncertainty circle drawn around
+   * this marker. Present only for markers placed at an emitter's backend
+   * `estimate` (`emitterMarkers` below); absent for the latest-located-
+   * emission fallback, which carries no uncertainty. */
+  uncertaintyM?: number;
+}
 
 /**
  * `emissions` -> one `EmitterMarker` per distinct `emitter_id` present,
@@ -182,6 +191,56 @@ export function emitterMarkersFromEmissions(
   return markers;
 }
 
+/**
+ * Phase C (emitter RSSI localization) marker resolution — one `EmitterMarker`
+ * per emitter, preferring the backend's real-world position `estimate` over
+ * the latest-located-emission fallback:
+ *
+ *   - An emitter WITH `estimate != null` is placed at `estimate.lon/lat` and
+ *     carries `uncertaintyM = estimate.uncertainty_m` (meters), so the map can
+ *     draw its uncertainty circle.
+ *   - An emitter WITHOUT an estimate keeps today's behavior: its marker sits
+ *     at its most-recent located emission (via `emitterMarkersFromEmissions`),
+ *     with no `uncertaintyM`.
+ *
+ * Emissions belonging to an emitter that HAS an estimate are ignored for
+ * placement (the estimate wins); any other located emission still yields a
+ * fallback marker even if its `emitter_id` isn't in `emitters` (defensive —
+ * same lenient behavior as `emitterMarkersFromEmissions` alone).
+ *
+ * `emitterNames` is used for the fallback path's labels exactly as
+ * `emitterMarkersFromEmissions` uses it; estimate markers prefer that same
+ * name map, falling back to the emitter's own `name` (then its id).
+ */
+export function emitterMarkers(
+  emitters: Emitter[],
+  emissions: Emission[],
+  emitterNames: Record<string, string>,
+): EmitterMarker[] {
+  const estimateMarkers: EmitterMarker[] = [];
+  const estimatedIds = new Set<string>();
+
+  for (const emitter of emitters) {
+    const estimate = emitter.estimate;
+    if (!estimate) continue;
+    estimatedIds.add(emitter.id);
+    estimateMarkers.push({
+      id: emitter.id,
+      name: emitterNames[emitter.id] ?? emitter.name ?? emitter.id,
+      lon: estimate.lon,
+      lat: estimate.lat,
+      observed_at: estimate.updated_at ?? emitter.last_seen_at ?? '',
+      uncertaintyM: estimate.uncertainty_m,
+    });
+  }
+
+  const fallback = emitterMarkersFromEmissions(emissions, emitterNames).filter(
+    (marker) => !estimatedIds.has(marker.id),
+  );
+
+  return [...estimateMarkers, ...fallback];
+}
+
 export interface ZonePolygonProperties {
   id: string;
   name: string;
@@ -204,24 +263,36 @@ const EARTH_RADIUS_M = 6_371_000;
 const METERS_PER_DEGREE_LAT = (Math.PI / 180) * EARTH_RADIUS_M;
 
 /**
- * One `zone` -> a GeoJSON `Feature<Polygon>` approximating its circle
- * (`radius_m` around `[lon, lat]`) as a `CIRCLE_SEGMENTS`-sided ring, closed
- * (first coordinate repeated as the last, per the GeoJSON `Polygon` spec).
+ * A closed `CIRCLE_SEGMENTS`-sided ring approximating a circle of `radiusM`
+ * meters around `[lon, lat]` (first coordinate repeated as the last, per the
+ * GeoJSON `Polygon` spec). Shared by the zones overlay (`zoneToCircleFeature`)
+ * and the emitter uncertainty circles (`emitterUncertaintyCirclesGeoJSON`) so
+ * both use the same equirectangular meters->degrees approximation — MapLibre's
+ * `circle-radius` is in pixels, not meters, so a meters-accurate circle has to
+ * be a real polygon like this.
  */
-export function zoneToCircleFeature(zone: Zone): Feature<Polygon, ZonePolygonProperties> {
-  const metersPerDegreeLon = METERS_PER_DEGREE_LAT * Math.cos((zone.lat * Math.PI) / 180);
+function circlePolygonRing(lon: number, lat: number, radiusM: number): [number, number][] {
+  const metersPerDegreeLon = METERS_PER_DEGREE_LAT * Math.cos((lat * Math.PI) / 180);
 
   const ring: [number, number][] = [];
   for (let i = 0; i <= CIRCLE_SEGMENTS; i++) {
     const angle = (i / CIRCLE_SEGMENTS) * 2 * Math.PI;
-    const dLon = (zone.radius_m * Math.cos(angle)) / metersPerDegreeLon;
-    const dLat = (zone.radius_m * Math.sin(angle)) / METERS_PER_DEGREE_LAT;
-    ring.push([zone.lon + dLon, zone.lat + dLat]);
+    const dLon = (radiusM * Math.cos(angle)) / metersPerDegreeLon;
+    const dLat = (radiusM * Math.sin(angle)) / METERS_PER_DEGREE_LAT;
+    ring.push([lon + dLon, lat + dLat]);
   }
+  return ring;
+}
 
+/**
+ * One `zone` -> a GeoJSON `Feature<Polygon>` approximating its circle
+ * (`radius_m` around `[lon, lat]`) as a closed `CIRCLE_SEGMENTS`-sided ring
+ * (see `circlePolygonRing`).
+ */
+export function zoneToCircleFeature(zone: Zone): Feature<Polygon, ZonePolygonProperties> {
   return {
     type: 'Feature',
-    geometry: { type: 'Polygon', coordinates: [ring] },
+    geometry: { type: 'Polygon', coordinates: [circlePolygonRing(zone.lon, zone.lat, zone.radius_m)] },
     properties: { id: zone.id, name: zone.name, radius_m: zone.radius_m },
   };
 }
@@ -230,4 +301,38 @@ export function zoneToCircleFeature(zone: Zone): Feature<Polygon, ZonePolygonPro
  * fill+line layers (one `zoneToCircleFeature` per zone). */
 export function zonesToCircleGeoJSON(zones: Zone[]): FeatureCollection<Polygon, ZonePolygonProperties> {
   return { type: 'FeatureCollection', features: zones.map(zoneToCircleFeature) };
+}
+
+export interface UncertaintyCircleProperties {
+  /** The owning emitter's id (parallels `ZonePolygonProperties.id`) — handy
+   * for debugging / future per-emitter styling; the fill layer itself doesn't
+   * currently key off it. */
+  id: string;
+  /** The circle's radius in METERS (`estimate.uncertainty_m`). */
+  uncertainty_m: number;
+}
+
+/**
+ * `markers` -> a GeoJSON `FeatureCollection<Polygon>` of localization
+ * uncertainty circles, one closed `circlePolygonRing` per marker that carries
+ * a `uncertaintyM` (i.e. only the estimate-placed markers from
+ * `emitterMarkers`; fallback markers have no radius and are skipped). Feeds
+ * the map's translucent amber uncertainty fill layer (`MapView.tsx`).
+ */
+export function emitterUncertaintyCirclesGeoJSON(
+  markers: EmitterMarker[],
+): FeatureCollection<Polygon, UncertaintyCircleProperties> {
+  const features: Feature<Polygon, UncertaintyCircleProperties>[] = [];
+  for (const marker of markers) {
+    if (marker.uncertaintyM === undefined) continue;
+    features.push({
+      type: 'Feature',
+      geometry: {
+        type: 'Polygon',
+        coordinates: [circlePolygonRing(marker.lon, marker.lat, marker.uncertaintyM)],
+      },
+      properties: { id: marker.id, uncertainty_m: marker.uncertaintyM },
+    });
+  }
+  return { type: 'FeatureCollection', features };
 }

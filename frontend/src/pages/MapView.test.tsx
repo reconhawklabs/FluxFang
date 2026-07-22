@@ -566,6 +566,7 @@ test("clicking an emitter marker opens a popup with its details", async () => {
     last_seen_at: "2026-07-05T01:00:00Z",
     created_at: "2026-07-05T00:00:00Z",
     emission_count: 0,
+    estimate: null,
   };
   const fetchMock = mockRoutes(
     baseRoutes({ "GET /api/emitters": () => ({ items: [emitter], total: 1 }) }),
@@ -595,6 +596,60 @@ test("clicking an emitter marker opens a popup with its details", async () => {
     expect(popup.html).toContain("Kitchen AP");
     expect(popup.html).toContain("WiFi Access Point");
     expect(popup.html).toContain("aa:bb:cc:dd:ee:ff");
+  });
+});
+
+test("an emitter with an estimate renders its uncertainty circle at the estimate position", async () => {
+  const localized: Emitter = {
+    id: "emitter-1",
+    name: "Localized AP",
+    type: null,
+    emitter_type: "wifi_access_point",
+    attributes: { ssid: "HomeNet" },
+    match_enabled: true,
+    type_label: "WiFi Access Point",
+    category: "wifi",
+    entity_id: null,
+    match_criteria: { match: "all", conditions: [] },
+    first_seen_at: "2026-07-05T00:00:00Z",
+    last_seen_at: "2026-07-05T01:00:00Z",
+    created_at: "2026-07-05T00:00:00Z",
+    emission_count: 3,
+    estimate: {
+      lon: 2.5,
+      lat: 1.5,
+      uncertainty_m: 80,
+      bin_count: 9,
+      updated_at: "2026-07-05T02:00:00Z",
+    },
+  };
+  const fetchMock = mockRoutes(
+    baseRoutes({
+      "GET /api/emitters": () => ({ items: [localized], total: 1 }),
+    }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<MapView />, { wrapper });
+  await screen.findByTestId("maplibre-container");
+
+  await waitFor(() => {
+    const setData = latestFakeMap().getSource("emitter-uncertainty-source")
+      .setData as ReturnType<typeof vi.fn>;
+    const lastCall = setData.mock.calls.at(-1);
+    expect(lastCall).toBeDefined();
+    const geojson = lastCall?.[0] as {
+      features: Array<{
+        geometry: { type: string };
+        properties: { id: string; uncertainty_m: number };
+      }>;
+    };
+    expect(geojson.features).toHaveLength(1);
+    expect(geojson.features[0].geometry.type).toBe("Polygon");
+    expect(geojson.features[0].properties).toEqual({
+      id: "emitter-1",
+      uncertainty_m: 80,
+    });
   });
 });
 

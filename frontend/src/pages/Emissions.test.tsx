@@ -140,6 +140,7 @@ const EMITTER_1: Emitter = {
   last_seen_at: null,
   created_at: "2026-07-01T00:00:00Z",
   emission_count: 0,
+  estimate: null,
 };
 
 const WIFI_EMITTER_TYPES = [

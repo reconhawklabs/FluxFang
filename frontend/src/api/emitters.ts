@@ -50,6 +50,20 @@ export interface Emitter {
   /** Count of emissions currently attached to this emitter — backs the
    * Emitters page's "Emissions" column. */
   emission_count: number;
+  /** Backend's RSSI+GPS position estimate for this emitter (Phase C emitter
+   * localization). `null` until enough located emissions exist to localize it
+   * — the map falls back to the emitter's latest located emission then. When
+   * present, `lon`/`lat` are the estimated real-world position and
+   * `uncertainty_m` is the radius (in METERS) of the uncertainty circle drawn
+   * around it; `bin_count` is how many RSSI bins backed the estimate and
+   * `updated_at` when it was last recomputed (`null` if unknown). */
+  estimate: {
+    lon: number;
+    lat: number;
+    uncertainty_m: number;
+    bin_count: number;
+    updated_at: string | null;
+  } | null;
 }
 
 /** `POST /api/emitters` body — mirrors the backend's `CreateEmitterRequest`.
