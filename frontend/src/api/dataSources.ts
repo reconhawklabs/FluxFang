@@ -12,6 +12,8 @@
 //   - gps  + gpsd     -> `config: { host, port }`
 //   - gps  + serial   -> `config: { device, baud }`, `baud` one of
 //     `BAUD_RATES` (the backend's `ALLOWED_BAUD_RATES`)
+//   - sensor + listener -> `config: { bind_ip, bind_port,
+//     enrollment_window_secs }`, no top-level `interface`
 import { del, get, patch, post } from "./client";
 
 // "sensor" is not a kind the Add-Data-Source form creates directly — it's
@@ -21,7 +23,7 @@ import { del, get, patch, post } from "./client";
 // datasource list (e.g. the Sensors page's "Allow new Sensors" gating) can
 // narrow on it without an unsound comparison.
 export type DataSourceKind = "wifi" | "gps" | "bluetooth" | "rtl_sdr" | "sensor";
-export type DataSourceMode = "monitor" | "scan" | "gpsd" | "serial" | "tpms" | "manual";
+export type DataSourceMode = "monitor" | "scan" | "gpsd" | "serial" | "tpms" | "manual" | "listener";
 export type DataSourceStatus = "stopped" | "starting" | "running" | "error";
 
 /** The backend's `ALLOWED_BAUD_RATES` (`fluxfang-api::capture`) — the only
@@ -89,6 +91,19 @@ export interface RtlSdrConfig {
   auto_correlate_tpms?: boolean;
 }
 
+/** sensor + listener's `config` — a network listener that accepts
+ * connections from distributed Sensor nodes (`fluxfang-api::data_sources`'s
+ * `sensor_listener`; validated by the backend's `validate_data_source`:
+ * `bind_ip` must be a valid IP, `bind_port` 1..=65535,
+ * `enrollment_window_secs` > 0). Unlike wifi/bluetooth/rtl_sdr this kind has
+ * no hardware interface — it's a pure network bind, so there's no top-level
+ * `interface` field. */
+export interface SensorListenerConfig {
+  bind_ip: string;
+  bind_port: number;
+  enrollment_window_secs: number;
+}
+
 export type DataSourceConfig =
   | WifiConfig
   | BtConfig
@@ -96,6 +111,7 @@ export type DataSourceConfig =
   | GpsdConfig
   | SerialConfig
   | ManualConfig
+  | SensorListenerConfig
   | Record<string, never>;
 
 /** Mirrors `fluxfang_db::models::DataSource` exactly. */
