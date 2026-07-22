@@ -1,7 +1,6 @@
 mod common;
-use fluxfang_api::forwarder::{EnrollResult, ForwardOutcome, SensorForwarder};
+use fluxfang_api::forwarder::{EnrollResult, ForwardOutcome, ForwarderTarget, SensorForwarder};
 use fluxfang_db::models::NewCachedEmission;
-use fluxfang_db::node_config::SensorConfig;
 use fluxfang_db::{CachedEmissionRepo, DataSourceRepo, EmissionRepo, NewDataSource, SensorRepo};
 
 async fn free_port() -> u16 {
@@ -9,6 +8,15 @@ async fn free_port() -> u16 {
     let p = l.local_addr().unwrap().port();
     drop(l);
     p
+}
+
+/// Build the forwarding target the loop would derive from config.
+fn target(sensor_id: &str, key: &fluxfang_sensor_proto::Key, port: u16) -> ForwarderTarget {
+    ForwarderTarget {
+        sensor_id: sensor_id.into(),
+        key: *key,
+        base_url: format!("http://127.0.0.1:{port}"),
+    }
 }
 
 #[tokio::test]
@@ -60,18 +68,8 @@ async fn forward_once_delivers_cached_emissions_to_an_approved_listener() {
     }
 
     // Forward.
-    let fwd = SensorForwarder::new(
-        pool.clone(),
-        &SensorConfig {
-            host: "127.0.0.1".into(),
-            port,
-            key: key_b64,
-            cache_ttl_secs: 604800,
-        },
-        "frontgate".into(),
-    )
-    .unwrap();
-    let outcome = fwd.forward_once().await;
+    let fwd = SensorForwarder::new(pool.clone());
+    let outcome = fwd.forward_once(&target("frontgate", &key, port)).await;
     assert!(
         matches!(outcome, ForwardOutcome::Delivered(2)),
         "got {outcome:?}"
@@ -107,7 +105,6 @@ async fn forward_once_returns_not_approved_for_a_pending_sensor() {
     .await
     .unwrap();
     let key = fluxfang_sensor_proto::generate_key();
-    let key_b64 = fluxfang_sensor_proto::encode_key(&key);
     let fp = fluxfang_sensor_proto::fingerprint("frontgate", &key);
     SensorRepo::insert_pending(&pool, ds.id, "frontgate", &fp, None)
         .await
@@ -131,18 +128,8 @@ async fn forward_once_returns_not_approved_for_a_pending_sensor() {
     .await
     .unwrap();
 
-    let fwd = SensorForwarder::new(
-        pool.clone(),
-        &SensorConfig {
-            host: "127.0.0.1".into(),
-            port,
-            key: key_b64,
-            cache_ttl_secs: 604800,
-        },
-        "frontgate".into(),
-    )
-    .unwrap();
-    let outcome = fwd.forward_once().await;
+    let fwd = SensorForwarder::new(pool.clone());
+    let outcome = fwd.forward_once(&target("frontgate", &key, port)).await;
     assert!(
         matches!(outcome, ForwardOutcome::NotApproved),
         "got {outcome:?}"
@@ -186,20 +173,11 @@ async fn enroll_registers_pending_then_reports_approved_after_operator_approves(
     let key = fluxfang_sensor_proto::generate_key();
     let key_b64 = fluxfang_sensor_proto::encode_key(&key);
     let fp = fluxfang_sensor_proto::fingerprint("frontgate", &key);
-    let fwd = SensorForwarder::new(
-        pool.clone(),
-        &SensorConfig {
-            host: "127.0.0.1".into(),
-            port,
-            key: key_b64.clone(),
-            cache_ttl_secs: 604800,
-        },
-        "frontgate".into(),
-    )
-    .unwrap();
+    let fwd = SensorForwarder::new(pool.clone());
+    let tgt = target("frontgate", &key, port);
 
     // Proactive enrollment: the sensor transmits only {sensor_id, fingerprint}.
-    let result = fwd.enroll().await;
+    let result = fwd.enroll(&tgt).await;
     assert_eq!(result, EnrollResult::Pending, "first enroll is still pending");
 
     // A pending row now exists on the Standalone, with NO key (key arrives only
@@ -219,7 +197,7 @@ async fn enroll_registers_pending_then_reports_approved_after_operator_approves(
         .unwrap();
 
     // Re-enroll now reports Approved.
-    let result = fwd.enroll().await;
+    let result = fwd.enroll(&tgt).await;
     assert_eq!(
         result,
         EnrollResult::Approved,
