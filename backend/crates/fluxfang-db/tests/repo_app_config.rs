@@ -196,3 +196,42 @@ async fn set_node_config_overwrites_settings() {
         Some("hash")
     );
 }
+
+/// Regression for the legacy-DB upgrade bug: an install that completed setup
+/// before the node-role feature has `settings` with no `role`, so
+/// `node_config` returns `None` and `GET /api/config` 404s. Migration 0017's
+/// backfill (identical SQL below) marks such a row Standalone/local without
+/// touching the password hash, so the upgraded app loads.
+#[tokio::test]
+async fn backfill_node_role_migration_sql_heals_a_legacy_row() {
+    let pool = fresh_pool().await;
+
+    // Simulate a pre-feature install: password set, settings left at default
+    // '{}' (no role) — the state `complete_setup` never produces but older
+    // `set_password_hash`-based setup did.
+    AppConfigRepo::set_password_hash(&pool, "legacy-hash").await.unwrap();
+    assert!(
+        AppConfigRepo::node_config(&pool).await.unwrap().is_none(),
+        "a role-less settings row should read as no node config (the bug)"
+    );
+
+    // Apply the exact backfill statement migration 0017 runs at startup.
+    sqlx::query(
+        "UPDATE app_config \
+         SET settings = settings || '{\"role\": \"standalone\", \"node_sensor_id\": \"local\"}'::jsonb \
+         WHERE password_hash IS NOT NULL AND NOT (settings ? 'role')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let node = AppConfigRepo::node_config(&pool).await.unwrap().unwrap();
+    assert_eq!(node.role, NodeRole::Standalone);
+    assert_eq!(node.node_sensor_id, "local");
+    assert!(node.sensor.is_none());
+    // The backfill must not disturb the admin password.
+    assert_eq!(
+        AppConfigRepo::password_hash(&pool).await.unwrap().as_deref(),
+        Some("legacy-hash")
+    );
+}

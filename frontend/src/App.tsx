@@ -7,6 +7,7 @@
 //   needsSetup   -> Setup (forced, any path)
 //   !authed      -> Login (forced, any path)
 //   else         -> AppShell + nested page routes
+import { useRef } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./hooks/useAuth";
 import { useLiveEvents } from "./hooks/useLiveEvents";
@@ -35,10 +36,29 @@ import Settings from "./pages/Settings";
 export default function App() {
   const { needsSetup, authed, loading, refetch } = useAuth();
   useLiveEvents({ enabled: authed });
-  const { data: config, isLoading: configLoading } = useConfig(authed);
+  const { data: config, isSuccess: configLoaded, isError: configError } = useConfig(authed);
   const isSensor = config?.role === "sensor";
 
-  if (loading || (authed && configLoading)) {
+  // Gate on the node config only until it FIRST settles (success or error),
+  // then never again. On an upgraded install `/api/config` 404s until its
+  // backfill migration runs; React Query treats that errored, data-less query
+  // as perpetually stale and refetches it on every new observer mount. If we
+  // kept gating "Loading" on the pending state, rendering the shell would
+  // mount fresh `useConfig` observers (AppShell, Dashboard), trigger a refetch
+  // (→ pending → Loading again → shell unmounts → refetch resolves → error →
+  // shell remounts → …), oscillating forever and hammering the API — exactly
+  // the infinite `GET /api/config` loop seen on legacy databases. Latching on
+  // the first settle breaks the cycle: once we've waited once, we render (a
+  // failed config falls back to the Standalone default) and stop gating on it.
+  // We latch on a real settle (`isSuccess || isError`), not merely "not
+  // loading", so the disabled pre-auth query doesn't latch early and flash the
+  // Standalone nav before a Sensor node's config resolves post-login.
+  const configSettledRef = useRef(false);
+  if (configLoaded || configError) {
+    configSettledRef.current = true;
+  }
+
+  if (loading || (authed && !configSettledRef.current)) {
     return (
       <div className="flex h-screen items-center justify-center bg-slate-950 text-sm text-slate-400">
         Loading…
