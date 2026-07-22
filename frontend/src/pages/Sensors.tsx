@@ -107,9 +107,7 @@ export default function Sensors() {
                   />
                   <span className="font-mono text-slate-200">{s.sensor_id}</span>
                   <span className="font-mono text-xs text-amber-400/80">fp {s.fingerprint}</span>
-                  <span className="text-xs text-slate-500" title="Available once sensors stream emissions">
-                    — emissions/24h
-                  </span>
+                  <span className="text-xs text-slate-500">{s.emissions_24h} emissions/24h</span>
                 </div>
                 <div className="flex gap-2">
                   <button type="button" onClick={() => rotateMutation.mutate(s.id)}

@@ -17,6 +17,7 @@ export interface Sensor {
   approved_at: string | null;
   last_seen_at: string | null;
   online: boolean;
+  emissions_24h: number;
 }
 
 /** `POST /api/sensors/:id/rotate` response — the freshly generated key,

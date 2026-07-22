@@ -35,6 +35,7 @@ import { listEntities } from "../api/entities";
 import { listNotifications } from "../api/notifications";
 import type { GpsSourceStatus, GpsStatus } from "../api/gps";
 import { getGpsStatus } from "../api/gps";
+import { useSensors } from "../hooks/useSensors";
 import StatTile from "../components/StatTile";
 import MapView from "./MapView";
 
@@ -209,6 +210,12 @@ export default function Dashboard() {
     queryFn: () => listNotifications({ limit: 1 }),
   });
 
+  // Standalone-only fleet summary tile — renders only when at least one
+  // Sensor node has registered (see the `sensors.length > 0` guard below).
+  // Sensor-role Dashboards don't show this (later task).
+  const sensorsQuery = useSensors();
+  const sensors = sensorsQuery.data ?? [];
+
   const feedParams = useMemo(() => {
     const params = new URLSearchParams();
     params.set("limit", String(FEED_LIMIT));
@@ -267,6 +274,40 @@ export default function Dashboard() {
           loading={notificationsSummaryQuery.isLoading}
         />
       </div>
+
+      {sensors.length > 0 && (
+        <section
+          data-testid="dashboard-sensors"
+          className="space-y-2 rounded-lg border border-slate-800 bg-slate-900/40 p-4"
+        >
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
+            Sensors
+          </h2>
+          <div className="flex gap-6 text-sm">
+            <div>
+              <span className="text-emerald-400">
+                {sensors.filter((s) => s.online).length}
+              </span>{" "}
+              online
+            </div>
+            <div>
+              <span className="text-slate-400">
+                {sensors.filter((s) => !s.online).length}
+              </span>{" "}
+              offline
+            </div>
+            <div>
+              <span className="text-slate-200">
+                {sensors.reduce((n, s) => n + s.emissions_24h, 0)}
+              </span>{" "}
+              emissions (24h)
+            </div>
+            <a href="/sensors" className="text-amber-400 hover:text-amber-300">
+              Details →
+            </a>
+          </div>
+        </section>
+      )}
 
       {/* Time Range + GPS status now live as overlays inside the map (see the
           MapView props below), so there's no separate card row — the map gets
