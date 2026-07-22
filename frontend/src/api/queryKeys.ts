@@ -41,6 +41,7 @@ export const queryKeys = {
   dataSources: ['dataSources'] as const,
   captureDevices: ['captureDevices'] as const,
   emissions: ['emissions'] as const,
+  sensorIds: ['sensorIds'] as const,
   emitters: ['emitters'] as const,
   entities: ['entities'] as const,
   zones: ['zones'] as const,

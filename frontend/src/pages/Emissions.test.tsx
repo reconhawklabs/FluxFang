@@ -215,6 +215,7 @@ function baseRoutes(
     "GET /api/emitters": () => ({ items: [EMITTER_1], total: 1 }),
     "GET /api/catalog/wifi": () => WIFI_CATALOG,
     "GET /api/data-sources": () => [DATA_SOURCE_1, DATA_SOURCE_2],
+    "GET /api/emissions/sensor-ids": () => ["local", "frontgate"],
     "GET /api/config": () => CONFIG_STANDALONE,
     ...overrides,
   };
@@ -298,6 +299,33 @@ test("the data-source dropdown is populated from listDataSources (gps sources ex
       return (
         url.pathname === "/api/emissions" &&
         url.searchParams.get("data_source_id") === "ds1"
+      );
+    });
+    expect(call).toBeDefined();
+  });
+});
+
+test("the sensor dropdown is populated from listSensorIds; selecting one adds sensor_id to the query", async () => {
+  const fetchMock = mockRoutes(baseRoutes());
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<Emissions />, { wrapper });
+  await waitFor(() =>
+    expect(screen.getByTestId("emission-row-e1")).toBeInTheDocument(),
+  );
+
+  const select = await screen.findByLabelText(/^sensor$/i);
+  expect(within(select).getByText("local")).toBeInTheDocument();
+  expect(within(select).getByText("frontgate")).toBeInTheDocument();
+
+  fireEvent.change(select, { target: { value: "frontgate" } });
+
+  await waitFor(() => {
+    const call = fetchMock.mock.calls.find(([input]) => {
+      const url = new URL(String(input), "http://localhost");
+      return (
+        url.pathname === "/api/emissions" &&
+        url.searchParams.get("sensor_id") === "frontgate"
       );
     });
     expect(call).toBeDefined();

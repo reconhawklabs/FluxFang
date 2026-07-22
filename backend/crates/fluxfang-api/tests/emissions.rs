@@ -396,3 +396,52 @@ async fn bulk_delete_and_clear_require_auth() {
         StatusCode::UNAUTHORIZED,
     );
 }
+
+/// `?sensor_id=<id>` filters to a single sensor's emissions, and
+/// `GET /api/emissions/sensor-ids` lists the distinct sensors present.
+#[tokio::test]
+async fn filters_by_sensor_id_and_lists_sensor_ids() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+    let ds = seed_data_source(&pool).await;
+    let session = seed_session(&pool).await;
+    let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+
+    // One local capture, one forwarded from a distributed sensor "frontgate".
+    insert_wifi(&pool, ds, session, "aa:aa:aa:aa:aa:aa", "Home", 1, base).await;
+    let remote = EmissionRepo::insert(
+        &pool,
+        NewEmission {
+            sensor_id: "frontgate".to_string(),
+            ..NewEmission::wifi(ds, session, json!({"bssid": "bb:bb:bb:bb:bb:bb", "channel": 1}))
+        },
+    )
+    .await
+    .expect("insert remote emission")
+    .id;
+
+    // Filter to the remote sensor only.
+    let resp = get_with_cookie(&app, "/api/emissions?sensor_id=frontgate", &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["total"], 1, "body: {body}");
+    assert_eq!(body["items"][0]["id"], remote.to_string());
+
+    // Distinct sensor ids include both.
+    let resp = get_with_cookie(&app, "/api/emissions/sensor-ids", &cookie).await;
+    assert_status(&resp, StatusCode::OK);
+    let ids = body_json(resp).await;
+    let ids = ids.as_array().unwrap();
+    assert!(ids.iter().any(|v| v == "local"), "ids: {ids:?}");
+    assert!(ids.iter().any(|v| v == "frontgate"), "ids: {ids:?}");
+}
+
+/// The sensor-ids endpoint is auth-gated like the rest of the emissions API.
+#[tokio::test]
+async fn sensor_ids_endpoint_requires_auth() {
+    let (app, _pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    assert_status(
+        &get(&app, "/api/emissions/sensor-ids").await,
+        StatusCode::UNAUTHORIZED,
+    );
+}

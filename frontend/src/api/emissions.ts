@@ -94,3 +94,9 @@ export function bulkDeleteEmissions(ids: string[]): Promise<DeletedCount> {
 export function clearEmissions(): Promise<DeletedCount> {
   return post<DeletedCount>('/api/emissions/clear');
 }
+
+/** `GET /api/emissions/sensor-ids` — the distinct `sensor_id`s present in the
+ * data (incl. `"local"`), for the Emissions page's per-sensor filter dropdown. */
+export function listSensorIds(): Promise<string[]> {
+  return get<string[]>('/api/emissions/sensor-ids');
+}

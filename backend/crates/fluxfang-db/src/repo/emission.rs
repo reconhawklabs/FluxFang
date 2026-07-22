@@ -97,6 +97,10 @@ pub struct EmissionFilter {
     /// Filters `emission.kind` *and* selects which field catalog
     /// `field_conditions` is checked against (see module docs).
     pub kind: Option<String>,
+    /// Exact match on `emission.sensor_id` — which sensor captured the row
+    /// (`"local"` for the Standalone's own captures, or a distributed Sensor
+    /// node's id). Free text, not a UUID.
+    pub sensor_id: Option<String>,
     pub field_conditions: Vec<Condition>,
     pub match_mode: MatchMode,
     /// Substring search over `payload::text`.
@@ -131,6 +135,7 @@ impl Default for EmissionFilter {
             time_to: None,
             bbox: None,
             kind: None,
+            sensor_id: None,
             field_conditions: Vec::new(),
             match_mode: MatchMode::All,
             text: None,
@@ -258,6 +263,11 @@ fn build_where(filter: &EmissionFilter) -> Result<(String, Vec<BindVal>), Emissi
     if let Some(ref kind) = filter.kind {
         clauses.push(format!("kind = ${next_bind}"));
         binds.push(BindVal::Text(kind.clone()));
+        next_bind += 1;
+    }
+    if let Some(ref sensor_id) = filter.sensor_id {
+        clauses.push(format!("sensor_id = ${next_bind}"));
+        binds.push(BindVal::Text(sensor_id.clone()));
         next_bind += 1;
     }
     if let Some(ref text) = filter.text {
@@ -671,6 +681,17 @@ impl EmissionRepo {
         .bind(since)
         .fetch_all(pool)
         .await
+    }
+
+    /// The distinct `sensor_id`s present in the emission table — the accurate
+    /// source for a "filter by sensor" dropdown (includes `"local"` and any
+    /// sensor that has actually contributed data).
+    pub async fn distinct_sensor_ids(pool: &PgPool) -> Result<Vec<String>, sqlx::Error> {
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT DISTINCT sensor_id FROM emission ORDER BY sensor_id")
+                .fetch_all(pool)
+                .await?;
+        Ok(rows.into_iter().map(|(s,)| s).collect())
     }
 }
 

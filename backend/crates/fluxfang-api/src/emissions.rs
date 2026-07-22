@@ -137,8 +137,17 @@ pub fn protected_routes() -> Router<AppState> {
     Router::new()
         .route("/api/emissions", get(list_emissions))
         .route("/api/emissions/points", get(list_emission_points))
+        .route("/api/emissions/sensor-ids", get(list_sensor_ids))
         .route("/api/emissions/bulk-delete", post(bulk_delete_emissions))
         .route("/api/emissions/clear", post(clear_emissions))
+}
+
+/// `GET /api/emissions/sensor-ids` — the distinct `sensor_id`s present in the
+/// data, for the Emissions page's "filter by sensor" dropdown. Includes
+/// `"local"` (the Standalone's own captures) and every distributed sensor that
+/// has forwarded, unlike `/api/sensors` (enrolled nodes only).
+async fn list_sensor_ids(State(state): State<AppState>) -> Result<Json<Vec<String>>, ApiError> {
+    Ok(Json(EmissionRepo::distinct_sensor_ids(&state.pool).await?))
 }
 
 #[derive(Debug, Serialize)]
@@ -224,6 +233,7 @@ fn parse_filter(raw: &str) -> Result<EmissionFilter, ApiError> {
     let mut time_to = None;
     let mut bbox = None;
     let mut kind = None;
+    let mut sensor_id = None;
     let mut text = None;
     let mut match_mode = MatchMode::All;
     let mut limit = DEFAULT_LIMIT;
@@ -244,6 +254,7 @@ fn parse_filter(raw: &str) -> Result<EmissionFilter, ApiError> {
             "time_to" => time_to = Some(parse_time("time_to", &value)?),
             "bbox" => bbox = Some(parse_bbox(&value)?),
             "kind" => kind = Some(value.into_owned()),
+            "sensor_id" => sensor_id = Some(value.into_owned()),
             "q" => text = Some(value.into_owned()),
             "match" => match_mode = parse_match_mode(&value).map_err(ApiError::BadRequest)?,
             "limit" => limit = parse_limit(&value)?,
@@ -278,6 +289,7 @@ fn parse_filter(raw: &str) -> Result<EmissionFilter, ApiError> {
         time_to,
         bbox,
         kind,
+        sensor_id,
         field_conditions,
         match_mode,
         text,

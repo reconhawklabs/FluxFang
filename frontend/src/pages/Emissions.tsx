@@ -49,6 +49,7 @@ import {
   bulkDeleteEmissions,
   clearEmissions,
   listEmissions,
+  listSensorIds,
 } from "../api/emissions";
 import { createEmitter, listEmitters, listEmitterTypes } from "../api/emitters";
 import type { EmitterType } from "../api/emitters";
@@ -400,6 +401,7 @@ export default function Emissions() {
 function StandaloneEmissions() {
   const queryClient = useQueryClient();
   const [dataSourceId, setDataSourceId] = useState("");
+  const [sensorId, setSensorId] = useState("");
   const [q, setQ] = useState("");
   const [conditions, setConditions] = useState<Condition[]>([]);
   const [limit, setLimit] = useState<number>(DEFAULT_LIMIT);
@@ -414,12 +416,13 @@ function StandaloneEmissions() {
     const trimmedQ = q.trim();
     if (trimmedQ.length > 0) params.set("q", trimmedQ);
     if (dataSourceId.length > 0) params.set("data_source_id", dataSourceId);
+    if (sensorId.length > 0) params.set("sensor_id", sensorId);
     params.set("limit", String(limit));
     params.set("offset", String(offset));
     params.set("sort", sortKey);
     params.set("dir", sortDir);
     return params;
-  }, [conditions, q, dataSourceId, limit, offset, sortKey, sortDir]);
+  }, [conditions, q, dataSourceId, sensorId, limit, offset, sortKey, sortDir]);
 
   const emissionsQuery = useQuery({
     queryKey: [...queryKeys.emissions, queryParams.toString()],
@@ -429,6 +432,13 @@ function StandaloneEmissions() {
   const dataSourcesQuery = useQuery({
     queryKey: queryKeys.dataSources,
     queryFn: listDataSources,
+  });
+
+  // Distinct sensor_ids present in the data (incl. "local") for the per-sensor
+  // filter — see `GET /api/emissions/sensor-ids`.
+  const sensorIdsQuery = useQuery({
+    queryKey: queryKeys.sensorIds,
+    queryFn: listSensorIds,
   });
 
   // Resolves an emission's `emitter_id` to a display name. Not itself
@@ -464,6 +474,11 @@ function StandaloneEmissions() {
 
   function handleDataSourceChange(next: string): void {
     setDataSourceId(next);
+    resetToFirstPage();
+  }
+
+  function handleSensorIdChange(next: string): void {
+    setSensorId(next);
     resetToFirstPage();
   }
 
@@ -564,6 +579,23 @@ function StandaloneEmissions() {
                 {dataSourceLabel(dataSource)}
               </option>
             ))}
+        </select>
+
+        <label htmlFor="emissions-sensor" className="sr-only">
+          Sensor
+        </label>
+        <select
+          id="emissions-sensor"
+          value={sensorId}
+          onChange={(event) => handleSensorIdChange(event.target.value)}
+          className={selectClassName}
+        >
+          <option value="">All sensors</option>
+          {(sensorIdsQuery.data ?? []).map((sid) => (
+            <option key={sid} value={sid}>
+              {sid}
+            </option>
+          ))}
         </select>
 
         <SearchBar

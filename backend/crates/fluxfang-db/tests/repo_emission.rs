@@ -175,6 +175,32 @@ async fn query_filters_by_data_source_id() {
 }
 
 #[tokio::test]
+async fn query_filters_by_sensor_id_and_lists_distinct_sensor_ids() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+
+    // One local capture, one forwarded from a distributed sensor "frontgate".
+    insert_wifi(&pool, ds, session, "aa:aa:aa:aa:aa:aa", 1).await; // sensor_id "local"
+    let mut remote = NewEmission::wifi(ds, session, wifi_payload("bb:bb:bb:bb:bb:bb", 1));
+    remote.sensor_id = "frontgate".to_string();
+    let r = EmissionRepo::insert(&pool, remote).await.unwrap();
+
+    // Filtering by sensor_id returns only that sensor's rows.
+    let filter = EmissionFilter {
+        sensor_id: Some("frontgate".to_string()),
+        ..EmissionFilter::default()
+    };
+    let (rows, total) = EmissionRepo::query(&pool, filter).await.unwrap();
+    assert_eq!(total, 1);
+    assert_eq!(rows[0].id, r.id);
+
+    // distinct_sensor_ids surfaces both, sorted.
+    let ids = EmissionRepo::distinct_sensor_ids(&pool).await.unwrap();
+    assert_eq!(ids, vec!["frontgate".to_string(), "local".to_string()]);
+}
+
+#[tokio::test]
 async fn query_filters_by_session_id() {
     let pool = fresh_pool().await;
     let ds = seed_wifi_source(&pool).await;
