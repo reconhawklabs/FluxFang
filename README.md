@@ -56,6 +56,72 @@ Rust API), and `frontend` (the React UI served by nginx).
 > can reach physical RF and GPS hardware. Treat it as host-root-equivalent, and
 > don't expose it to untrusted operators.
 
+## Distributed sensor nodes
+
+FluxFang can run as a single self-contained instance (the default) or as a
+fleet: one **Standalone** node that holds the database and analysis, plus any
+number of slim **Sensor** nodes deployed elsewhere that capture RF emissions
+and forward them back. Every emission the Standalone stores is tagged with the
+id of the sensor that captured it, and remote emissions flow through the same
+classification, emitter, alert, and zone pipeline as local ones.
+
+Both roles run the **same image**; the role is chosen once, on the first-run
+setup screen. There are no extra environment variables — a Sensor node's
+connection settings are entered in the UI at setup and editable later under
+**Settings**.
+
+### Set up the Standalone
+
+1. Bring the stack up and complete first-run setup, choosing **Standalone
+   Node** (the default).
+2. On the **Data Sources** page, add a **Sensor** datasource — a network
+   listener. Give it a bind IP and port (e.g. `0.0.0.0:9000`) and start it.
+   This is the port your Sensor nodes will connect to.
+3. Open the new **Sensors** page. Click **Allow new Sensors** to open a
+   time-boxed enrollment window, then provision your Sensor nodes (below).
+4. When a Sensor connects it appears under **Pending approval** with a short
+   **fingerprint**. Confirm that fingerprint matches the one shown on the
+   Sensor node (out-of-band), choose whether to auto-group its emissions into
+   emitters, and **Approve**. You can later **rotate** a sensor's key or
+   **revoke** it. The page shows each sensor's health and emissions in the
+   last 24h; the Dashboard shows a fleet summary.
+
+### Deploy a Sensor
+
+1. Bring the same stack up on the sensor host and complete first-run setup,
+   choosing **Sensor Node**. Enter:
+   - a **sensor id** (a short slug, no spaces — how this node is identified),
+   - the Standalone's **host and port** (the Sensor datasource's bind address),
+   - an **encryption key** (click *Generate*, or paste one), and
+   - a cache retention (TTL).
+2. Add the sensor's own capture hardware on its **Data Sources** page. It
+   captures into a local cache, self-registers with the Standalone, and
+   retries every 30s until you approve it — then it forwards continuously.
+3. The Sensor's slim UI shows a **Dashboard** with forwarding status (cache
+   depth, undelivered backlog, target), an **Emissions** view of its local
+   cache, and **Settings** to change the host/port/key/TTL.
+
+Undelivered emissions are buffered locally and pruned once they exceed the
+cache TTL, so a long outage bounds disk use rather than growing without limit.
+Delivery is at-least-once and de-duplicated by a stable id, so retries never
+create duplicate emissions on the Standalone.
+
+### Security
+
+Each sensor has its own symmetric key. Emissions are forwarded as
+**XChaCha20-Poly1305 AEAD-encrypted, authenticated batches** — a successful
+decrypt on the Standalone is what authenticates the sensor, and only
+**approved** sensors are accepted. Enrollment is gated by the operator-opened
+window plus out-of-band fingerprint verification, so a stray or racing
+connection can't get approved by accident.
+
+> **Run sensor traffic behind TLS on untrusted networks.** The app-layer AEAD
+> protects payload confidentiality and integrity on its own, but for
+> internet-facing deployments put the Sensor datasource's listener behind the
+> same TLS-terminating reverse proxy you use for the web UI. On a plaintext LAN
+> the one-time key exchange during the enrollment window is sniffable — keep
+> enrollment windows short, or enroll over TLS.
+
 ## Connect a console AI (MCP)
 
 FluxFang's backend exposes a Model Context Protocol (MCP) endpoint at
