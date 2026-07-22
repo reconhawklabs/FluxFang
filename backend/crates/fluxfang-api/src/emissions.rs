@@ -241,6 +241,7 @@ fn parse_filter(raw: &str) -> Result<EmissionFilter, ApiError> {
     let mut cond_raw: Vec<String> = Vec::new();
     let mut emitter_type = None;
     let mut emitter_category = None;
+    let mut mac_persistence = None;
     let mut sort = None;
     let mut dir = None;
 
@@ -262,6 +263,9 @@ fn parse_filter(raw: &str) -> Result<EmissionFilter, ApiError> {
             "cond" => cond_raw.push(value.into_owned()),
             "emitter_type" => emitter_type = Some(value.into_owned()),
             "emitter_category" => emitter_category = Some(value.into_owned()),
+            "mac_persistence" => {
+                mac_persistence = Some(parse_mac_persistence(&value).map_err(ApiError::BadRequest)?)
+            }
             "sort" => sort = Some(value.into_owned()),
             "dir" => dir = Some(value.into_owned()),
             _ => {}
@@ -295,6 +299,7 @@ fn parse_filter(raw: &str) -> Result<EmissionFilter, ApiError> {
         text,
         emitter_type,
         emitter_category,
+        mac_persistence,
         limit,
         offset,
         sort,
@@ -304,6 +309,27 @@ fn parse_filter(raw: &str) -> Result<EmissionFilter, ApiError> {
 
 fn parse_uuid(param: &str, raw: &str) -> Result<Uuid, ApiError> {
     Uuid::parse_str(raw).map_err(|_| ApiError::BadRequest(format!("invalid {param}: {raw:?}")))
+}
+
+/// Expand a `mac_persistence=` filter token into the emitter attribute
+/// values it selects. Accepts the two badges (`randomized`,
+/// `randomized-longterm`) and any exact class name — see
+/// `fluxfang_core::classify::persistence_filter_classes`.
+///
+/// An unrecognized token is a 400 rather than an empty result set: silently
+/// matching nothing would read as "there are no randomized emitters", which
+/// is the opposite of the truth.
+///
+/// Returns the message rather than an `ApiError` (same convention as
+/// [`parse_match_mode`]) because `emissions` and `emitters` each have their
+/// own `ApiError` type and both call this.
+pub(crate) fn parse_mac_persistence(raw: &str) -> Result<Vec<String>, String> {
+    fluxfang_core::classify::persistence_filter_classes(raw)
+        .map(|classes| classes.iter().map(|c| c.as_str().to_string()).collect())
+        .ok_or_else(|| {
+            let allowed = fluxfang_core::classify::PERSISTENCE_FILTER_TOKENS;
+            format!("invalid mac_persistence: {raw:?} (expected one of {allowed:?})")
+        })
 }
 
 fn parse_bool(param: &str, raw: &str) -> Result<bool, ApiError> {

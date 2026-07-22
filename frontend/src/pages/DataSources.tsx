@@ -155,6 +155,81 @@ function ConfigSummary({ source }: { source: DataSource }) {
   return <span className="text-slate-500">—</span>;
 }
 
+/** Retention-level dropdown options, most- to least-persistent, matching
+ * `fluxfang_core::classify::MacPersistence`'s ordering. The empty value is
+ * the default "store everything" — an absent `mac_retention_level` means no
+ * filtering, so an existing source keeps behaving exactly as before. */
+const MAC_RETENTION_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
+  { value: '', label: 'Store everything (no filtering)' },
+  { value: 'stable', label: 'Stable — only never-randomized addresses' },
+  { value: 'per_network', label: 'Per-network — persists per network for months' },
+  { value: 'session', label: 'Session — persists until the device reboots' },
+  { value: 'ephemeral', label: 'Ephemeral — rotates every few minutes' },
+  { value: 'unlinkable', label: 'Unlinkable — cannot be correlated at all' },
+];
+
+/** The two MAC retention controls, shared by the wifi and bluetooth forms —
+ * the only two kinds whose addresses can be randomized (GPS has no
+ * addresses; TPMS sensor ids are never randomized), which is also what the
+ * backend's `retention::validate_config` enforces. */
+function MacRetentionFields({
+  level,
+  onLevelChange,
+  ageOut,
+  onAgeOutChange,
+}: {
+  level: string;
+  onLevelChange: (value: string) => void;
+  ageOut: boolean;
+  onAgeOutChange: (value: boolean) => void;
+}) {
+  return (
+    <>
+      <div className="space-y-1">
+        <label htmlFor="ds-mac-retention" className={labelClassName}>
+          MAC Retention Level
+        </label>
+        <select
+          id="ds-mac-retention"
+          value={level}
+          onChange={(event) => onLevelChange(event.target.value)}
+          className={inputClassName}
+        >
+          {MAC_RETENTION_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+        <p className="text-xs text-slate-500">
+          Different wireless identifiers persist for shorter or longer periods. Anything you
+          pick here also keeps the more stable levels above it — selecting “Session”, for
+          example, stores session, per-network and stable addresses, and ignores everything
+          below. Emissions below the selected level are not written to the database at all.
+        </p>
+      </div>
+
+      <div className="space-y-1">
+        <label className="flex items-center gap-2 text-sm text-slate-200">
+          <input
+            id="ds-age-out-ephemeral"
+            type="checkbox"
+            checked={ageOut}
+            onChange={(event) => onAgeOutChange(event.target.checked)}
+            className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500"
+          />
+          Age Out Ephemeral-class emitters
+        </label>
+        <p className="text-xs text-slate-500">
+          When enabled, ephemeral-class emitters are removed from the database if they have not
+          been seen within 1 hour, along with their emissions. This is permanent and cannot be
+          undone.
+        </p>
+      </div>
+    </>
+  );
+}
+
 type FormKind = 'wifi' | 'gps' | 'bluetooth' | 'rtl_sdr' | 'sensor';
 type FormWifiMode = 'monitor' | 'scan';
 type FormGpsMode = 'gpsd' | 'serial' | 'manual';
@@ -210,6 +285,11 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
   // captures both beacons and probe requests; scan only surfaces APs) —
   // either way the backend's ingest auto-create only fires when this is set.
   const [autoCreateEmitters, setAutoCreateEmitters] = useState(false);
+  // MAC retention (wifi/bluetooth only). Empty level = store everything,
+  // which is the default so a new source behaves as it always has; the
+  // operator has to opt in before any capture data is discarded.
+  const [macRetentionLevel, setMacRetentionLevel] = useState('');
+  const [ageOutEphemeral, setAgeOutEphemeral] = useState(false);
   // Bluetooth-only: opt-in active (scan-request) BLE scanning vs. the
   // default passive advertisement listening. Defaults OFF, same rationale
   // as `autoCreateEmitters` above.
@@ -252,12 +332,21 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
   function handleSubmit(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
 
+    // Only sent for kinds that support them; the backend rejects these keys
+    // on any other kind rather than silently ignoring them. An empty level
+    // is omitted entirely so "store everything" stays the absent default
+    // rather than a stored null.
+    const macRetentionConfig = {
+      ...(macRetentionLevel ? { mac_retention_level: macRetentionLevel } : {}),
+      age_out_ephemeral: ageOutEphemeral,
+    };
+
     if (kind === 'wifi') {
       onSubmit({
         kind: 'wifi',
         mode: wifiMode,
         interface: iface,
-        config: { auto_create_emitters: autoCreateEmitters },
+        config: { auto_create_emitters: autoCreateEmitters, ...macRetentionConfig },
       });
       return;
     }
@@ -267,7 +356,11 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
         kind: 'bluetooth',
         mode: 'scan',
         interface: iface,
-        config: { auto_create_emitters: autoCreateEmitters, active_scan: btActiveScan },
+        config: {
+          auto_create_emitters: autoCreateEmitters,
+          active_scan: btActiveScan,
+          ...macRetentionConfig,
+        },
       });
       return;
     }
@@ -468,6 +561,12 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
                 </p>
               </div>
             )}
+            <MacRetentionFields
+              level={macRetentionLevel}
+              onLevelChange={setMacRetentionLevel}
+              ageOut={ageOutEphemeral}
+              onAgeOutChange={setAgeOutEphemeral}
+            />
           </>
         )}
 
@@ -546,6 +645,12 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
                 and Active Scanning is disabled.
               </p>
             </div>
+            <MacRetentionFields
+              level={macRetentionLevel}
+              onLevelChange={setMacRetentionLevel}
+              ageOut={ageOutEphemeral}
+              onAgeOutChange={setAgeOutEphemeral}
+            />
           </>
         )}
 

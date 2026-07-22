@@ -85,7 +85,7 @@ use crate::ingest::location::LocationProvider;
 use crate::ingest::pump::{LocationPump, OnExhausted};
 use crate::ingest::session::{HostZoneHook, SessionManager};
 use crate::ingest::zones::update_host_zones;
-use crate::ingest::{ingest, Event, IngestCtx};
+use crate::ingest::{Event, IngestCtx};
 
 /// How often the recovery reconciler retries sources the user wants running
 /// but that aren't (failed device, not-yet-available hardware at boot).
@@ -411,6 +411,10 @@ pub(crate) fn validate_data_source(
     interface: Option<&str>,
     config: &Value,
 ) -> Result<(), String> {
+    // MAC retention settings are kind-independent and live alongside the
+    // per-kind config keys, so they're checked up front for every kind --
+    // including the ones that reject them outright.
+    fluxfang_core::retention::validate_config(kind, config)?;
     match kind {
         "wifi" => {
             if mode != "monitor" && mode != "scan" {
@@ -777,7 +781,9 @@ impl CaptureSupervisor {
                         .await
                         .map(|_| ())
                 } else {
-                    ingest(&ctx, data_source_id, obs).await.map(|_| ())
+                    crate::ingest::ingest_if_retained(&ctx, data_source_id, obs)
+                        .await
+                        .map(|_| ())
                 };
                 if let Err(err) = result {
                     // No tracing/log crate is wired into this workspace yet

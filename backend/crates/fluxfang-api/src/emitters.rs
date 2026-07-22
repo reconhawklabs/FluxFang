@@ -213,6 +213,15 @@ struct ListEmittersQuery {
     /// it's about to be persisted).
     #[serde(default)]
     emitter_type: Option<String>,
+    /// MAC persistence filter: one of the two badges (`randomized`,
+    /// `randomized-longterm`) or an exact class name (`stable`,
+    /// `per_network`, `session`, `ephemeral`, `unlinkable`). Unlike
+    /// `emitter_type`, an unrecognized value is rejected with a 400 rather
+    /// than matching nothing — the token set is small, closed, and
+    /// operator-facing, so a typo should say so instead of looking like an
+    /// empty result.
+    #[serde(default)]
+    mac_persistence: Option<String>,
     #[serde(default)]
     limit: Option<i64>,
     #[serde(default)]
@@ -288,10 +297,18 @@ async fn list_emitters(
         ));
     }
 
+    let mac_persistence = q
+        .mac_persistence
+        .as_deref()
+        .map(crate::emissions::parse_mac_persistence)
+        .transpose()
+        .map_err(ApiError::BadRequest)?;
+
     let filter = EmitterListFilter {
         search: q.search,
         entity_id: q.entity_id,
         emitter_type: q.emitter_type,
+        mac_persistence,
         field_conditions,
         match_mode,
         limit: q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT),

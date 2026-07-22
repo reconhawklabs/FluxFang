@@ -126,6 +126,13 @@ pub struct EmissionFilter {
     /// layers. Independent of `emitter_type`: both may be set at once
     /// (ANDed), though in practice a caller sends one or the other.
     pub emitter_category: Option<String>,
+    /// MAC persistence classes to include, already expanded from the
+    /// caller's filter token by
+    /// `fluxfang_core::classify::persistence_filter_classes`. Like
+    /// `emitter_type` this is a subquery join — the class lives on the
+    /// emission's *emitter*, not on the emission — so setting it excludes
+    /// unassigned (stray) emissions.
+    pub mac_persistence: Option<Vec<String>>,
     pub limit: i64,
     pub offset: i64,
     /// Public sort key (see `EMISSION_SORTS`); unknown/None -> default.
@@ -151,6 +158,7 @@ impl Default for EmissionFilter {
             text: None,
             emitter_type: None,
             emitter_category: None,
+            mac_persistence: None,
             limit: 50,
             offset: 0,
             sort: None,
@@ -200,6 +208,8 @@ enum BindVal {
     Time(DateTime<Utc>),
     F64(f64),
     Text(String),
+    /// A `text[]` bind, for `= ANY($n)` set membership.
+    TextArray(Vec<String>),
 }
 
 /// Apply one [`BindVal`] to a `sqlx::query_as` builder, generic over its
@@ -214,6 +224,7 @@ fn bind_one<'q, O>(
         BindVal::Time(t) => q.bind(t),
         BindVal::F64(f) => q.bind(f),
         BindVal::Text(s) => q.bind(s),
+        BindVal::TextArray(v) => q.bind(v),
     }
 }
 
@@ -314,6 +325,17 @@ fn build_where(filter: &EmissionFilter) -> Result<(String, Vec<BindVal>), Emissi
             "emitter_id IN (SELECT id FROM emitter WHERE emitter_type LIKE ${next_bind} || '_%')"
         ));
         binds.push(BindVal::Text(category.clone()));
+        next_bind += 1;
+    }
+    if let Some(ref classes) = filter.mac_persistence {
+        // Same subquery-join shape as `emitter_type` above: the persistence
+        // class is an emitter attribute, so a NULL `emitter_id` row can't
+        // match and is excluded whenever this filter is set.
+        clauses.push(format!(
+            "emitter_id IN (SELECT id FROM emitter \
+             WHERE attributes->>'mac_persistence' = ANY(${next_bind}))"
+        ));
+        binds.push(BindVal::TextArray(classes.clone()));
         next_bind += 1;
     }
     if !filter.field_conditions.is_empty() {

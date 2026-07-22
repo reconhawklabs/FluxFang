@@ -143,6 +143,12 @@ export interface ListEmittersParams {
    * `"wifi_access_point"`), backing the Emitters page's Type-filter
    * dropdown. ANDed with `search`/`entity_id` server-side. */
   emitter_type?: string;
+  /** Filter on how long the emitter's address persists: one of the two
+   * badges (`"randomized"`, `"randomized-longterm"`) or an exact class
+   * (`"stable"`, `"per_network"`, `"session"`, `"ephemeral"`,
+   * `"unlinkable"`). Note `"randomized"` selects the *short-lived* classes
+   * only — see `MAC_PERSISTENCE_FILTER_OPTIONS`. Any other value is a 400. */
+  mac_persistence?: string;
   /** Repeated `cond=field:op:value` tokens (Task 4's `StackedFilterBuilder`,
    * via `conditionsToCondParams`) — attribute conditions against the
    * selected `emitter_type`'s catalog. Backend validates each against that
@@ -178,6 +184,8 @@ export function listEmitters(
   if (params.entity_id !== undefined) query.set("entity_id", params.entity_id);
   if (params.emitter_type !== undefined)
     query.set("emitter_type", params.emitter_type);
+  if (params.mac_persistence !== undefined)
+    query.set("mac_persistence", params.mac_persistence);
   for (const c of params.cond ?? []) query.append("cond", c);
   if (params.limit !== undefined) query.set("limit", String(params.limit));
   if (params.offset !== undefined) query.set("offset", String(params.offset));

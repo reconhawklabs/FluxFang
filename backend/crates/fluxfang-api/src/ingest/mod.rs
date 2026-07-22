@@ -253,14 +253,67 @@ pub async fn ingest(
     Ok(emission)
 }
 
+/// Whether an observation from `data_source_id` clears that source's MAC
+/// retention level (`config.mac_retention_level`).
+///
+/// The level names the *least* persistent address class still stored, so
+/// selecting `session` keeps `session`, `per_network` and `stable` and
+/// drops `ephemeral`/`unlinkable`. Everything is stored when the level is
+/// unset, which is the default -- see [`fluxfang_core::retention`].
+///
+/// Anything unclassifiable is retained: a payload `classify` doesn't
+/// recognize, or an emitter type with no address at all (a TPMS sensor id),
+/// has no persistence class to compare against, and a retention level must
+/// never silently discard capture data it doesn't understand. A failed
+/// data-source lookup is likewise treated as "retain" rather than
+/// swallowing the observation.
+async fn retention_allows(ctx: &IngestCtx, data_source_id: Uuid, obs: &RawObservation) -> bool {
+    let Ok(Some(data_source)) = DataSourceRepo::get(&ctx.pool, data_source_id).await else {
+        return true;
+    };
+    let retention = fluxfang_core::retention::from_config(&data_source.config);
+    if retention.level.is_none() {
+        return true;
+    }
+    let class = classify(&obs.kind, &obs.payload).and_then(|c| c.persistence);
+    retention.should_store(class)
+}
+
+/// [`ingest`], gated on the data source's MAC retention level. Returns
+/// `Ok(None)` when the observation's address class is below that level and
+/// the emission was therefore never written.
+///
+/// This is the entry point the live capture path uses; `ingest` itself
+/// stays un-gated so that ingest-internal behavior can be exercised
+/// directly. The gate deliberately runs *before* `EmissionRepo::insert`, so
+/// a filtered observation leaves no row behind to clean up later.
+pub async fn ingest_if_retained(
+    ctx: &IngestCtx,
+    data_source_id: Uuid,
+    obs: RawObservation,
+) -> anyhow::Result<Option<Emission>> {
+    if !retention_allows(ctx, data_source_id, &obs).await {
+        return Ok(None);
+    }
+    ingest(ctx, data_source_id, obs).await.map(Some)
+}
+
 /// Sensor-node capture path: persist a `RawObservation` to the local forward
 /// cache (with the sensor's current GPS fix), skipping all analysis. The
 /// `SensorForwarder` ships these to the Standalone.
+///
+/// The retention gate applies here too, and applies *here* rather than on
+/// the Standalone: the level is a property of the capturing data source, so
+/// a Sensor filters its own captures before they ever reach the forward
+/// cache (and therefore before they cross the network).
 pub async fn cache_observation(
     ctx: &IngestCtx,
     data_source_id: Uuid,
     obs: RawObservation,
 ) -> anyhow::Result<()> {
+    if !retention_allows(ctx, data_source_id, &obs).await {
+        return Ok(());
+    }
     let (coords, _q) = ctx.location.classify(obs.observed_at);
     let (lon, lat) = match coords {
         Some((lon, lat)) => (Some(lon), Some(lat)),
@@ -1360,6 +1413,96 @@ mod tests {
     /// (a) A probe_request with no matching emitter auto-creates a
     /// `wifi_client` emitter with a `randomized_mac` attribute reflecting
     /// the src_mac's locally-administered bit.
+    /// Build an `IngestCtx` plus a data source carrying `config`, and a
+    /// base timestamp — the shared preamble every retention-gate test uses.
+    async fn gate_ctx(
+        pool: &sqlx::PgPool,
+        config: serde_json::Value,
+    ) -> (IngestCtx, uuid::Uuid, chrono::DateTime<Utc>) {
+        let ds = seed_wifi_source_with_config(pool, config).await;
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let (manager, provider) = session_with_fix(pool.clone(), a_fix(base)).await;
+        let (events_tx, _rx) = broadcast::channel(8);
+        let ctx = IngestCtx {
+            pool: pool.clone(),
+            sessions: Some(Arc::new(manager)),
+            location: provider,
+            events: events_tx,
+            secret_key: [0x11u8; 32],
+            node_sensor_id: "local".to_string(),
+            sensor_mode: false,
+        };
+        (ctx, ds, base)
+    }
+
+    #[tokio::test]
+    async fn retention_gate_drops_an_ephemeral_probe_below_the_configured_level() {
+        let pool = fresh_pool().await;
+        // `session` keeps session/per_network/stable and drops ephemeral.
+        let (ctx, ds, base) = gate_ctx(
+            &pool,
+            serde_json::json!({"auto_create_emitters": true, "mac_retention_level": "session"}),
+        )
+        .await;
+
+        // A probe request from a locally-administered MAC is ephemeral.
+        let stored = ingest_if_retained(&ctx, ds, probe_request_obs("3a:de:ad:be:ef:00", base))
+            .await
+            .expect("gate must not error, just decline to store");
+
+        assert!(stored.is_none(), "an ephemeral probe must be dropped");
+        let (rows, total) = EmissionRepo::query(&pool, Default::default())
+            .await
+            .unwrap();
+        assert_eq!(total, 0, "the gate must run before the insert");
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn retention_gate_stores_an_association_at_the_same_level() {
+        let pool = fresh_pool().await;
+        let (ctx, ds, base) = gate_ctx(
+            &pool,
+            serde_json::json!({"auto_create_emitters": true, "mac_retention_level": "session"}),
+        )
+        .await;
+
+        // The *same* MAC in an association request is per_network, which is
+        // above the `session` cutoff -- this is the distinction the old
+        // `randomized_mac` boolean couldn't express.
+        let obs = association_obs("3a:de:ad:be:ef:00", "aa:bb:cc:dd:ee:ff", "HomeNet", base);
+        let stored = ingest_if_retained(&ctx, ds, obs)
+            .await
+            .expect("ingest succeeds");
+
+        let emission = stored.expect("a per_network association must be stored");
+        let emitter_id = emission.emitter_id.expect("auto-created emitter");
+        let emitter = EmitterRepo::get(&pool, emitter_id).await.unwrap().unwrap();
+        assert_eq!(
+            emitter.attributes.get("mac_persistence").unwrap(),
+            "per_network"
+        );
+    }
+
+    #[tokio::test]
+    async fn retention_gate_stores_everything_when_no_level_is_configured() {
+        let pool = fresh_pool().await;
+        let (ctx, ds, base) =
+            gate_ctx(&pool, serde_json::json!({"auto_create_emitters": true})).await;
+
+        let stored = ingest_if_retained(&ctx, ds, probe_request_obs("3a:de:ad:be:ef:00", base))
+            .await
+            .expect("ingest succeeds");
+
+        assert!(
+            stored.is_some(),
+            "an absent level must preserve the pre-existing store-everything behavior"
+        );
+    }
+
+    /// Auto-create from a probe request yields a `wifi_client` emitter with
+    /// a `randomized_mac` attribute reflecting the src_mac's
+    /// locally-administered bit.
     #[tokio::test]
     async fn ingest_auto_creates_wifi_client_emitter_from_probe_request_with_randomized_mac() {
         let pool = fresh_pool().await;

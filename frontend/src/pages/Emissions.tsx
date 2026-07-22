@@ -56,6 +56,7 @@ import type { EmitterType } from "../api/emitters";
 import { isEmittingSource, listDataSources } from "../api/dataSources";
 import type { DataSource } from "../api/dataSources";
 import Pagination from "../components/Pagination";
+import { MAC_PERSISTENCE_FILTER_OPTIONS } from "../components/emitterDisplay";
 import RuleBuilder from "../components/RuleBuilder";
 import SearchBar from "../components/SearchBar";
 import SelectionToolbar from "../components/SelectionToolbar";
@@ -403,6 +404,10 @@ function StandaloneEmissions() {
   const [dataSourceId, setDataSourceId] = useState("");
   const [sensorId, setSensorId] = useState("");
   const [q, setQ] = useState("");
+  // MAC persistence filter. Note this is an *emitter* attribute, so setting
+  // it necessarily excludes unassigned (stray) emissions — they have no
+  // emitter to carry a class.
+  const [macPersistence, setMacPersistence] = useState("");
   const [conditions, setConditions] = useState<Condition[]>([]);
   const [limit, setLimit] = useState<number>(DEFAULT_LIMIT);
   const [offset, setOffset] = useState(0);
@@ -417,12 +422,24 @@ function StandaloneEmissions() {
     if (trimmedQ.length > 0) params.set("q", trimmedQ);
     if (dataSourceId.length > 0) params.set("data_source_id", dataSourceId);
     if (sensorId.length > 0) params.set("sensor_id", sensorId);
+    if (macPersistence.length > 0)
+      params.set("mac_persistence", macPersistence);
     params.set("limit", String(limit));
     params.set("offset", String(offset));
     params.set("sort", sortKey);
     params.set("dir", sortDir);
     return params;
-  }, [conditions, q, dataSourceId, sensorId, limit, offset, sortKey, sortDir]);
+  }, [
+    conditions,
+    q,
+    dataSourceId,
+    sensorId,
+    macPersistence,
+    limit,
+    offset,
+    sortKey,
+    sortDir,
+  ]);
 
   const emissionsQuery = useQuery({
     queryKey: [...queryKeys.emissions, queryParams.toString()],
@@ -594,6 +611,27 @@ function StandaloneEmissions() {
           {(sensorIdsQuery.data ?? []).map((sid) => (
             <option key={sid} value={sid}>
               {sid}
+            </option>
+          ))}
+        </select>
+
+        <label htmlFor="emissions-persistence" className="sr-only">
+          MAC persistence
+        </label>
+        <select
+          id="emissions-persistence"
+          aria-label="Filter by MAC persistence"
+          value={macPersistence}
+          onChange={(event) => {
+            setMacPersistence(event.target.value);
+            setOffset(0);
+          }}
+          className={selectClassName}
+        >
+          <option value="">All MAC types</option>
+          {MAC_PERSISTENCE_FILTER_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
             </option>
           ))}
         </select>
