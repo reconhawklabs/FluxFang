@@ -110,6 +110,27 @@ async fn main() {
                 }
             }
         });
+
+        // Periodic RSSI localization pass. Every minute, re-estimate each
+        // active emitter's position from the GPS location + signal of its
+        // emissions. Errors are logged, never fatal.
+        let loc_pool = state.pool.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                ticker.tick().await;
+                match fluxfang_api::localization::pass::run_localization_pass(
+                    &loc_pool,
+                    chrono::Utc::now(),
+                )
+                .await
+                {
+                    Ok(n) if n > 0 => eprintln!("RSSI localization: estimated {n} emitter(s)"),
+                    Ok(_) => {}
+                    Err(err) => eprintln!("RSSI localization pass failed: {err:#}"),
+                }
+            }
+        });
     }
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
