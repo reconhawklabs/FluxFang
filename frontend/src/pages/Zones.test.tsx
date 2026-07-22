@@ -140,6 +140,83 @@ test('add zone: submitting name/lat/lon/radius/notes POSTs /api/zones with {name
   expect(typeof body.radius_m).toBe('number');
 });
 
+test('edit zone: clicking Edit opens the prefilled form and PATCHes /api/zones/:id', async () => {
+  const fetchMock = mockRoutes(
+    baseRoutes({
+      'PATCH /api/zones/zone-1': () => ({ ...ZONE_1, name: 'Home Renamed' }),
+    }),
+  );
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<Zones />, { wrapper });
+  await screen.findByTestId('zone-row-zone-1');
+
+  fireEvent.click(screen.getByTestId('zone-edit-zone-1'));
+  await screen.findByRole('heading', { name: /edit zone/i });
+  // Prefilled with the existing zone's values.
+  expect(screen.getByLabelText(/^name$/i)).toHaveValue('Home');
+
+  fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: 'Home Renamed' } });
+  fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
+
+  await waitFor(() =>
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/zones/zone-1',
+      expect.objectContaining({ method: 'PATCH' }),
+    ),
+  );
+  const patchCall = fetchMock.mock.calls.find(
+    ([url, init]) => String(url) === '/api/zones/zone-1' && init?.method === 'PATCH',
+  );
+  const [, init] = patchCall as [RequestInfo | URL, RequestInit];
+  expect(JSON.parse(init.body as string)).toEqual({
+    name: 'Home Renamed',
+    center: { lon: 2.5, lat: 1.5 },
+    radius_m: 50,
+    notes: 'Front yard perimeter',
+  });
+});
+
+test('delete zone: confirming DELETEs /api/zones/:id', async () => {
+  const fetchMock = mockRoutes(
+    baseRoutes({
+      'DELETE /api/zones/zone-2': () => ({}),
+    }),
+  );
+  vi.stubGlobal('fetch', fetchMock);
+  const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+  render(<Zones />, { wrapper });
+  await screen.findByTestId('zone-row-zone-2');
+
+  fireEvent.click(screen.getByTestId('zone-delete-zone-2'));
+
+  await waitFor(() =>
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/zones/zone-2',
+      expect.objectContaining({ method: 'DELETE' }),
+    ),
+  );
+  confirmSpy.mockRestore();
+});
+
+test('delete zone: cancelling the confirm does NOT DELETE', async () => {
+  const fetchMock = mockRoutes(baseRoutes());
+  vi.stubGlobal('fetch', fetchMock);
+  const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+  render(<Zones />, { wrapper });
+  await screen.findByTestId('zone-row-zone-2');
+
+  fireEvent.click(screen.getByTestId('zone-delete-zone-2'));
+
+  expect(fetchMock).not.toHaveBeenCalledWith(
+    '/api/zones/zone-2',
+    expect.objectContaining({ method: 'DELETE' }),
+  );
+  confirmSpy.mockRestore();
+});
+
 test('an out-of-range latitude shows a validation error and does not POST', async () => {
   const fetchMock = mockRoutes(baseRoutes());
   vi.stubGlobal('fetch', fetchMock);

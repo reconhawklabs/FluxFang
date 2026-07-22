@@ -14,13 +14,14 @@ import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError } from '../api/client';
 import { queryKeys } from '../api/queryKeys';
-import { createZone, listZones } from '../api/zones';
-import type { CreateZoneInput } from '../api/zones';
+import { createZone, deleteZone, listZones, patchZone } from '../api/zones';
+import type { CreateZoneInput, PatchZoneInput, Zone } from '../api/zones';
 import { ZoneForm } from '../components/ZoneForm';
 
 export default function Zones() {
   const queryClient = useQueryClient();
   const [showAddForm, setShowAddForm] = useState(false);
+  const [editingZone, setEditingZone] = useState<Zone | null>(null);
 
   const zonesQuery = useQuery({ queryKey: queryKeys.zones, queryFn: listZones });
 
@@ -36,11 +37,31 @@ export default function Zones() {
     },
   });
 
+  const patchMutation = useMutation({
+    mutationFn: ({ id, input }: { id: string; input: PatchZoneInput }) => patchZone(id, input),
+    onSuccess: () => {
+      invalidateZones();
+      setEditingZone(null);
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => deleteZone(id),
+    onSuccess: invalidateZones,
+  });
+
   const createErrorMessage =
     createMutation.error instanceof ApiError
       ? createMutation.error.message
       : createMutation.isError
         ? 'Failed to create zone.'
+        : null;
+
+  const patchErrorMessage =
+    patchMutation.error instanceof ApiError
+      ? patchMutation.error.message
+      : patchMutation.isError
+        ? 'Failed to update zone.'
         : null;
 
   const zones = zonesQuery.data ?? [];
@@ -70,6 +91,7 @@ export default function Zones() {
               <th className="py-2 pr-4 font-medium">Center (lat, lon)</th>
               <th className="py-2 pr-4 font-medium">Radius</th>
               <th className="py-2 pr-4 font-medium">Notes</th>
+              <th className="py-2 pr-2 font-medium text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -90,6 +112,39 @@ export default function Zones() {
                   {zone.radius_m} m
                 </td>
                 <td className="py-2 pr-4 text-slate-300">{zone.notes ?? '—'}</td>
+                <td className="py-2 pr-2">
+                  <div className="flex justify-end gap-2">
+                    <button
+                      type="button"
+                      data-testid={`zone-edit-${zone.id}`}
+                      onClick={() => {
+                        setShowAddForm(false);
+                        patchMutation.reset();
+                        setEditingZone(zone);
+                      }}
+                      className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 transition hover:border-slate-500 hover:text-amber-400"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      data-testid={`zone-delete-${zone.id}`}
+                      disabled={deleteMutation.isPending}
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            `Delete zone "${zone.name}"? Any alert rules watching it will be disabled, not deleted.`,
+                          )
+                        ) {
+                          deleteMutation.mutate(zone.id);
+                        }
+                      }}
+                      className="rounded border border-red-900 px-2 py-1 text-xs text-red-400 transition hover:border-red-500 disabled:opacity-50"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -107,6 +162,27 @@ export default function Zones() {
           submitting={createMutation.isPending}
           submitErrorMessage={createErrorMessage}
         />
+      )}
+
+      {editingZone && (
+        <ZoneForm
+          zone={editingZone}
+          onCancel={() => {
+            setEditingZone(null);
+            patchMutation.reset();
+          }}
+          onSubmit={(input) =>
+            patchMutation.mutate({ id: editingZone.id, input: input as PatchZoneInput })
+          }
+          submitting={patchMutation.isPending}
+          submitErrorMessage={patchErrorMessage}
+        />
+      )}
+
+      {deleteMutation.isError && (
+        <p role="alert" className="text-sm text-red-400">
+          Failed to delete zone.
+        </p>
       )}
 
       <p className="text-xs text-slate-500">
