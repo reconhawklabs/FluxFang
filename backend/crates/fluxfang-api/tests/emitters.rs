@@ -1388,3 +1388,34 @@ async fn association_endpoints_require_auth() {
         StatusCode::UNAUTHORIZED,
     );
 }
+
+/// The emitter API exposes the RSSI-localization estimate (null until set).
+#[tokio::test]
+async fn list_emitters_exposes_localization_estimate() {
+    let (app, pool) = test_app_with_factory(Arc::new(MockCapturerFactory::new())).await;
+    let cookie = login(&app).await;
+    let e = fluxfang_db::EmitterRepo::insert(
+        &pool,
+        fluxfang_db::models::NewEmitter {
+            name: "AP".to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // No estimate yet -> null.
+    let body = body_json(get_with_cookie(&app, "/api/emitters", &cookie).await).await;
+    assert!(body["items"][0]["estimate"].is_null(), "body: {body}");
+
+    fluxfang_db::EmitterRepo::set_estimate(&pool, e.id, -71.06, 42.36, 15.0, 4)
+        .await
+        .unwrap();
+
+    let body = body_json(get_with_cookie(&app, "/api/emitters", &cookie).await).await;
+    let est = &body["items"][0]["estimate"];
+    assert!((est["lon"].as_f64().unwrap() - (-71.06)).abs() < 1e-6, "est: {est}");
+    assert!((est["lat"].as_f64().unwrap() - 42.36).abs() < 1e-6);
+    assert!((est["uncertainty_m"].as_f64().unwrap() - 15.0).abs() < 1e-9);
+    assert_eq!(est["bin_count"], 4);
+}
