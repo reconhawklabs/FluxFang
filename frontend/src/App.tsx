@@ -30,6 +30,7 @@ import Alerts from "./pages/Alerts";
 import Notifications from "./pages/Notifications";
 import MapView from "./pages/MapView";
 import AiAuditLog from "./pages/AiAuditLog";
+import Settings from "./pages/Settings";
 
 export default function App() {
   const { needsSetup, authed, loading, refetch } = useAuth();
@@ -74,6 +75,7 @@ export default function App() {
         <Route path="data-sources" element={<DataSources />} />
         <Route path="emissions" element={<Emissions />} />
         <Route path="notifications" element={<Notifications />} />
+        <Route path="settings" element={<Settings />} />
         {!isSensor && (
           <>
             <Route path="sensors" element={<Sensors />} />

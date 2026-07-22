@@ -10,7 +10,7 @@ export interface AppShellProps {
   onLogout: () => void | Promise<void>;
 }
 
-const SENSOR_PATHS: ReadonlySet<string> = new Set(['/dashboard', '/data-sources', '/emissions']);
+const SENSOR_PATHS: ReadonlySet<string> = new Set(['/dashboard', '/data-sources', '/emissions', '/settings']);
 
 const NAV_ITEMS: ReadonlyArray<{ to: string; label: string }> = [
   { to: '/dashboard', label: 'Dashboard' },
@@ -25,6 +25,7 @@ const NAV_ITEMS: ReadonlyArray<{ to: string; label: string }> = [
   { to: '/map', label: 'Map' },
   { to: '/alerts', label: 'Alerts' },
   { to: '/notifications', label: 'Notifications' },
+  { to: '/settings', label: 'Settings' },
 ];
 
 function navItemsForRole(role: NodeRole): ReadonlyArray<{ to: string; label: string }> {

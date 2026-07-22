@@ -21,6 +21,8 @@ import type { Entity, EntityDetail } from "../api/entities";
 import type { GpsStatus } from "../api/gps";
 import type { NotificationsPage } from "../api/notifications";
 import type { Zone } from "../api/zones";
+import type { Sensor } from "../api/sensors";
+import type { AppConfig, CachedEmission, SensorStatus } from "../api/client";
 
 // `jumpTo`/`flyTo` back the embedded `MapView`'s center-on-user-load /
 // "recenter to me" button (Phase 5) — spies so a test could assert on them,
@@ -213,6 +215,35 @@ const GPS_STATUS_DISABLED: GpsStatus = {
   status: "disabled",
 };
 
+const SENSOR_ONLINE: Sensor = {
+  id: "sensor-1",
+  data_source_id: "ds-sensor-1",
+  sensor_id: "frontgate",
+  fingerprint: "4F-A2-09-EE",
+  status: "approved",
+  auto_group_emitters: true,
+  source_ip: "5.6.7.8",
+  approved_at: "2026-07-20T00:00:00Z",
+  last_seen_at: "2026-07-21T00:00:00Z",
+  online: true,
+  emissions_24h: 7,
+};
+
+const SENSOR_ONLINE_2: Sensor = {
+  ...SENSOR_ONLINE,
+  id: "sensor-2",
+  sensor_id: "backlot",
+  emissions_24h: 3,
+};
+
+const SENSOR_OFFLINE: Sensor = {
+  ...SENSOR_ONLINE,
+  id: "sensor-3",
+  sensor_id: "sidegate",
+  online: false,
+  emissions_24h: 2,
+};
+
 const GPS_STATUS_ACTIVE: GpsStatus = {
   source_running: true,
   has_fix: true,
@@ -221,6 +252,38 @@ const GPS_STATUS_ACTIVE: GpsStatus = {
   quality: 4,
   fix_age_seconds: 2.5,
   status: "active",
+};
+
+const CONFIG_STANDALONE: AppConfig = {
+  role: "standalone",
+  node_sensor_id: "local",
+  sensor: null,
+};
+
+const CONFIG_SENSOR: AppConfig = {
+  role: "sensor",
+  node_sensor_id: "frontgate",
+  sensor: { host: "base.local", port: 9000, cache_ttl_secs: 3600 },
+};
+
+const SENSOR_STATUS: SensorStatus = {
+  role: "sensor",
+  node_sensor_id: "frontgate",
+  cache: { total: 12, undelivered: 3 },
+  sensor: { host: "base.local", port: 9000 },
+};
+
+const CACHED_EMISSION_1: CachedEmission = {
+  id: "cached-1",
+  created_at: "2026-07-20T00:00:00Z",
+  kind: "wifi",
+  signal_strength: -40,
+  lat: null,
+  lon: null,
+  observed_at: "2026-07-20T00:00:00Z",
+  payload: {},
+  data_source_id: "ds-1",
+  delivered: false,
 };
 
 /** Distinguishes the Dashboard's own feed fetch (small `limit`) from
@@ -246,6 +309,8 @@ function baseRoutes(
     "GET /api/notifications": () => NOTIFICATIONS_PAGE,
     "GET /api/emissions": emissionsHandler({ items: [EMISSION_1], total: 1 }),
     "GET /api/gps/status": () => GPS_STATUS_DISABLED,
+    "GET /api/sensors": () => [],
+    "GET /api/config": () => CONFIG_STANDALONE,
     ...overrides,
   };
 }
@@ -480,4 +545,65 @@ test("GPS Status block shows a disabled state when GET /api/gps/status reports n
     expect(within(block).getByText(/disabled/i)).toBeInTheDocument(),
   );
   expect(within(block).getByText("—")).toBeInTheDocument();
+});
+
+test("sensors tile is absent when no sensors have registered", async () => {
+  vi.stubGlobal("fetch", mockRoutes(baseRoutes()));
+  render(<Dashboard />, { wrapper });
+
+  await waitFor(() =>
+    expect(
+      screen.getByTestId("stat-tile-Active Data Sources"),
+    ).toBeInTheDocument(),
+  );
+  expect(screen.queryByTestId("dashboard-sensors")).not.toBeInTheDocument();
+});
+
+test("sensors tile shows online/offline counts and 24h total when sensors exist", async () => {
+  const fetchMock = mockRoutes(
+    baseRoutes({
+      "GET /api/sensors": () => [SENSOR_ONLINE, SENSOR_ONLINE_2, SENSOR_OFFLINE],
+    }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<Dashboard />, { wrapper });
+
+  const tile = await screen.findByTestId("dashboard-sensors");
+  // 2 online, 1 offline, 7 + 3 + 2 = 12 total emissions/24h.
+  await waitFor(() =>
+    expect(within(tile).getByText("2")).toBeInTheDocument(),
+  );
+  expect(within(tile).getByText("online")).toBeInTheDocument();
+  expect(within(tile).getByText("1")).toBeInTheDocument();
+  expect(within(tile).getByText("offline")).toBeInTheDocument();
+  expect(within(tile).getByText("12")).toBeInTheDocument();
+  expect(
+    within(tile).getByRole("link", { name: /details/i }),
+  ).toHaveAttribute("href", "/sensors");
+});
+
+test("sensor role renders the forwarding-status dashboard instead of the standalone KPI tiles", async () => {
+  const fetchMock = mockRoutes({
+    "GET /api/config": () => CONFIG_SENSOR,
+    "GET /api/sensor/status": () => SENSOR_STATUS,
+    "GET /api/cached-emissions": () => [CACHED_EMISSION_1],
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<Dashboard />, { wrapper });
+
+  const status = await screen.findByTestId("forwarding-status");
+  await waitFor(() => expect(within(status).getByText("12")).toBeInTheDocument());
+  expect(within(status).getByText("3")).toBeInTheDocument();
+  expect(within(status).getByText("base.local:9000")).toBeInTheDocument();
+
+  expect(
+    await screen.findByTestId("cached-cached-1"),
+  ).toBeInTheDocument();
+
+  // Standalone-only pieces must not render for a sensor node.
+  expect(
+    screen.queryByTestId("stat-tile-Active Data Sources"),
+  ).not.toBeInTheDocument();
 });

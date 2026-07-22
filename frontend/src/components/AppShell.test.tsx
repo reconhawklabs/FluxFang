@@ -63,3 +63,8 @@ test('sensor role hides the Sensors nav item', async () => {
   await waitFor(() => expect(screen.queryByRole('link', { name: 'Sensors' })).not.toBeInTheDocument());
   expect(screen.getByRole('link', { name: 'Dashboard' })).toBeInTheDocument();
 });
+
+test('Settings nav appears for both standalone and sensor roles', async () => {
+  renderShell({ role: 'sensor', node_sensor_id: 'frontgate' });
+  expect(await screen.findByRole('link', { name: 'Settings' })).toBeInTheDocument();
+});

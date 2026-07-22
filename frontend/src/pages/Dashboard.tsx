@@ -35,7 +35,10 @@ import { listEntities } from "../api/entities";
 import { listNotifications } from "../api/notifications";
 import type { GpsSourceStatus, GpsStatus } from "../api/gps";
 import { getGpsStatus } from "../api/gps";
+import { useSensors } from "../hooks/useSensors";
+import { useConfig } from "../hooks/useConfig";
 import StatTile from "../components/StatTile";
+import SensorDashboard from "../components/SensorDashboard";
 import MapView from "./MapView";
 
 /** Page size for the feed query — a landing-page glance, not a full browse
@@ -156,7 +159,22 @@ function payloadText(payload: Record<string, unknown>, key: string): string {
     : "—";
 }
 
+// Role gate: a plain top-level `if` here (before the standalone hooks below)
+// would change how many hooks this component calls between the "config
+// still loading" render and the "role: sensor" render, which React treats
+// as a hard error (hook count must be stable across renders of the same
+// component instance) rather than a lint nitpick. Delegating the standalone
+// body to its own child component sidesteps that: `Dashboard` itself only
+// ever calls one hook (`useConfig`), and `StandaloneDashboard`/
+// `SensorDashboard` each mount/unmount independently with their own stable
+// hook counts.
 export default function Dashboard() {
+  const { data: config } = useConfig();
+  if (config?.role === "sensor") return <SensorDashboard />;
+  return <StandaloneDashboard />;
+}
+
+function StandaloneDashboard() {
   const [rangeId, setRangeId] = useState<TimeRangeId>(DEFAULT_RANGE_ID);
   // `feedSourceId === null` is the default "All Emissions" tab; otherwise it's
   // a specific data source's id (a per-source feed tab).
@@ -208,6 +226,12 @@ export default function Dashboard() {
     queryKey: [...queryKeys.notifications, "dashboard-summary"],
     queryFn: () => listNotifications({ limit: 1 }),
   });
+
+  // Standalone-only fleet summary tile — renders only when at least one
+  // Sensor node has registered (see the `sensors.length > 0` guard below).
+  // Sensor-role Dashboards don't show this (later task).
+  const sensorsQuery = useSensors();
+  const sensors = sensorsQuery.data ?? [];
 
   const feedParams = useMemo(() => {
     const params = new URLSearchParams();
@@ -267,6 +291,40 @@ export default function Dashboard() {
           loading={notificationsSummaryQuery.isLoading}
         />
       </div>
+
+      {sensors.length > 0 && (
+        <section
+          data-testid="dashboard-sensors"
+          className="space-y-2 rounded-lg border border-slate-800 bg-slate-900/40 p-4"
+        >
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
+            Sensors
+          </h2>
+          <div className="flex gap-6 text-sm">
+            <div>
+              <span className="text-emerald-400">
+                {sensors.filter((s) => s.online).length}
+              </span>{" "}
+              online
+            </div>
+            <div>
+              <span className="text-slate-400">
+                {sensors.filter((s) => !s.online).length}
+              </span>{" "}
+              offline
+            </div>
+            <div>
+              <span className="text-slate-200">
+                {sensors.reduce((n, s) => n + s.emissions_24h, 0)}
+              </span>{" "}
+              emissions (24h)
+            </div>
+            <a href="/sensors" className="text-amber-400 hover:text-amber-300">
+              Details →
+            </a>
+          </div>
+        </section>
+      )}
 
       {/* Time Range + GPS status now live as overlays inside the map (see the
           MapView props below), so there's no separate card row — the map gets

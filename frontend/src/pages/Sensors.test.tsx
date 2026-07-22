@@ -16,7 +16,7 @@ function wrapper({ children }: { children: ReactNode }) {
 const PENDING: Sensor = {
   id: 's1', data_source_id: 'ds1', sensor_id: 'frontgate', fingerprint: '4F-A2-09-EE',
   status: 'pending', auto_group_emitters: true, source_ip: '5.6.7.8',
-  approved_at: null, last_seen_at: '2026-07-21T00:00:00Z', online: true,
+  approved_at: null, last_seen_at: '2026-07-21T00:00:00Z', online: true, emissions_24h: 0,
 };
 
 function mockSensors(list: Sensor[]) {
@@ -90,9 +90,10 @@ const APPROVED: Sensor = {
   id: 's2', data_source_id: 'ds1', sensor_id: 'backlot', fingerprint: 'AA-BB-CC-DD',
   status: 'approved', auto_group_emitters: true, source_ip: '9.9.9.9',
   approved_at: '2026-07-20T00:00:00Z', last_seen_at: '2026-07-21T00:00:00Z', online: true,
+  emissions_24h: 5,
 };
 
-test('registered sensor shows online + rotate reveals a one-time key', async () => {
+test('registered sensor shows online + real 24h emission count + rotate reveals a one-time key', async () => {
   vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
     if (init?.method === 'POST' && url.includes('/rotate'))
@@ -104,6 +105,7 @@ test('registered sensor shows online + rotate reveals a one-time key', async () 
   render(<Sensors />, { wrapper });
   expect(await screen.findByText('backlot')).toBeInTheDocument();
   expect(screen.getByTestId('sensor-online-backlot')).toBeInTheDocument();
+  expect(screen.getByText('5 emissions/24h')).toBeInTheDocument();
 
   fireEvent.click(screen.getByRole('button', { name: /rotate/i }));
   await waitFor(() => expect(screen.getByText('NEWKEYBASE64')).toBeInTheDocument());
