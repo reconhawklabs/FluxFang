@@ -7,6 +7,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useConfig } from '../hooks/useConfig';
 import { api } from '../api/client';
 import type { ConfigPatch, NodeRole } from '../api/client';
+import { generateKey, isValidKey } from '../lib/sensorKey';
 
 const SLUG_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -52,6 +53,11 @@ export default function Settings() {
         setError('An encryption key is required when switching this node to Sensor role.');
         return;
       }
+      // A non-empty key must be well-formed; an empty key means "keep current".
+      if (key.length > 0 && !isValidKey(key)) {
+        setError('Encryption key must be 32 bytes, base64-encoded.');
+        return;
+      }
       patch.sensor = { host: host.trim(), port: portNum, cache_ttl_secs: Number(ttl) || 604800 };
       if (key.length > 0) patch.sensor.key = key; // only send if changed
     }
@@ -92,7 +98,13 @@ export default function Settings() {
             <div className="space-y-1"><label htmlFor="s-ttl" className={label}>Cache TTL (seconds)</label>
               <input id="s-ttl" inputMode="numeric" value={ttl} onChange={(e) => setTtl(e.target.value)} className={input} /></div>
             <div className="space-y-1"><label htmlFor="s-key" className={label}>Encryption key</label>
-              <input id="s-key" value={key} onChange={(e) => setKey(e.target.value)} placeholder="•••••• (unchanged)" className={input} />
+              <div className="flex gap-2">
+                <input id="s-key" value={key} onChange={(e) => setKey(e.target.value)} placeholder="•••••• (unchanged)" className={input} />
+                <button type="button" onClick={() => setKey(generateKey())}
+                  className="shrink-0 rounded border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:border-slate-500 hover:text-slate-100">
+                  Generate
+                </button>
+              </div>
               <p className="text-xs text-slate-500">{config?.sensor ? 'Leave blank to keep the current key.' : 'Required when switching to Sensor role.'}</p></div>
           </>
         )}

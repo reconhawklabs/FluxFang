@@ -220,7 +220,6 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
   // Sensor listener state — a pure network bind, no hardware interface.
   const [bindIp, setBindIp] = useState('0.0.0.0');
   const [bindPort, setBindPort] = useState('9000');
-  const [enrollmentWindowSecs, setEnrollmentWindowSecs] = useState('900');
 
   // Hardware enumeration (Task devdropdown) — the Add form no longer takes
   // free-text interface/device names; it offers only what
@@ -286,7 +285,6 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
         config: {
           bind_ip: bindIp.trim(),
           bind_port: Number(bindPort),
-          enrollment_window_secs: Number(enrollmentWindowSecs),
         },
       });
       return;
@@ -329,14 +327,11 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
     // No hardware enumeration for a pure network listener — validate the
     // form fields directly instead of gating on `devicesQuery`.
     const portNum = Number(bindPort);
-    const windowNum = Number(enrollmentWindowSecs);
     canSubmit =
       bindIp.trim() !== '' &&
       Number.isFinite(portNum) &&
       portNum >= 1 &&
-      portNum <= 65535 &&
-      Number.isFinite(windowNum) &&
-      windowNum > 0;
+      portNum <= 65535;
   } else if (gpsMode === 'serial') {
     canSubmit = !devicesLoading && !devicesErrored && serialDevices.includes(device);
   } else if (gpsMode === 'manual') {
@@ -671,19 +666,6 @@ function AddSourceForm({ onCancel, onSubmit, submitting, errorMessage }: AddSour
                   className={inputClassName}
                 />
               </div>
-            </div>
-
-            <div className="space-y-1">
-              <label htmlFor="ds-sensor-enrollment-window" className={labelClassName}>
-                Enrollment window (seconds)
-              </label>
-              <input
-                id="ds-sensor-enrollment-window"
-                type="number"
-                value={enrollmentWindowSecs}
-                onChange={(event) => setEnrollmentWindowSecs(event.target.value)}
-                className={inputClassName}
-              />
             </div>
           </>
         )}

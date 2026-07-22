@@ -30,6 +30,10 @@ use fluxfang_db::{DataSourceRepo, SensorRepo};
 
 use crate::ingest::IngestCtx;
 
+/// Fixed enrollment-window length. No longer operator-configurable per
+/// datasource — a single short, predictable default (15 minutes).
+pub const DEFAULT_ENROLLMENT_WINDOW_SECS: u64 = 900;
+
 /// Per-datasource enrollment-window expiry (monotonic). Absent/past = closed.
 pub(crate) type WindowMap = Arc<tokio::sync::Mutex<HashMap<Uuid, Instant>>>;
 
@@ -69,7 +73,10 @@ pub(crate) struct EnrollState {
 #[derive(Deserialize)]
 struct EnrollRequest {
     sensor_id: String,
-    key: String,
+    /// One-way fingerprint of the sensor's key — the key itself is NEVER sent
+    /// over the wire. The operator supplies the actual key in the approval
+    /// dialog, and the Standalone verifies it reproduces this fingerprint.
+    fingerprint: String,
 }
 
 /// Slug rule shared with Phase 1 setup: non-empty, ≤64, `[A-Za-z0-9_-]`.
@@ -78,6 +85,18 @@ fn is_valid_sensor_id(s: &str) -> bool {
         && s.len() <= 64
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Fingerprint wire format, matching `fluxfang_sensor_proto::fingerprint`:
+/// eight uppercase hex bytes joined by dashes, e.g. `A1-B2-C3-D4-E5-F6-07-18`.
+/// Validating the shape keeps malformed/oversized input out of the keyring on
+/// this unauthenticated endpoint.
+fn is_valid_fingerprint(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    parts.len() == 8
+        && parts
+            .iter()
+            .all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit() && !c.is_lowercase()))
 }
 
 /// The router each sensor listener serves.
@@ -197,15 +216,15 @@ async fn enroll(
             return (StatusCode::FORBIDDEN, "enrollment window is closed").into_response();
         }
     }
-    // 2. Slug + key validity (fail closed, no panic).
+    // 2. Slug + fingerprint validity (fail closed, no panic). The key is NOT
+    // present in the request — only its one-way fingerprint.
     if !is_valid_sensor_id(&req.sensor_id) {
         return (StatusCode::BAD_REQUEST, "invalid sensor_id").into_response();
     }
-    let key = match fluxfang_sensor_proto::decode_key(&req.key) {
-        Ok(k) => k,
-        Err(_) => return (StatusCode::BAD_REQUEST, "invalid key").into_response(),
-    };
-    let fingerprint = fluxfang_sensor_proto::fingerprint(&req.sensor_id, &key);
+    if !is_valid_fingerprint(&req.fingerprint) {
+        return (StatusCode::BAD_REQUEST, "invalid fingerprint").into_response();
+    }
+    let fingerprint = req.fingerprint.clone();
     let source_ip = peer.ip().to_string();
 
     // 3. Upsert policy by current status.
@@ -219,17 +238,15 @@ async fn enroll(
             &st.pool,
             st.data_source_id,
             &req.sensor_id,
-            &req.key,
             &fingerprint,
             Some(&source_ip),
         )
         .await
         .map(|s| (StatusCode::OK, s.status)),
         Some(s) if s.status == "pending" => {
-            match SensorRepo::update_pending_key(
+            match SensorRepo::update_pending_fingerprint(
                 &st.pool,
                 s.id,
-                &req.key,
                 &fingerprint,
                 Some(&source_ip),
             )
@@ -247,22 +264,16 @@ async fn enroll(
             }
         }
         Some(s) if s.status == "approved" => {
-            // Constant-time compare of the DECODED 32-byte keys (defense in
-            // depth on an unauthenticated endpoint) rather than a
-            // short-circuiting String/base64 compare. If the stored key
-            // somehow fails to decode (should never happen — we only ever
-            // store valid base64 here) treat it as a mismatch, not a panic.
-            // subtle 2.x implements `ConstantTimeEq` for slices, not fixed-
-            // size arrays, so compare via `.as_slice()`.
-            use subtle::ConstantTimeEq;
-            let stored_key = fluxfang_sensor_proto::decode_key(&s.key);
-            let same =
-                matches!(&stored_key, Ok(sk) if bool::from(sk.as_slice().ct_eq(key.as_slice())));
-            if same {
+            // Already approved: the operator verified this fingerprint and
+            // supplied the matching key at approval. A re-enroll simply
+            // confirms liveness — but only if the claimed fingerprint still
+            // matches the one on file. A DIFFERENT fingerprint means a node is
+            // squatting an approved id with another key: refuse. Fingerprints
+            // are public (one-way hashes), so a plain compare is fine here.
+            if req.fingerprint == s.fingerprint {
                 let _ = SensorRepo::touch_last_seen(&st.pool, s.id).await;
                 Ok((StatusCode::OK, "approved".to_string()))
             } else {
-                // An approved id re-enrolling with a DIFFERENT key — refuse.
                 return (
                     StatusCode::CONFLICT,
                     "sensor_id already approved with a different key",
@@ -385,20 +396,25 @@ impl SensorListenerManager {
     }
 
     /// Open the enrollment window for `data_source_id` for its configured
-    /// `enrollment_window_secs` (default 900). Returns remaining seconds, or
-    /// `None` if the datasource doesn't exist.
+    /// Open a fixed-length enrollment window for `data_source_id`. Returns the
+    /// window length in seconds, or `None` if the datasource doesn't exist.
+    /// The duration is a fixed default — it is no longer operator-configurable
+    /// per datasource (kept short and predictable by design).
     pub async fn open_enrollment_window(&self, data_source_id: Uuid) -> Option<u64> {
-        let source = DataSourceRepo::get(&self.pool, data_source_id)
+        // Confirm the datasource exists before opening a window for it.
+        DataSourceRepo::get(&self.pool, data_source_id)
             .await
             .ok()??;
-        let secs = source
-            .config
-            .get("enrollment_window_secs")
-            .and_then(Value::as_u64)
-            .unwrap_or(900);
+        let secs = DEFAULT_ENROLLMENT_WINDOW_SECS;
         let expiry = Instant::now() + std::time::Duration::from_secs(secs);
         self.windows.lock().await.insert(data_source_id, expiry);
         Some(secs)
+    }
+
+    /// Close `data_source_id`'s enrollment window immediately (e.g. once the
+    /// operator has approved a sensor). A no-op if none is open.
+    pub async fn close_enrollment_window(&self, data_source_id: Uuid) {
+        self.windows.lock().await.remove(&data_source_id);
     }
 
     /// Remaining seconds on the window, or 0 if closed/expired.

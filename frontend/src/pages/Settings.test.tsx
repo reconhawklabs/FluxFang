@@ -47,11 +47,35 @@ test('switching a standalone node to sensor role requires a key', async () => {
   expect(await screen.findByRole('alert')).toHaveTextContent(/key is required/i);
   expect(calls.length).toBe(0);
 
-  fireEvent.change(screen.getByLabelText(/encryption key/i), { target: { value: 'sekret' } });
+  const validKey = btoa('A'.repeat(32)); // 32 bytes, base64-encoded
+  fireEvent.change(screen.getByLabelText(/encryption key/i), { target: { value: validKey } });
   fireEvent.click(screen.getByRole('button', { name: /save/i }));
   await waitFor(() => expect(calls.length).toBe(1));
   const body = calls[0].body as { sensor: { key?: string } };
-  expect(body.sensor.key).toBe('sekret');
+  expect(body.sensor.key).toBe(validKey);
+});
+
+test('rejects a malformed (non-32-byte) encryption key', async () => {
+  const calls: Array<{ url: string; body: unknown }> = [];
+  mock({ role: 'sensor', node_sensor_id: 'frontgate', sensor: { host: 'base', port: 9000, cache_ttl_secs: 3600 } }, calls);
+  render(<Settings />, { wrapper });
+  await waitFor(() => expect((screen.getByLabelText(/standalone host/i) as HTMLInputElement).value).toBe('base'));
+  fireEvent.change(screen.getByLabelText(/encryption key/i), { target: { value: 'not-32-bytes' } });
+  fireEvent.click(screen.getByRole('button', { name: /save/i }));
+  expect(await screen.findByRole('alert')).toHaveTextContent(/32 bytes/i);
+  expect(calls.length).toBe(0);
+});
+
+test('Generate fills the encryption key with a valid key', async () => {
+  const calls: Array<{ url: string; body: unknown }> = [];
+  mock({ role: 'sensor', node_sensor_id: 'frontgate', sensor: { host: 'base', port: 9000, cache_ttl_secs: 3600 } }, calls);
+  render(<Settings />, { wrapper });
+  const keyField = await waitFor(() => screen.getByLabelText(/encryption key/i) as HTMLInputElement);
+  expect(keyField.value).toBe('');
+  fireEvent.click(screen.getByRole('button', { name: /generate/i }));
+  expect(keyField.value.length).toBeGreaterThan(0);
+  fireEvent.click(screen.getByRole('button', { name: /save/i }));
+  await waitFor(() => expect(calls.length).toBe(1));
 });
 
 test('rejects a node id with a space', async () => {

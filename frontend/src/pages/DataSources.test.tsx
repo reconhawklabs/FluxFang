@@ -631,7 +631,7 @@ test('Edit modal pre-fills lat/lon and PATCHes the source with the new values on
   });
 });
 
-test('add source: sensor kind — submits a sensor/listener source with bind_ip/bind_port/enrollment_window_secs', async () => {
+test('add source: sensor kind — submits a sensor/listener source with bind_ip/bind_port', async () => {
   const created: DataSource = {
     id: 'new-sensor',
     created_at: '2026-01-01T00:00:00Z',
@@ -639,7 +639,7 @@ test('add source: sensor kind — submits a sensor/listener source with bind_ip/
     mode: 'listener',
     interface: null,
     status: 'stopped',
-    config: { bind_ip: '0.0.0.0', bind_port: 9000, enrollment_window_secs: 900 },
+    config: { bind_ip: '0.0.0.0', bind_port: 9000 },
     last_error: null,
     desired_state: 'stopped',
     last_ok_at: null,
@@ -675,7 +675,7 @@ test('add source: sensor kind — submits a sensor/listener source with bind_ip/
   expect(JSON.parse(init.body as string)).toEqual({
     kind: 'sensor',
     mode: 'listener',
-    config: { bind_ip: '0.0.0.0', bind_port: 9000, enrollment_window_secs: 900 },
+    config: { bind_ip: '0.0.0.0', bind_port: 9000 },
   });
 });
 

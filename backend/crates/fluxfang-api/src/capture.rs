@@ -551,16 +551,9 @@ pub(crate) fn validate_data_source(
                         .to_string(),
                 );
             }
-            let window_ok = config
-                .get("enrollment_window_secs")
-                .and_then(|v| v.as_u64())
-                .is_some_and(|w| w > 0);
-            if !window_ok {
-                return Err(
-                    "sensor listener config requires a positive 'enrollment_window_secs'"
-                        .to_string(),
-                );
-            }
+            // The enrollment-window length is a fixed default (see
+            // `sensor_listener::DEFAULT_ENROLLMENT_WINDOW_SECS`); it is no
+            // longer part of the datasource config, so nothing to validate.
             Ok(())
         }
         other => Err(format!(
@@ -1255,7 +1248,7 @@ mod validate_data_source_tests {
     }
 
     #[test]
-    fn validate_sensor_rejects_bad_ip_port_window() {
+    fn validate_sensor_rejects_bad_ip_port() {
         // bad ip
         assert!(validate_data_source("sensor", "listener", None,
             &serde_json::json!({"bind_ip":"not-an-ip","bind_port":9000,"enrollment_window_secs":900})).is_err());
@@ -1267,14 +1260,15 @@ mod validate_data_source_tests {
             &serde_json::json!({"bind_ip":"0.0.0.0","bind_port":0,"enrollment_window_secs":900})
         )
         .is_err());
-        // window 0
+        // enrollment_window_secs is no longer operator-configurable: the field
+        // is ignored (not validated), so a value of 0 is accepted, not rejected.
         assert!(validate_data_source(
             "sensor",
             "listener",
             None,
             &serde_json::json!({"bind_ip":"0.0.0.0","bind_port":9000,"enrollment_window_secs":0})
         )
-        .is_err());
+        .is_ok());
         // missing bind_ip
         assert!(validate_data_source(
             "sensor",

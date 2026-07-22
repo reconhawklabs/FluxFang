@@ -36,9 +36,10 @@ async fn setup(
     let key = fluxfang_sensor_proto::generate_key();
     let key_b64 = fluxfang_sensor_proto::encode_key(&key);
     let fp = fluxfang_sensor_proto::fingerprint("frontgate", &key);
-    let s = SensorRepo::insert_pending(&pool, ds.id, "frontgate", &key_b64, &fp, None)
+    let s = SensorRepo::insert_pending(&pool, ds.id, "frontgate", &fp, None)
         .await
         .unwrap();
+    SensorRepo::set_key(&pool, s.id, &key_b64, &fp).await.unwrap();
     SensorRepo::set_status(&pool, s.id, "approved", true)
         .await
         .unwrap();
@@ -200,9 +201,8 @@ async fn unapproved_sensor_is_rejected_with_403() {
 
     // Enrolled but left pending -- never approved.
     let key = fluxfang_sensor_proto::generate_key();
-    let key_b64 = fluxfang_sensor_proto::encode_key(&key);
     let fp = fluxfang_sensor_proto::fingerprint("frontgate", &key);
-    SensorRepo::insert_pending(&pool, ds.id, "frontgate", &key_b64, &fp, None)
+    SensorRepo::insert_pending(&pool, ds.id, "frontgate", &fp, None)
         .await
         .unwrap();
 

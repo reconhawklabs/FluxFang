@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { api, ApiError } from '../api/client';
 import type { NodeRole } from '../api/client';
+import { generateKey } from '../lib/sensorKey';
 
 const MAX_PASSWORD_LENGTH = 1024;
 const SENSOR_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -12,16 +13,6 @@ export interface SetupProps {
    * caller in — see backend `auth_routes::setup`) so `App.tsx` can re-run
    * `useAuth` and move past the setup screen. */
   onSetupComplete: () => void | Promise<void>;
-}
-
-/** 32 random bytes, base64-encoded — a client-side convenience generator for
- * the shared encryption key. */
-function generateKey(): string {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  let binary = '';
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return btoa(binary);
 }
 
 export default function Setup({ onSetupComplete }: SetupProps) {

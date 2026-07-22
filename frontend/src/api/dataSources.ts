@@ -12,8 +12,8 @@
 //   - gps  + gpsd     -> `config: { host, port }`
 //   - gps  + serial   -> `config: { device, baud }`, `baud` one of
 //     `BAUD_RATES` (the backend's `ALLOWED_BAUD_RATES`)
-//   - sensor + listener -> `config: { bind_ip, bind_port,
-//     enrollment_window_secs }`, no top-level `interface`
+//   - sensor + listener -> `config: { bind_ip, bind_port }`, no top-level
+//     `interface`
 import { del, get, patch, post } from "./client";
 
 // "sensor" is not a kind the Add-Data-Source form creates directly — it's
@@ -94,14 +94,13 @@ export interface RtlSdrConfig {
 /** sensor + listener's `config` — a network listener that accepts
  * connections from distributed Sensor nodes (`fluxfang-api::data_sources`'s
  * `sensor_listener`; validated by the backend's `validate_data_source`:
- * `bind_ip` must be a valid IP, `bind_port` 1..=65535,
- * `enrollment_window_secs` > 0). Unlike wifi/bluetooth/rtl_sdr this kind has
- * no hardware interface — it's a pure network bind, so there's no top-level
- * `interface` field. */
+ * `bind_ip` must be a valid IP, `bind_port` 1..=65535). The enrollment-window
+ * length is a fixed backend default and is no longer client-configurable.
+ * Unlike wifi/bluetooth/rtl_sdr this kind has no hardware interface — it's a
+ * pure network bind, so there's no top-level `interface` field. */
 export interface SensorListenerConfig {
   bind_ip: string;
   bind_port: number;
-  enrollment_window_secs: number;
 }
 
 export type DataSourceConfig =
