@@ -292,6 +292,14 @@ pub struct Emitter {
     pub match_enabled: bool,
     pub identity_key: Option<String>,
     pub source: String,
+    /// RSSI-localization estimate (all None until the localization pass has
+    /// enough distinct observation locations). `est_lon`/`est_lat` are the
+    /// `est_location` geography point unpacked via `ST_X`/`ST_Y`.
+    pub est_lon: Option<f64>,
+    pub est_lat: Option<f64>,
+    pub est_uncertainty_m: Option<f64>,
+    pub est_bin_count: Option<i32>,
+    pub est_updated_at: Option<DateTime<Utc>>,
 }
 
 /// Fields required to create a new `emitter`.

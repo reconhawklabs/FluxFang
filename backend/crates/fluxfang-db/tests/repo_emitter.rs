@@ -1722,3 +1722,62 @@ async fn list_auto_correlate_tpms_filters_by_type_and_data_source_config() {
         "an otherwise-eligible emitter whose only emission is older than `since` must be excluded"
     );
 }
+
+#[tokio::test]
+async fn set_estimate_roundtrips_and_starts_null() {
+    let pool = fresh_pool().await;
+    let e = EmitterRepo::insert(&pool, new_emitter("AP")).await.unwrap();
+
+    // A fresh emitter has no estimate.
+    let got = EmitterRepo::get(&pool, e.id).await.unwrap().unwrap();
+    assert!(got.est_lon.is_none());
+    assert!(got.est_updated_at.is_none());
+
+    EmitterRepo::set_estimate(&pool, e.id, -71.5, 42.3, 12.5, 4)
+        .await
+        .unwrap();
+
+    let got = EmitterRepo::get(&pool, e.id).await.unwrap().unwrap();
+    assert!((got.est_lon.unwrap() - (-71.5)).abs() < 1e-6);
+    assert!((got.est_lat.unwrap() - 42.3).abs() < 1e-6);
+    assert!((got.est_uncertainty_m.unwrap() - 12.5).abs() < 1e-9);
+    assert_eq!(got.est_bin_count, Some(4));
+    assert!(got.est_updated_at.is_some());
+}
+
+#[tokio::test]
+async fn ids_with_recent_emissions_lists_active_emitters_only() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+    let e = EmitterRepo::insert(&pool, new_emitter("AP")).await.unwrap();
+
+    EmissionRepo::insert(
+        &pool,
+        NewEmission {
+            data_source_id: Some(ds),
+            emitter_id: Some(e.id),
+            session_id: Some(session),
+            observed_at: Utc::now(),
+            signal_strength: Some(-50),
+            location: Some((-71.0, 42.0)),
+            location_quality: "fresh".to_string(),
+            kind: "wifi".to_string(),
+            payload: serde_json::json!({}),
+            sensor_id: "local".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let ids = EmitterRepo::ids_with_recent_emissions(&pool, Utc::now() - Duration::hours(1))
+        .await
+        .unwrap();
+    assert!(ids.contains(&e.id));
+
+    // A future `since` (nothing newer) yields nothing.
+    let none = EmitterRepo::ids_with_recent_emissions(&pool, Utc::now() + Duration::hours(1))
+        .await
+        .unwrap();
+    assert!(!none.contains(&e.id));
+}

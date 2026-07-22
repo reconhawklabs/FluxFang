@@ -184,6 +184,37 @@ pub struct EmitterDto {
     /// [`Self::from_parts`]). `0` when built via [`From<&Emitter>`] — a
     /// freshly-created/looked-up single emitter has no count context.
     pub emission_count: i64,
+    /// RSSI-localization estimate — the emitter's inferred position + an
+    /// uncertainty radius. `None` until the localization pass has enough
+    /// distinct observation locations (the map then falls back to the
+    /// latest-emission marker).
+    pub estimate: Option<EmitterEstimateDto>,
+}
+
+/// An emitter's inferred position from RSSI localization.
+#[derive(Debug, Clone, Serialize)]
+pub struct EmitterEstimateDto {
+    pub lon: f64,
+    pub lat: f64,
+    pub uncertainty_m: f64,
+    pub bin_count: i32,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+impl EmitterEstimateDto {
+    /// Build from an emitter's `est_*` columns, if a position is present.
+    fn from_emitter(e: &Emitter) -> Option<Self> {
+        match (e.est_lon, e.est_lat) {
+            (Some(lon), Some(lat)) => Some(EmitterEstimateDto {
+                lon,
+                lat,
+                uncertainty_m: e.est_uncertainty_m.unwrap_or(0.0),
+                bin_count: e.est_bin_count.unwrap_or(0),
+                updated_at: e.est_updated_at,
+            }),
+            _ => None,
+        }
+    }
 }
 
 impl From<&Emitter> for EmitterDto {
@@ -214,6 +245,7 @@ impl From<&Emitter> for EmitterDto {
             type_label,
             category,
             emission_count: 0,
+            estimate: EmitterEstimateDto::from_emitter(e),
         }
     }
 }

@@ -7,7 +7,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::models::Emitter;
-use crate::repo::emitter::EMITTER_COLUMNS;
+use crate::repo::emitter::emitter_columns_qualified;
 
 /// One associated emitter plus how the link was made.
 pub struct AssociatedEmitter {
@@ -100,13 +100,9 @@ impl EmitterAssociationRepo {
         pool: &PgPool,
         emitter_id: Uuid,
     ) -> Result<Vec<AssociatedEmitter>, sqlx::Error> {
-        // Prefix EMITTER_COLUMNS with `e.` for the join (same technique
-        // alert_rule.rs uses for ALERT_METHOD_COLUMNS).
-        let cols = EMITTER_COLUMNS
-            .split(',')
-            .map(|c| format!("e.{}", c.trim()))
-            .collect::<Vec<_>>()
-            .join(", ");
+        // Qualify EMITTER_COLUMNS with the `e` alias for the join (handles the
+        // est_location `ST_X(...)` unpacking that a blind `e.<col>` prefix can't).
+        let cols = emitter_columns_qualified("e");
         let sql = format!(
             "SELECT {cols}, ea.source AS assoc_source, ea.confidence \
              FROM emitter_association ea \

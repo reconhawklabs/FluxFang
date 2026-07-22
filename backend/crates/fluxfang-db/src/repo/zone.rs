@@ -62,7 +62,10 @@ const ZONE_COLUMNS: &str =
 const JOINED_EMITTER_COLUMNS: &str = "emitter.id, emitter.created_at, emitter.name, \
      emitter.type, emitter.entity_id, emitter.match_criteria, \
      emitter.first_seen_at, emitter.last_seen_at, emitter.emitter_type, \
-     emitter.attributes, emitter.match_enabled, emitter.identity_key, emitter.source";
+     emitter.attributes, emitter.match_enabled, emitter.identity_key, emitter.source, \
+     ST_X(emitter.est_location::geometry) AS est_lon, \
+     ST_Y(emitter.est_location::geometry) AS est_lat, \
+     emitter.est_uncertainty_m, emitter.est_bin_count, emitter.est_updated_at";
 
 /// Table-qualified [`Entity`] column list for [`ZoneRepo::subjects_in_zone`].
 const JOINED_ENTITY_COLUMNS: &str =

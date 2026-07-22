@@ -904,3 +904,55 @@ async fn counts_by_sensor_since_groups_by_sensor_id() {
     counts.sort();
     assert_eq!(counts, vec![("backlot".to_string(), 1), ("frontgate".to_string(), 2)]);
 }
+
+#[tokio::test]
+async fn located_signal_for_emitter_filters_and_orders_newest_first() {
+    let pool = fresh_pool().await;
+    let ds = seed_wifi_source(&pool).await;
+    let session = seed_session(&pool).await;
+    let e = EmitterRepo::insert(
+        &pool,
+        NewEmitter {
+            name: "AP".to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let mk = |sig: Option<i32>, loc: Option<(f64, f64)>, at| NewEmission {
+        data_source_id: Some(ds),
+        emitter_id: Some(e.id),
+        session_id: Some(session),
+        observed_at: at,
+        signal_strength: sig,
+        location: loc,
+        location_quality: if loc.is_some() { "fresh" } else { "none" }.to_string(),
+        kind: "wifi".to_string(),
+        payload: serde_json::json!({}),
+        sensor_id: "local".to_string(),
+    };
+    let base = Utc::now();
+    // qualifies (has location + signal)
+    EmissionRepo::insert(&pool, mk(Some(-50), Some((-71.0, 42.0)), base))
+        .await
+        .unwrap();
+    // newer, qualifies
+    EmissionRepo::insert(&pool, mk(Some(-60), Some((-71.1, 42.1)), base + Duration::seconds(10)))
+        .await
+        .unwrap();
+    // no location -> excluded
+    EmissionRepo::insert(&pool, mk(Some(-40), None, base)).await.unwrap();
+    // no signal -> excluded
+    EmissionRepo::insert(&pool, mk(None, Some((-71.0, 42.0)), base)).await.unwrap();
+
+    let rows = EmissionRepo::located_signal_for_emitter(&pool, e.id, base - Duration::hours(1), 10_000)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2, "only located+signal rows");
+    // newest first
+    assert_eq!(rows[0].rssi, -60);
+    assert!((rows[0].lon - (-71.1)).abs() < 1e-6);
+    assert!((rows[0].lat - 42.1).abs() < 1e-6);
+    assert_eq!(rows[1].rssi, -50);
+}

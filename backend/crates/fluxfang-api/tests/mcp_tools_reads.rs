@@ -81,3 +81,30 @@ async fn emitters_connected_to_matches_connected_ssid() {
     let out = reads::emitters_connected_to(&pool, serde_json::json!({"ssid":"HomeNet"})).await.unwrap();
     assert_eq!(out["emitters"].as_array().unwrap().len(), 1);
 }
+
+/// The MCP `get_emitter` tool exposes the RSSI-localization estimate.
+#[tokio::test]
+async fn get_emitter_exposes_localization_estimate() {
+    let pool = fresh_pool().await;
+    let e = fluxfang_db::EmitterRepo::insert(
+        &pool,
+        fluxfang_db::models::NewEmitter {
+            name: "AP".to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    fluxfang_db::EmitterRepo::set_estimate(&pool, e.id, -71.06, 42.36, 15.0, 4)
+        .await
+        .unwrap();
+
+    let out = reads::get_emitter(&pool, json!({ "id": e.id.to_string() }))
+        .await
+        .expect("get_emitter");
+    let est = &out["emitter"]["estimate"];
+    assert!((est["lon"].as_f64().unwrap() - (-71.06)).abs() < 1e-6, "out: {out}");
+    assert!((est["lat"].as_f64().unwrap() - 42.36).abs() < 1e-6);
+    assert!((est["uncertainty_m"].as_f64().unwrap() - 15.0).abs() < 1e-9);
+    assert_eq!(est["bin_count"], 4);
+}

@@ -88,6 +88,7 @@ const EMITTER_UNASSIGNED: Emitter = {
   last_seen_at: "2026-07-04T12:00:00Z",
   created_at: "2026-07-01T00:00:00Z",
   emission_count: 0,
+  estimate: null,
 };
 
 const EMITTER_ASSIGNED: Emitter = {
@@ -105,6 +106,7 @@ const EMITTER_ASSIGNED: Emitter = {
   last_seen_at: null,
   created_at: "2026-07-01T00:00:00Z",
   emission_count: 0,
+  estimate: null,
 };
 
 /** An auto-classified WiFi client emitter (Phase A backend / Phase B
@@ -128,6 +130,7 @@ const EMITTER_CLIENT: Emitter = {
   last_seen_at: "2026-07-05T01:00:00Z",
   created_at: "2026-07-05T00:00:00Z",
   emission_count: 42,
+  estimate: null,
 };
 
 /** An auto-classified WiFi access-point emitter with a visible SSID and no
@@ -150,6 +153,7 @@ const EMITTER_AP: Emitter = {
   last_seen_at: "2026-07-05T01:00:00Z",
   created_at: "2026-07-05T00:00:00Z",
   emission_count: 7,
+  estimate: null,
 };
 
 const ENTITY_1: Entity = {

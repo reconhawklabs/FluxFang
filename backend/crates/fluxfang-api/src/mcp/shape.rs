@@ -38,6 +38,18 @@ pub fn emitter_json(e: &Emitter) -> Value {
         "first_seen_at": e.first_seen_at,
         "last_seen_at": e.last_seen_at,
         "source": e.source,
+        // RSSI-localization estimate: the emitter's inferred position + an
+        // uncertainty radius (metres), or null until it's localizable.
+        "estimate": match (e.est_lon, e.est_lat) {
+            (Some(lon), Some(lat)) => json!({
+                "lon": lon,
+                "lat": lat,
+                "uncertainty_m": e.est_uncertainty_m,
+                "bin_count": e.est_bin_count,
+                "updated_at": e.est_updated_at,
+            }),
+            _ => Value::Null,
+        },
     })
 }
 

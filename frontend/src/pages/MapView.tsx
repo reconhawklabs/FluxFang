@@ -44,11 +44,14 @@
 //     bulk "last location per entity" backend endpoint this task doesn't
 //     otherwise need.
 //   - Emitter markers (Phase 6, "Layers" group's Emitters toggle): one
-//     marker per emitter, derived client-side from the SAME "all emissions"
-//     query's items via `emitterMarkersFromEmissions` (groups located
-//     emissions by `emitter_id`, keeps only the latest per emitter) — no
-//     separate backend request, since the all-emissions query already fetches
-//     the located emissions this needs.
+//     marker per emitter, resolved client-side via `emitterMarkers` — each
+//     emitter with a backend RSSI/GPS `estimate` (Phase C emitter
+//     localization) is placed at that estimated position (with a meters-sized
+//     translucent uncertainty circle drawn under it), and any emitter without
+//     one falls back to its most-recent located emission from the SAME
+//     "all emissions" query's items (grouped by `emitter_id`) — no separate
+//     backend request, since that query already fetches the located emissions
+//     the fallback needs.
 //   - Zones: `GET /api/zones`, shaped by `zonesToCircleGeoJSON` into a
 //     circle-approximation polygon per zone.
 //
@@ -100,7 +103,8 @@ import { getGpsStatus } from "../api/gps";
 import type { EntityMarker } from "../components/mapData";
 import {
   emissionPointsToHeatmapGeoJSON,
-  emitterMarkersFromEmissions,
+  emitterMarkers,
+  emitterUncertaintyCirclesGeoJSON,
   entitiesToMarkerFeatures,
   zonesToCircleGeoJSON,
 } from "../components/mapData";
@@ -127,11 +131,16 @@ const BASEMAP_LAYER_ID = "basemap-tiles";
 const EMISSIONS_SOURCE_ID = "emissions-heatmap-source";
 const ENTITIES_SOURCE_ID = "entity-markers-source";
 const EMITTERS_SOURCE_ID = "emitter-markers-source";
+const EMITTER_UNCERTAINTY_SOURCE_ID = "emitter-uncertainty-source";
 const ZONES_SOURCE_ID = "zones-source";
 
 const HEATMAP_LAYER_IDS = ["emissions-heatmap-layer"];
 const ENTITY_LAYER_IDS = ["entity-circle-layer", "entity-label-layer"];
 const EMITTER_LAYER_IDS = ["emitter-circle-layer", "emitter-label-layer"];
+// The localization uncertainty circle fill, toggled together with the emitter
+// point markers (same "Emitters" checkbox) but kept out of `EMITTER_LAYER_IDS`
+// so the marker click/hover handlers aren't also bound to this polygon layer.
+const EMITTER_UNCERTAINTY_LAYER_IDS = ["emitter-uncertainty-fill-layer"];
 const ZONE_LAYER_IDS = [
   "zone-fill-layer",
   "zone-line-layer",
@@ -329,6 +338,23 @@ function addLayers(map: MapLibreMap): void {
       "text-halo-color": "#0f172a",
       "text-halo-width": 1,
     },
+  });
+
+  // Phase C emitter-localization uncertainty circles — a translucent amber
+  // fill under the emitter point markers (added first so the markers draw on
+  // top). One polygon per estimate-placed emitter, sized in METERS via
+  // `emitterUncertaintyCirclesGeoJSON` (MapLibre's `circle-radius` is pixels,
+  // so a meters-accurate radius has to be a real polygon). Toggled with the
+  // "Emitters" checkbox (see `EMITTER_UNCERTAINTY_LAYER_IDS`).
+  map.addSource(EMITTER_UNCERTAINTY_SOURCE_ID, {
+    type: "geojson",
+    data: EMPTY_POLYGON_FC,
+  });
+  map.addLayer({
+    id: "emitter-uncertainty-fill-layer",
+    type: "fill",
+    source: EMITTER_UNCERTAINTY_SOURCE_ID,
+    paint: { "fill-color": "#f59e0b", "fill-opacity": 0.12 },
   });
 
   // Phase 6's "Emitters" layer — same marker styling approach as entities,
@@ -605,10 +631,12 @@ export default function MapView({
     return markers;
   }, [entityDetailQueries]);
 
-  // Phase 6 "Emitters" layer: derived client-side from the same
-  // "all emissions" items already fetched above, grouped by `emitter_id`
-  // (`emitterMarkersFromEmissions`, `components/mapData.ts`) and labeled via
-  // this `emittersQuery` fetch — no separate backend request needed.
+  // Phase 6 "Emitters" layer: derived client-side (`emitterMarkers`,
+  // `components/mapData.ts`) from the `emittersQuery` list — each emitter with
+  // a backend `estimate` is placed there (carrying its uncertainty radius),
+  // and any emitter without one falls back to its most-recent located emission
+  // from the same "all emissions" items already fetched above, grouped by
+  // `emitter_id`. `emitterNames` labels both paths; no extra backend request.
   const emitterNames = useMemo(() => {
     const names: Record<string, string> = {};
     for (const emitter of emittersQuery.data?.items ?? [])
@@ -616,9 +644,14 @@ export default function MapView({
     return names;
   }, [emittersQuery.data]);
 
-  const emitterMarkers = useMemo(
-    () => emitterMarkersFromEmissions(emissionsItems, emitterNames),
-    [emissionsItems, emitterNames],
+  const emitterMarkerList = useMemo(
+    () =>
+      emitterMarkers(
+        emittersQuery.data?.items ?? [],
+        emissionsItems,
+        emitterNames,
+      ),
+    [emittersQuery.data, emissionsItems, emitterNames],
   );
 
   // Full emitter records by id, kept current for the marker click popup. The
@@ -830,8 +863,18 @@ export default function MapView({
     const map = mapRef.current;
     if (!map || !styleLoaded) return;
     const source = map.getSource<GeoJSONSource>(EMITTERS_SOURCE_ID);
-    source?.setData(entitiesToMarkerFeatures(emitterMarkers));
-  }, [styleLoaded, emitterMarkers]);
+    source?.setData(entitiesToMarkerFeatures(emitterMarkerList));
+  }, [styleLoaded, emitterMarkerList]);
+
+  // Localization uncertainty circles — meters-accurate polygons for the
+  // estimate-placed emitters (fallback markers carry no radius and are skipped
+  // by `emitterUncertaintyCirclesGeoJSON`).
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleLoaded) return;
+    const source = map.getSource<GeoJSONSource>(EMITTER_UNCERTAINTY_SOURCE_ID);
+    source?.setData(emitterUncertaintyCirclesGeoJSON(emitterMarkerList));
+  }, [styleLoaded, emitterMarkerList]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -855,7 +898,10 @@ export default function MapView({
     // removed as redundant with it).
     apply(HEATMAP_LAYER_IDS, true);
     apply(ENTITY_LAYER_IDS, layerVisibility.entities);
-    apply(EMITTER_LAYER_IDS, layerVisibility.emitters);
+    apply(
+      [...EMITTER_LAYER_IDS, ...EMITTER_UNCERTAINTY_LAYER_IDS],
+      layerVisibility.emitters,
+    );
     apply(ZONE_LAYER_IDS, layerVisibility.zones);
   }, [styleLoaded, layerVisibility]);
 

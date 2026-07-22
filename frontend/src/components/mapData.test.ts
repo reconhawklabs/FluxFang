@@ -6,7 +6,9 @@
 import { describe, expect, it, test } from 'vitest';
 import {
   emissionPointsToHeatmapGeoJSON,
+  emitterMarkers,
   emitterMarkersFromEmissions,
+  emitterUncertaintyCirclesGeoJSON,
   entitiesToMarkerFeatures,
   pointsToHeatmapGeoJSON,
   sightingPointsToGeoJSON,
@@ -14,7 +16,29 @@ import {
   zonesToCircleGeoJSON,
 } from './mapData';
 import type { Emission } from '../api/emissions';
+import type { Emitter } from '../api/emitters';
 import type { Zone } from '../api/zones';
+
+function makeEmitter(overrides: Partial<Emitter>): Emitter {
+  return {
+    id: 'emitter-1',
+    name: 'Emitter One',
+    type: null,
+    emitter_type: null,
+    attributes: {},
+    match_enabled: true,
+    type_label: null,
+    category: null,
+    entity_id: null,
+    match_criteria: {},
+    first_seen_at: null,
+    last_seen_at: null,
+    created_at: '2026-07-01T00:00:00Z',
+    emission_count: 0,
+    estimate: null,
+    ...overrides,
+  };
+}
 
 function makeEmission(overrides: Partial<Emission>): Emission {
   return {
@@ -118,6 +142,116 @@ test('emitterMarkersFromEmissions falls back to the emitter id as the label when
   const emissions: Emission[] = [makeEmission({ id: 'em-1', emitter_id: 'emitter-9', lon: 0, lat: 0 })];
   const markers = emitterMarkersFromEmissions(emissions, {});
   expect(markers).toEqual([{ id: 'emitter-9', name: 'emitter-9', lon: 0, lat: 0, observed_at: '2026-07-01T00:00:00Z' }]);
+});
+
+describe('emitterMarkers', () => {
+  it('places an emitter WITH an estimate at estimate.lon/lat carrying uncertaintyM', () => {
+    const emitters: Emitter[] = [
+      makeEmitter({
+        id: 'emitter-1',
+        name: 'Localized AP',
+        // A stale located emission at a *different* spot — the estimate wins.
+        last_seen_at: '2026-07-03T00:00:00Z',
+        estimate: {
+          lon: 10.5,
+          lat: -3.25,
+          uncertainty_m: 75,
+          bin_count: 12,
+          updated_at: '2026-07-05T00:00:00Z',
+        },
+      }),
+    ];
+    const emissions: Emission[] = [
+      makeEmission({ id: 'em-1', emitter_id: 'emitter-1', lon: 2.5, lat: 1.5, observed_at: '2026-07-03T00:00:00Z' }),
+    ];
+
+    const markers = emitterMarkers(emitters, emissions, { 'emitter-1': 'Localized AP' });
+
+    expect(markers).toHaveLength(1);
+    expect(markers[0]).toEqual({
+      id: 'emitter-1',
+      name: 'Localized AP',
+      lon: 10.5,
+      lat: -3.25,
+      observed_at: '2026-07-05T00:00:00Z',
+      uncertaintyM: 75,
+    });
+  });
+
+  it('falls back to the latest located emission (no uncertaintyM) for an emitter WITHOUT an estimate', () => {
+    const emitters: Emitter[] = [makeEmitter({ id: 'emitter-2', name: 'Unlocalized', estimate: null })];
+    const emissions: Emission[] = [
+      makeEmission({ id: 'em-1', emitter_id: 'emitter-2', lon: 2.5, lat: 1.5, observed_at: '2026-07-01T00:00:00Z' }),
+      makeEmission({ id: 'em-2', emitter_id: 'emitter-2', lon: 2.6, lat: 1.6, observed_at: '2026-07-04T00:00:00Z' }),
+    ];
+
+    const markers = emitterMarkers(emitters, emissions, { 'emitter-2': 'Unlocalized' });
+
+    expect(markers).toHaveLength(1);
+    expect(markers[0]).toEqual({
+      id: 'emitter-2',
+      name: 'Unlocalized',
+      lon: 2.6,
+      lat: 1.6,
+      observed_at: '2026-07-04T00:00:00Z',
+    });
+    expect(markers[0].uncertaintyM).toBeUndefined();
+  });
+
+  it('mixes estimate-placed and emission-fallback markers, ignoring emissions of estimate-placed emitters', () => {
+    const emitters: Emitter[] = [
+      makeEmitter({
+        id: 'emitter-1',
+        estimate: { lon: 10, lat: 10, uncertainty_m: 40, bin_count: 5, updated_at: null },
+        last_seen_at: '2026-07-02T00:00:00Z',
+      }),
+      makeEmitter({ id: 'emitter-2', estimate: null }),
+    ];
+    const emissions: Emission[] = [
+      // Belongs to the estimate-placed emitter — must NOT produce a second marker.
+      makeEmission({ id: 'em-1', emitter_id: 'emitter-1', lon: 1, lat: 1, observed_at: '2026-07-01T00:00:00Z' }),
+      makeEmission({ id: 'em-2', emitter_id: 'emitter-2', lon: 2, lat: 2, observed_at: '2026-07-01T00:00:00Z' }),
+    ];
+
+    const markers = emitterMarkers(emitters, emissions, {});
+    const byId = new Map(markers.map((m) => [m.id, m]));
+
+    expect(markers).toHaveLength(2);
+    expect(byId.get('emitter-1')).toEqual({ id: 'emitter-1', name: 'Emitter One', lon: 10, lat: 10, observed_at: '2026-07-02T00:00:00Z', uncertaintyM: 40 });
+    expect(byId.get('emitter-2')).toMatchObject({ id: 'emitter-2', lon: 2, lat: 2 });
+    expect(byId.get('emitter-2')?.uncertaintyM).toBeUndefined();
+  });
+});
+
+describe('emitterUncertaintyCirclesGeoJSON', () => {
+  it('emits one closed polygon (~uncertaintyM out) per marker that has a radius, skipping the rest', () => {
+    const collection = emitterUncertaintyCirclesGeoJSON([
+      { id: 'emitter-1', name: 'A', lon: 2.5, lat: 1.5, observed_at: '2026-07-05T00:00:00Z', uncertaintyM: 120 },
+      // No uncertaintyM (a fallback marker) — skipped.
+      { id: 'emitter-2', name: 'B', lon: -1.1, lat: 5.5, observed_at: '2026-07-04T00:00:00Z' },
+    ]);
+
+    expect(collection.type).toBe('FeatureCollection');
+    expect(collection.features).toHaveLength(1);
+    const feature = collection.features[0];
+    expect(feature.geometry.type).toBe('Polygon');
+    expect(feature.properties).toEqual({ id: 'emitter-1', uncertainty_m: 120 });
+
+    const [ring] = feature.geometry.coordinates;
+    expect(ring[0]).toEqual(ring[ring.length - 1]); // closed ring
+    for (const [lon, lat] of ring) {
+      const d = distanceMeters(2.5, 1.5, lon, lat);
+      expect(d).toBeGreaterThan(120 * 0.98);
+      expect(d).toBeLessThan(120 * 1.02);
+    }
+  });
+
+  it('yields an empty FeatureCollection when no marker has a radius', () => {
+    const collection = emitterUncertaintyCirclesGeoJSON([
+      { id: 'emitter-2', name: 'B', lon: 0, lat: 0, observed_at: '2026-07-04T00:00:00Z' },
+    ]);
+    expect(collection).toEqual({ type: 'FeatureCollection', features: [] });
+  });
 });
 
 function distanceMeters(lon1: number, lat1: number, lon2: number, lat2: number): number {
