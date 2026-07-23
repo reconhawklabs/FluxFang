@@ -17,8 +17,8 @@ pub use node_config::{NodeConfig, NodeRole, SensorConfig};
 pub use repo::{
     AiAuditRepo, AlertMethodRepo, AlertRuleRepo, AppConfigRepo, AssociatedEmitter, CacheStats,
     CachedEmissionRepo, CoTravelRepo, DataSourceRepo, EmissionRepo, EmitterAssociationRepo,
-    EmitterRepo, EntityRepo, IgnoredEmitter, LocationRepo, NotificationRepo, SensorRepo,
-    SessionRepo, ZoneMembershipRepo, ZoneRepo,
+    EmitterMatchRule, EmitterRepo, EntityRepo, IgnoredEmitter, LocationRepo, NotificationRepo,
+    SensorRepo, SessionRepo, ZoneMembershipRepo, ZoneRepo,
 };
 pub use sort::resolve_order_by;
 

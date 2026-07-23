@@ -159,13 +159,16 @@ function ConfigSummary({ source }: { source: DataSource }) {
  * `fluxfang_core::classify::MacPersistence`'s ordering. The empty value is
  * the default "store everything" — an absent `mac_retention_level` means no
  * filtering, so an existing source keeps behaving exactly as before. */
+/** Labels are deliberately terse: the levels are ordered most- to
+ * least-persistent, and the note under the dropdown explains how the ordering
+ * works once, rather than each option restating it. */
 const MAC_RETENTION_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
-  { value: '', label: 'Store everything (no filtering)' },
-  { value: 'stable', label: 'Stable — only never-randomized addresses' },
-  { value: 'per_network', label: 'Per-network — persists per network for months' },
-  { value: 'session', label: 'Session — persists until the device reboots' },
-  { value: 'ephemeral', label: 'Ephemeral — rotates every few minutes' },
-  { value: 'unlinkable', label: 'Unlinkable — cannot be correlated at all' },
+  { value: '', label: 'Store everything' },
+  { value: 'stable', label: 'Stable' },
+  { value: 'per_network', label: 'Per-network' },
+  { value: 'session', label: 'Session' },
+  { value: 'ephemeral', label: 'Ephemeral' },
+  { value: 'unlinkable', label: 'Unlinkable' },
 ];
 
 /** The two MAC retention controls, shared by the wifi and bluetooth forms —
@@ -202,10 +205,8 @@ function MacRetentionFields({
           ))}
         </select>
         <p className="text-xs text-slate-500">
-          Different wireless identifiers persist for shorter or longer periods. Anything you
-          pick here also keeps the more stable levels above it — selecting “Session”, for
-          example, stores session, per-network and stable addresses, and ignores everything
-          below. Emissions below the selected level are not written to the database at all.
+          Levels run from longest-lived to shortest. Picking one keeps it and everything
+          above it; anything below is not stored at all.
         </p>
       </div>
 
@@ -221,9 +222,8 @@ function MacRetentionFields({
           Age Out Ephemeral-class emitters
         </label>
         <p className="text-xs text-slate-500">
-          When enabled, ephemeral-class emitters are removed from the database if they have not
-          been seen within 1 hour, along with their emissions. This is permanent and cannot be
-          undone.
+          Ephemeral-class emitters not seen for 1 hour are deleted with their emissions.
+          Permanent.
         </p>
       </div>
     </>

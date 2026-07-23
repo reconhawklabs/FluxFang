@@ -236,6 +236,20 @@ pub const EMITTER_COLUMNS: &str = "id, created_at, name, type, entity_id, match_
      ST_X(est_location::geometry) AS est_lon, ST_Y(est_location::geometry) AS est_lat, \
      est_uncertainty_m, est_bin_count, est_updated_at";
 
+/// One emitter's auto-attach rule and nothing else — what
+/// [`EmitterRepo::list_match_rules`] returns.
+///
+/// Auto-attach evaluates every live rule on the node against every ingested
+/// emission, so this is the one query whose row width actually matters:
+/// `EMITTER_COLUMNS` carries names, attributes, location estimates and
+/// timestamps that matching never looks at, which on a node with thousands of
+/// emitters is megabytes of wire traffic per fetch.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct EmitterMatchRule {
+    pub id: Uuid,
+    pub match_criteria: serde_json::Value,
+}
+
 /// `EMITTER_COLUMNS` qualified with a table alias, for queries that join and
 /// need `e.id` etc. Handles the `est_location` unpacking correctly (the alias
 /// goes *inside* `ST_X(...)`), which a blind `e.<col>` prefix cannot do.
@@ -482,6 +496,40 @@ impl EmitterRepo {
     pub async fn list(pool: &PgPool) -> Result<Vec<Emitter>, sqlx::Error> {
         let sql = format!("SELECT {EMITTER_COLUMNS} FROM emitter ORDER BY created_at ASC");
         sqlx::query_as::<_, Emitter>(&sql).fetch_all(pool).await
+    }
+
+    /// Current value of the auto-attach rule-set change token (migration
+    /// 0021). Bumped by a trigger whenever an emitter is added, removed, or
+    /// has its `match_criteria`/`match_enabled` changed — and by nothing
+    /// else, so the hot per-emission writes (`touch_seen`, attribute merges)
+    /// leave it alone.
+    ///
+    /// A single-row primary-key lookup: cheap enough to call before every
+    /// match, which is what lets an in-memory rule snapshot be both fast and
+    /// never stale.
+    pub async fn match_version(pool: &PgPool) -> Result<i64, sqlx::Error> {
+        let row: (i64,) = sqlx::query_as("SELECT version FROM emitter_match_version")
+            .fetch_one(pool)
+            .await?;
+        Ok(row.0)
+    }
+
+    /// Just the columns auto-attach needs, for the emitters whose rules are
+    /// live, in the same `created_at ASC` order as [`Self::list`] — the
+    /// first-match-wins tie-break depends on that ordering.
+    ///
+    /// Separate from [`Self::list`] because this runs against every emitter
+    /// on the node: fetching the full row (name, attributes, estimates,
+    /// timestamps) would move megabytes that matching never reads.
+    /// `match_enabled = false` rows are filtered in SQL rather than skipped
+    /// in Rust for the same reason.
+    pub async fn list_match_rules(pool: &PgPool) -> Result<Vec<EmitterMatchRule>, sqlx::Error> {
+        sqlx::query_as::<_, EmitterMatchRule>(
+            "SELECT id, match_criteria FROM emitter \
+             WHERE match_enabled = true ORDER BY created_at ASC",
+        )
+        .fetch_all(pool)
+        .await
     }
 
     pub async fn get(pool: &PgPool, id: Uuid) -> Result<Option<Emitter>, sqlx::Error> {

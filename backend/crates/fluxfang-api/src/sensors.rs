@@ -26,7 +26,11 @@ pub fn protected_routes() -> Router<AppState> {
         .route("/api/sensors/:id/rotate", post(rotate_sensor))
 }
 
-fn sensor_json(s: &fluxfang_db::models::Sensor, now: chrono::DateTime<chrono::Utc>, emissions_24h: i64) -> Value {
+fn sensor_json(
+    s: &fluxfang_db::models::Sensor,
+    now: chrono::DateTime<chrono::Utc>,
+    emissions_24h: i64,
+) -> Value {
     let online = s
         .last_seen_at
         .is_some_and(|t| (now - t).num_seconds() <= ONLINE_THRESHOLD_SECS);
@@ -46,7 +50,9 @@ fn sensor_json(s: &fluxfang_db::models::Sensor, now: chrono::DateTime<chrono::Ut
 }
 
 async fn list_sensors(State(state): State<AppState>) -> Result<Json<Value>, StatusCode> {
-    let sensors = SensorRepo::list(&state.pool).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let sensors = SensorRepo::list(&state.pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let now = chrono::Utc::now();
     let since = now - chrono::Duration::hours(24);
     let counts: std::collections::HashMap<String, i64> =
@@ -115,40 +121,86 @@ async fn approve_sensor(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Approving a sensor closes its listener's enrollment window (locked
-    // decision): the operator is done, so stop accepting new registrations.
-    state
-        .sensor_listeners
-        .close_enrollment_window(sensor.data_source_id)
-        .await;
+    // Approving a sensor closes its listener's enrollment window: the
+    // operator is done, so stop accepting new registrations.
+    //
+    // Unless others are still waiting. The window is per-listener, not
+    // per-sensor, so closing it unconditionally broke the common case of
+    // bringing several sensors up at once: approving the first one shut the
+    // window on every sibling that had not been dealt with yet, and each of
+    // those then got 403 "enrollment window is closed" on every retry until
+    // the operator noticed and re-opened it. Deferring the close to the last
+    // approval keeps the original intent (the window does not outlive the
+    // operator's attention) without making a multi-sensor rollout a sequence
+    // of manual window re-opens.
+    let others_pending = SensorRepo::list(&state.pool)
+        .await
+        .map(|all| {
+            all.iter().any(|other| {
+                other.data_source_id == sensor.data_source_id
+                    && other.id != sensor.id
+                    && other.status == "pending"
+            })
+        })
+        .unwrap_or(false);
+    if !others_pending {
+        state
+            .sensor_listeners
+            .close_enrollment_window(sensor.data_source_id)
+            .await;
+    }
 
     Ok(Json(sensor_json(&s, chrono::Utc::now(), 0)))
 }
 
-async fn set_status_endpoint(state: &AppState, id: Uuid, status: &str) -> Result<Json<Value>, StatusCode> {
-    if SensorRepo::get(&state.pool, id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?.is_none() {
+async fn set_status_endpoint(
+    state: &AppState,
+    id: Uuid,
+    status: &str,
+) -> Result<Json<Value>, StatusCode> {
+    if SensorRepo::get(&state.pool, id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .is_none()
+    {
         return Err(StatusCode::NOT_FOUND);
     }
-    let s = SensorRepo::set_status(&state.pool, id, status, false).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let s = SensorRepo::set_status(&state.pool, id, status, false)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(sensor_json(&s, chrono::Utc::now(), 0)))
 }
 
-async fn reject_sensor(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<Json<Value>, StatusCode> {
+async fn reject_sensor(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, StatusCode> {
     set_status_endpoint(&state, id, "rejected").await
 }
 
-async fn revoke_sensor(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<Json<Value>, StatusCode> {
+async fn revoke_sensor(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, StatusCode> {
     set_status_endpoint(&state, id, "revoked").await
 }
 
-async fn rotate_sensor(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<Json<Value>, StatusCode> {
-    let Some(existing) = SensorRepo::get(&state.pool, id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? else {
+async fn rotate_sensor(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, StatusCode> {
+    let Some(existing) = SensorRepo::get(&state.pool, id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    else {
         return Err(StatusCode::NOT_FOUND);
     };
     let key = fluxfang_sensor_proto::generate_key();
     let key_b64 = fluxfang_sensor_proto::encode_key(&key);
     let fp = fluxfang_sensor_proto::fingerprint(&existing.sensor_id, &key);
-    SensorRepo::set_key(&state.pool, id, &key_b64, &fp).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    SensorRepo::set_key(&state.pool, id, &key_b64, &fp)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     // Returns the new key exactly once — the operator re-provisions the sensor.
     Ok(Json(json!({ "key": key_b64, "fingerprint": fp })))
 }

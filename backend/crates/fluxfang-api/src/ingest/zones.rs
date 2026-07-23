@@ -418,6 +418,7 @@ mod tests {
             secret_key: test_key(),
             node_sensor_id: "local".to_string(),
             sensor_mode: false,
+            matcher: Default::default(),
         };
         (ctx, events_rx)
     }
@@ -684,6 +685,7 @@ mod tests {
             secret_key: test_key(),
             node_sensor_id: "local".to_string(),
             sensor_mode: false,
+            matcher: Default::default(),
         };
 
         let zone_id = seed_zone(&pool).await;

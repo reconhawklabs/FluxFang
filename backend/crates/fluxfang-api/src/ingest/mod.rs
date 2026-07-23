@@ -72,6 +72,7 @@
 
 pub mod alerts;
 pub mod location;
+pub mod matcher;
 pub mod pump;
 pub mod session;
 pub mod zones;
@@ -79,7 +80,7 @@ pub mod zones;
 use std::sync::Arc;
 
 use fluxfang_capture::RawObservation;
-use fluxfang_core::rule::{eval, Condition, MatchMode, Op, Rule};
+use fluxfang_core::rule::{Condition, MatchMode, Op, Rule};
 use fluxfang_core::{classify, emitter_type_label};
 use fluxfang_db::models::{Emission, NewEmission, NewEmitter, Notification};
 use fluxfang_db::{DataSourceRepo, EmissionRepo, EmitterRepo};
@@ -156,6 +157,11 @@ pub struct IngestCtx {
     /// True on a Sensor node — the capture reader caches observations for
     /// forwarding instead of running the local analysis pipeline.
     pub sensor_mode: bool,
+    /// The node's parsed emitter auto-attach rule set (see
+    /// [`matcher::EmitterMatchIndex`]). Shared, not per-`IngestCtx`: local
+    /// capture and `/sensor/ingest` match against the same emitters, so they
+    /// should share one snapshot rather than each maintaining a copy.
+    pub matcher: matcher::EmitterMatchIndex,
 }
 
 /// Turn one capture-layer [`RawObservation`] into a persisted, auto-attached,
@@ -411,29 +417,23 @@ pub(crate) async fn finalize_emission(
 ) -> anyhow::Result<()> {
     let group = !matches!(policy, GroupingPolicy::RemoteStray);
     if group {
-        // Auto-attach: first match wins, in EmitterRepo::list's created_at ASC
-        // order (see module docs). match_enabled == false emitters are skipped
-        // outright (Phase A4) -- not even parsed/evaluated.
-        let emitters = EmitterRepo::list(&ctx.pool).await?;
-        for emitter in emitters {
-            if !emitter.match_enabled {
-                continue;
-            }
-            let rule: Rule = match serde_json::from_value(emitter.match_criteria.clone()) {
-                Ok(rule) => rule,
-                // Malformed match_criteria: treat this emitter as non-matching
-                // rather than failing the whole ingest over one bad rule.
-                Err(_) => continue,
-            };
-            // `fluxfang_core::rule::eval` is pure, in-memory structural
-            // matching of a JSON payload against a `Rule`'s conditions -- it
-            // never parses or executes code (see that function's own doc
-            // comment's explicit NOTE). Not JS/Python `eval`.
-            if eval(&rule, &emission.payload) {
-                *emission = EmissionRepo::set_emitter(&ctx.pool, emission.id, emitter.id).await?;
-                EmitterRepo::touch_seen(&ctx.pool, emitter.id, emission.observed_at).await?;
-                break;
-            }
+        // Auto-attach: first match wins, in created_at ASC order (see module
+        // docs); match_enabled == false emitters are excluded (Phase A4).
+        //
+        // Both the fetch and the rule parse are served from
+        // `matcher::EmitterMatchIndex`, which reloads only when a DB trigger
+        // says the rule set changed. Doing them per emission made ingest
+        // scale with the emitter table and is what stalled sensor forwarding
+        // on busy nodes -- see that module's docs. The matching itself is
+        // unchanged: the same `fluxfang_core::rule::eval` over the same rules
+        // in the same order.
+        let matched = ctx
+            .matcher
+            .first_match(&ctx.pool, &emission.payload)
+            .await?;
+        if let Some(emitter_id) = matched.emitter_id {
+            *emission = EmissionRepo::set_emitter(&ctx.pool, emission.id, emitter_id).await?;
+            EmitterRepo::touch_seen(&ctx.pool, emitter_id, emission.observed_at).await?;
         }
 
         // Auto-create (Phase A4): only if auto-attach above left the emission
@@ -441,7 +441,7 @@ pub(crate) async fn finalize_emission(
         // never fails ingest itself.
         if emission.emitter_id.is_none() {
             let force = matches!(policy, GroupingPolicy::RemoteGrouped);
-            auto_create_emitter(ctx, data_source_id, emission, force).await;
+            auto_create_emitter(ctx, data_source_id, emission, force, matched.version).await;
         }
 
         // Wifi-association enrichment: if this is a client association frame
@@ -526,6 +526,7 @@ async fn auto_create_emitter(
     data_source_id: Uuid,
     emission: &mut Emission,
     force: bool,
+    match_version: i64,
 ) {
     let Ok(Some(data_source)) = DataSourceRepo::get(&ctx.pool, data_source_id).await else {
         return;
@@ -569,11 +570,28 @@ async fn auto_create_emitter(
         source: "manual".to_string(),
     };
 
-    let Ok((emitter, _created)) =
+    let Ok((emitter, created)) =
         EmitterRepo::get_or_create_by_identity(&ctx.pool, new_emitter).await
     else {
         return;
     };
+
+    // Teach the match index about an emitter we just created, so its version
+    // bump doesn't discard the whole parsed rule set. Only for a genuinely
+    // new row: `note_created` appends, which is only order-correct for the
+    // newest emitter. Best-effort like everything else here -- a failure just
+    // means the next lookup reloads.
+    if created {
+        let _ = ctx
+            .matcher
+            .note_created(
+                &ctx.pool,
+                match_version,
+                emitter.id,
+                &emitter.match_criteria,
+            )
+            .await;
+    }
 
     // A pre-existing, disabled emitter for this identity: leave the
     // emission unassigned (see step 5 above) rather than attaching or
@@ -869,6 +887,7 @@ mod tests {
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
             sensor_mode: false,
+            matcher: Default::default(),
         };
 
         let obs = wifi_obs("aa:bb:cc:dd:ee:ff", base);
@@ -920,6 +939,7 @@ mod tests {
             secret_key: [0x11u8; 32],
             node_sensor_id: "base".to_string(),
             sensor_mode: false,
+            matcher: Default::default(),
         };
 
         let obs = wifi_obs("aa:bb:cc:dd:ee:ff", base);
@@ -958,6 +978,7 @@ mod tests {
             secret_key: [0x11u8; 32],
             node_sensor_id: "frontgate".to_string(),
             sensor_mode: true,
+            matcher: Default::default(),
         };
 
         let obs = wifi_obs("aa:bb:cc:dd:ee:ff", base);
@@ -1005,6 +1026,7 @@ mod tests {
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
             sensor_mode: false,
+            matcher: Default::default(),
         };
 
         let obs = wifi_obs("aa:bb:cc:dd:ee:ff", base + ChronoDuration::seconds(30));
@@ -1035,6 +1057,7 @@ mod tests {
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
             sensor_mode: false,
+            matcher: Default::default(),
         };
 
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
@@ -1083,6 +1106,7 @@ mod tests {
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
             sensor_mode: false,
+            matcher: Default::default(),
         };
 
         let emission = ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", base))
@@ -1165,6 +1189,7 @@ mod tests {
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
             sensor_mode: false,
+            matcher: Default::default(),
         };
 
         let emission = ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", base))
@@ -1232,6 +1257,7 @@ mod tests {
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
             sensor_mode: false,
+            matcher: Default::default(),
         };
 
         let emission = ingest(&ctx, ds, wifi_obs("aa:bb:cc:dd:ee:ff", base))
@@ -1268,6 +1294,7 @@ mod tests {
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
             sensor_mode: false,
+            matcher: Default::default(),
         };
 
         let bssid = "aa:bb:cc:dd:ee:ff";
@@ -1335,6 +1362,7 @@ mod tests {
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
             sensor_mode: false,
+            matcher: Default::default(),
         };
 
         let bssid = "aa:bb:cc:dd:ee:ff";
@@ -1431,6 +1459,7 @@ mod tests {
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
             sensor_mode: false,
+            matcher: Default::default(),
         };
         (ctx, ds, base)
     }
@@ -1521,6 +1550,7 @@ mod tests {
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
             sensor_mode: false,
+            matcher: Default::default(),
         };
 
         // First octet 0x3a has bit 0x02 set -> locally-administered/randomized.
@@ -1566,6 +1596,7 @@ mod tests {
                 secret_key: [0x11u8; 32],
                 node_sensor_id: "local".to_string(),
                 sensor_mode: false,
+                matcher: Default::default(),
             };
 
             let emission = ingest(&ctx, ds, beacon_obs("11:22:33:44:55:66", "SomeNet", base))
@@ -1628,6 +1659,7 @@ mod tests {
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
             sensor_mode: false,
+            matcher: Default::default(),
         };
 
         let emission = ingest(&ctx, ds, beacon_obs(bssid, "HomeNet", base))
@@ -1671,6 +1703,7 @@ mod tests {
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
             sensor_mode: false,
+            matcher: Default::default(),
         };
 
         // No `frame_type` at all -- classify_wifi's match falls through to
@@ -1748,6 +1781,7 @@ mod tests {
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
             sensor_mode: false,
+            matcher: Default::default(),
         };
 
         let obs = association_obs("3a:de:ad:be:ef:00", "aa:bb:cc:dd:ee:ff", "HomeNet", base);
@@ -1786,6 +1820,7 @@ mod tests {
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
             sensor_mode: false,
+            matcher: Default::default(),
         };
 
         let obs = association_obs("3a:de:ad:be:ef:00", "aa:bb:cc:dd:ee:ff", "HomeNet", base);
@@ -1815,6 +1850,7 @@ mod tests {
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
             sensor_mode: false,
+            matcher: Default::default(),
         };
 
         let obs = association_obs("3a:de:ad:be:ef:00", "aa:bb:cc:dd:ee:ff", "HomeNet", base);
@@ -1845,6 +1881,7 @@ mod tests {
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
             sensor_mode: false,
+            matcher: Default::default(),
         };
 
         let obs = RawObservation {
@@ -1891,6 +1928,7 @@ mod tests {
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
             sensor_mode: false,
+            matcher: Default::default(),
         };
 
         let first = ingest(

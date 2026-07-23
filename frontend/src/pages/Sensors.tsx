@@ -132,12 +132,18 @@ export default function Sensors() {
           <ul className="divide-y divide-slate-800 rounded border border-slate-800">
             {registered.map((s) => (
               <li key={s.id} className="flex items-center justify-between px-3 py-2 text-sm">
-                <div className="flex items-center gap-3">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                   <span
                     data-testid={s.online ? `sensor-online-${s.sensor_id}` : `sensor-offline-${s.sensor_id}`}
                     className={`inline-block h-2 w-2 rounded-full ${s.online ? 'bg-emerald-400' : 'bg-slate-600'}`}
                   />
                   <span className="font-mono text-slate-200">{s.sensor_id}</span>
+                  {/* Refreshed on every batch and heartbeat, so this tracks a
+                      sensor across DHCP leases and reboots rather than showing
+                      the address it happened to have at approval time. */}
+                  <span data-testid={`sensor-ip-${s.sensor_id}`} className="font-mono text-xs text-slate-400">
+                    {s.source_ip ?? 'unknown IP'}
+                  </span>
                   <span className="font-mono text-xs text-amber-400/80">fp {s.fingerprint}</span>
                   <span className="text-xs text-slate-500">{s.emissions_24h} emissions/24h</span>
                 </div>

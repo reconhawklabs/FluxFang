@@ -82,6 +82,7 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::ingest::location::LocationProvider;
+use crate::ingest::matcher::EmitterMatchIndex;
 use crate::ingest::pump::{LocationPump, OnExhausted};
 use crate::ingest::session::{HostZoneHook, SessionManager};
 use crate::ingest::zones::update_host_zones;
@@ -635,6 +636,12 @@ pub struct CaptureSupervisor {
     failure_tx: mpsc::UnboundedSender<Uuid>,
     /// The receiver half, taken by the first `spawn_background` call.
     failure_rx: StdMutex<Option<mpsc::UnboundedReceiver<Uuid>>>,
+    /// The node's parsed emitter auto-attach rule set, threaded into every
+    /// `IngestCtx` this supervisor builds. Owned here (rather than per-ctx)
+    /// so all capture sources share one snapshot; `AppState` also hands it
+    /// to the sensor-listener ctx via [`Self::matcher`], so local capture and
+    /// `/sensor/ingest` share it too.
+    matcher: EmitterMatchIndex,
 }
 
 impl CaptureSupervisor {
@@ -659,7 +666,15 @@ impl CaptureSupervisor {
             running: Mutex::new(HashMap::new()),
             failure_tx,
             failure_rx: StdMutex::new(Some(failure_rx)),
+            matcher: EmitterMatchIndex::new(),
         }
+    }
+
+    /// This supervisor's shared emitter match index, so the sensor-listener
+    /// `IngestCtx` can match against the same snapshot instead of building a
+    /// second one. Cheap to clone (one `Arc`).
+    pub fn matcher(&self) -> EmitterMatchIndex {
+        self.matcher.clone()
     }
 
     /// An `IngestCtx` with `sessions: None` — used only to build the
@@ -675,6 +690,7 @@ impl CaptureSupervisor {
             secret_key: self.secret_key,
             node_sensor_id: self.node_sensor_id.clone(),
             sensor_mode: self.sensor_mode,
+            matcher: self.matcher.clone(),
         }
     }
 
@@ -704,6 +720,7 @@ impl CaptureSupervisor {
             secret_key: self.secret_key,
             node_sensor_id: self.node_sensor_id.clone(),
             sensor_mode: self.sensor_mode,
+            matcher: self.matcher.clone(),
         }
     }
 

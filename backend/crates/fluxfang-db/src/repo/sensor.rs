@@ -104,6 +104,35 @@ impl SensorRepo {
             .map(|_| ())
     }
 
+    /// Bump `last_seen_at` *and* refresh `source_ip` for an `approved`
+    /// sensor — the per-batch liveness stamp on `/sensor/ingest`.
+    ///
+    /// Separate from [`Self::touch_last_seen`] because `source_ip` was
+    /// otherwise only ever written during enrollment, so an approved sensor
+    /// that moved (new DHCP lease, reboot onto another link) kept displaying
+    /// the address it had on the day it was approved. The address is taken
+    /// from the peer of an AEAD-authenticated request, so it cannot be
+    /// spoofed into this column by an unapproved party.
+    ///
+    /// Same `status = 'approved'` guard as `touch_last_seen`, so a sensor
+    /// revoked mid-request doesn't get its liveness bumped back up by the
+    /// race.
+    pub async fn touch_seen_from(
+        pool: &PgPool,
+        id: Uuid,
+        source_ip: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE sensor SET last_seen_at = now(), source_ip = $2 \
+             WHERE id = $1 AND status = 'approved'",
+        )
+        .bind(id)
+        .bind(source_ip)
+        .execute(pool)
+        .await
+        .map(|_| ())
+    }
+
     /// Set status; when `stamp_approved` is true also set `approved_at = now()`.
     pub async fn set_status(
         pool: &PgPool,

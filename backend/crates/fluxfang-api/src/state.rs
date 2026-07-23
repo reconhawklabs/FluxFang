@@ -120,6 +120,11 @@ pub struct AppState {
     /// encrypt a freshly-submitted config or decrypt one for a test-send
     /// without reaching into `CaptureSupervisor`'s private internals.
     pub secret_key: [u8; 32],
+    /// Live forwarding status, written by the `SensorForwarder` loop on a
+    /// Sensor node and read by `GET /api/sensor/status`. Present (and inert)
+    /// on a Standalone, which never spawns a forwarder — that keeps
+    /// `AppState` role-independent rather than making the field optional.
+    pub forwarder_health: Arc<crate::forwarder::ForwarderHealth>,
 }
 
 impl AppState {
@@ -186,6 +191,10 @@ impl AppState {
             secret_key,
             node_sensor_id,
             sensor_mode: false,
+            // Same index the capture supervisor uses: both paths auto-attach
+            // against the node's one emitter rule set, so they should share
+            // one parsed snapshot and one rebuild.
+            matcher: capture.matcher(),
         };
         let sensor_listeners = Arc::new(SensorListenerManager::new(pool.clone(), sensor_ingest));
         Self {
@@ -194,6 +203,7 @@ impl AppState {
             capture,
             sensor_listeners,
             secret_key,
+            forwarder_health: Arc::new(crate::forwarder::ForwarderHealth::default()),
         }
     }
 }

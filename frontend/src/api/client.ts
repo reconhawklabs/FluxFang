@@ -146,9 +146,27 @@ export interface SensorStatus {
   cache: { total: number; undelivered: number };
   /** Emissions forwarded to the Standalone in the last hour. */
   delivered_last_hour: number;
-  /** Live reachability of the Standalone listener; null if not a sensor. */
+  /** Live reachability of the Standalone listener; null if not a sensor.
+   *  Reachability only — it says nothing about whether batches are landing,
+   *  which is what `forwarding` is for. */
   connected: boolean | null;
+  /** What the forwarding loop is actually achieving. */
+  forwarding: ForwarderStatus;
   sensor: { host: string; port: number } | null;
+}
+
+/** `GET /api/sensor/status` -> `forwarding`. Distinguishes "the Standalone
+ *  answers pings" from "our emissions are getting there", which the old
+ *  reachability-only signal could not: a sensor whose every batch was failing
+ *  still displayed as connected while the Standalone listed it as down. */
+export interface ForwarderStatus {
+  state: 'paused' | 'enrolling' | 'forwarding';
+  last_contact_at: string | null;
+  last_delivery_at: string | null;
+  delivered_since_start: number;
+  /** Why the last cycle failed. Cleared on success, so non-null means
+   *  forwarding is broken right now. */
+  last_error: string | null;
 }
 
 /** `GET /api/cached-emissions` row shape — an emission captured locally by a

@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{ConnectInfo, State};
 use axum::routing::{get, post};
@@ -94,9 +95,11 @@ fn is_valid_sensor_id(s: &str) -> bool {
 fn is_valid_fingerprint(s: &str) -> bool {
     let parts: Vec<&str> = s.split('-').collect();
     parts.len() == 8
-        && parts
-            .iter()
-            .all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit() && !c.is_lowercase()))
+        && parts.iter().all(|p| {
+            p.len() == 2
+                && p.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_lowercase())
+        })
 }
 
 /// The router each sensor listener serves.
@@ -113,6 +116,23 @@ fn listener_router(state: EnrollState) -> Router {
 
 /// Replay-window skew tolerance for `POST /sensor/ingest` batches.
 const MAX_SKEW_MS: i64 = 300_000;
+
+/// How long `/sensor/ingest` may spend storing one batch before it stops and
+/// ACKs what it managed.
+///
+/// This is the structural guard against the stall that motivated all of this,
+/// and it holds even if some future change makes ingest slow again. Without
+/// it, a batch that takes longer than the Sensor's HTTP timeout gets its
+/// connection dropped mid-loop; axum then cancels the handler, so nothing is
+/// ACKed even though rows were committed, and the Sensor re-sends the exact
+/// same rows on its next cycle. That is a livelock, not slowness: the queue
+/// never advances no matter how long you wait.
+///
+/// Returning early instead guarantees every batch makes ACKed forward
+/// progress, so the backlog is monotonically decreasing. Whatever is left
+/// over simply leads the next batch. Kept well under
+/// `forwarder::HTTP_TIMEOUT` so the response always wins the race.
+const INGEST_BUDGET: Duration = Duration::from_secs(20);
 
 /// A permanent ingest failure (a DB constraint/check violation) can never
 /// succeed on retry — ACK it so an at-least-once forwarder drops the poison
@@ -135,6 +155,7 @@ fn is_permanent_ingest_error(err: &anyhow::Error) -> bool {
 /// response instead of unwrapping.
 async fn ingest_handler(
     State(st): State<EnrollState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> axum::response::Response {
@@ -145,8 +166,7 @@ async fn ingest_handler(
     let Some(sensor_id) = headers.get("X-Sensor-Id").and_then(|v| v.to_str().ok()) else {
         return (StatusCode::BAD_REQUEST, "missing X-Sensor-Id").into_response();
     };
-    let sensor = match SensorRepo::get_by_sensor_id(&st.pool, st.data_source_id, sensor_id).await
-    {
+    let sensor = match SensorRepo::get_by_sensor_id(&st.pool, st.data_source_id, sensor_id).await {
         Ok(Some(s)) if s.status == "approved" => s,
         Ok(_) => return (StatusCode::FORBIDDEN, "unknown or unapproved sensor").into_response(),
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -170,9 +190,42 @@ async fn ingest_handler(
         return (StatusCode::BAD_REQUEST, "stale batch").into_response();
     }
 
-    // 4. Ingest each emission; dedup handled by insert_remote.
+    // 4. Record liveness BEFORE doing any of the work.
+    //
+    // The batch is authenticated at this point -- it opened under this
+    // sensor's key -- which is already proof the sensor is alive and talking
+    // to us, independent of whether storing it succeeds. Stamping it after
+    // the loop (as this used to) meant a batch that outran the sensor's HTTP
+    // timeout had the handler cancelled before it got here, so a sensor that
+    // was busily forwarding the whole time aged past the 60s online threshold
+    // and showed as offline on the Sensors page.
+    //
+    // `source_ip` is refreshed here too: it was only ever written at
+    // enrollment, so an approved sensor that changed address (DHCP lease,
+    // reboot, new link) showed its address from enrollment day forever.
+    let peer_ip = peer.ip().to_string();
+    let _ = SensorRepo::touch_seen_from(&st.pool, sensor.id, &peer_ip).await;
+
+    // 5. Ingest each emission; dedup handled by insert_remote.
+    let deadline = std::time::Instant::now() + INGEST_BUDGET;
+    let total = batch.emissions.len();
     let mut accepted = Vec::new();
     for em in batch.emissions {
+        // Stop only once something has been ACKed: a first emission slower
+        // than the whole budget would otherwise return an empty ACK forever,
+        // which is the livelock again. Making progress one row per batch is
+        // pathological but still progress, and the error is visible.
+        if !accepted.is_empty() && std::time::Instant::now() >= deadline {
+            eprintln!(
+                "sensor ingest: {} of {} emissions from {} stored within {:?}; ACKing those and \
+                 leaving the rest for the next batch",
+                accepted.len(),
+                total,
+                sensor.sensor_id,
+                INGEST_BUDGET,
+            );
+            break;
+        }
         let id = em.id;
         match crate::ingest::ingest_remote(
             &st.ingest,
@@ -188,8 +241,6 @@ async fn ingest_handler(
             Err(_) => { /* transient — omit from accepted so the sensor retries */ }
         }
     }
-    let _ = SensorRepo::touch_last_seen(&st.pool, sensor.id).await; // heartbeat
-
     (
         StatusCode::OK,
         axum::Json(serde_json::json!({ "accepted": accepted })),
@@ -236,7 +287,10 @@ async fn enroll(
     if let Some(s) = existing.as_ref() {
         if s.status == "approved" {
             if req.fingerprint == s.fingerprint {
-                let _ = SensorRepo::touch_last_seen(&st.pool, s.id).await;
+                // Same refresh as the ingest path: this is the heartbeat an
+                // idle (or backlogged, or erroring) sensor uses, so it is
+                // often the only place an address change is observed.
+                let _ = SensorRepo::touch_seen_from(&st.pool, s.id, &source_ip).await;
                 return (
                     StatusCode::OK,
                     Json(serde_json::json!({ "status": "approved", "fingerprint": fingerprint })),

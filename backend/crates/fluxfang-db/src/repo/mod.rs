@@ -43,7 +43,7 @@ pub use cached_emission::{CacheStats, CachedEmissionRepo};
 pub use cotravel::{CoTravelCandidate, CoTravelFilter, CoTravelRepo, IgnoredEmitter};
 pub use data_source::DataSourceRepo;
 pub use emission::EmissionRepo;
-pub use emitter::EmitterRepo;
+pub use emitter::{EmitterMatchRule, EmitterRepo};
 pub use emitter_association::{AssociatedEmitter, EmitterAssociationRepo};
 pub use entity::EntityRepo;
 pub use location::LocationRepo;
