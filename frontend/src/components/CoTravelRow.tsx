@@ -1,7 +1,14 @@
 // One ranked emitter row on the Co-Travel page. Owns its own expand state; the
 // Details button lazily mounts CoTravelDetails (map + sparkline). Ignore is
 // delegated to the page via onIgnore so the mutation lives in one place.
+//
+// The identity is a link to the emitter's detail page, the same target the
+// Emitters table links to. "Details" here stays what it was -- the in-place
+// co-travel evidence (map + RSSI sparkline for this window) -- so the two are
+// complementary: expand to judge the co-travel claim, follow the link for
+// everything else known about the device.
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import type { CoTravelItem } from '../api/coTravel';
 import CoTravelDetails from './CoTravelDetails';
 
@@ -28,7 +35,13 @@ export default function CoTravelRow({ item, from, to, onIgnore, ignoring }: CoTr
       <div className="flex items-center justify-between gap-4">
         <div className="min-w-0">
           <div className="truncate text-sm text-slate-100">
-            {item.emitter_type ?? 'emitter'} · <span>{item.identity_key ?? item.name}</span>
+            {item.emitter_type ?? 'emitter'} ·{' '}
+            <Link
+              to={`/emitters/${item.emitter_id}`}
+              className="text-slate-100 underline decoration-slate-600 decoration-dotted hover:text-amber-400"
+            >
+              {item.identity_key ?? item.name}
+            </Link>
           </div>
           <div className="text-xs text-slate-400">
             {miles(item.spread_m)} spread · {item.points} points · {minutes(item.span_s)} ·{' '}

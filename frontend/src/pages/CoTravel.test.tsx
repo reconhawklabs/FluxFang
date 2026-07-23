@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { MemoryRouter } from 'react-router-dom';
 import CoTravel from './CoTravel';
 import * as coTravelApi from '../api/coTravel';
 
@@ -31,9 +32,13 @@ vi.mock('maplibre-gl', () => ({
 
 function renderPage() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  // Rows link to /emitters/:id, so a router must be in scope -- in the app
+  // this page is itself a route, so this matches how it actually renders.
   return render(
     <QueryClientProvider client={qc}>
-      <CoTravel />
+      <MemoryRouter>
+        <CoTravel />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
