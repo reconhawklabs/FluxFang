@@ -273,6 +273,16 @@ const SENSOR_STATUS: SensorStatus = {
   cache: { total: 12, undelivered: 3 },
   delivered_last_hour: 7,
   connected: true,
+  // A healthy forwarding loop. These Dashboard tests only assert on the
+  // cache/role wiring, but the field is required — the forwarding tile is
+  // covered in SensorDashboard.test.tsx.
+  forwarding: {
+    state: "forwarding",
+    last_contact_at: "2026-07-20T00:00:00Z",
+    last_delivery_at: "2026-07-20T00:00:00Z",
+    delivered_since_start: 7,
+    last_error: null,
+  },
   sensor: { host: "base.local", port: 9000 },
 };
 
