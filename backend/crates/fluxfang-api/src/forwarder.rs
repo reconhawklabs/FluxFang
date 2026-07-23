@@ -21,10 +21,31 @@ use fluxfang_sensor_proto::{seal_batch, Key, SensorBatch, WireEmission};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-const FORWARD_BATCH_LIMIT: i64 = 200;
-const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+/// Emissions per forwarded batch. Larger batches amortize the HTTP round
+/// trip and the AEAD seal over more rows, which is what lets a backlog drain
+/// faster than it accumulates; the Standalone bounds its own per-batch work
+/// with `sensor_listener::INGEST_BUDGET`, so raising this cannot push a batch
+/// past the timeout below.
+const FORWARD_BATCH_LIMIT: i64 = 500;
+
+/// Client-side ceiling on one `/sensor/ingest` call.
+///
+/// This used to be 15s, which was the second half of the stall: a Standalone
+/// that needed longer than that for a batch had the connection dropped
+/// underneath it, so the handler was cancelled before it could ACK, and the
+/// Sensor retried the identical rows on the next cycle -- forever, while its
+/// cache kept growing. The Standalone now returns a partial ACK rather than
+/// exceed its own budget, so this only has to be comfortably above that
+/// budget; it is not a throughput knob.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Pause between cycles when there is nothing waiting to forward.
 const FORWARD_IDLE: Duration = Duration::from_secs(2);
+
+/// Base pause after a failed cycle. Jittered by [`backoff_with_jitter`]; see
+/// there for why the jitter matters with more than one sensor.
 const FORWARD_BACKOFF: Duration = Duration::from_secs(30);
+
 const PRUNE_INTERVAL: Duration = Duration::from_secs(300);
 /// How often an approved-but-idle sensor pings the Standalone so it keeps
 /// showing "online" even with nothing to forward. Comfortably under the
@@ -32,6 +53,101 @@ const PRUNE_INTERVAL: Duration = Duration::from_secs(300);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 /// Fallback cache TTL when the sensor config is absent (7 days).
 const DEFAULT_CACHE_TTL_SECS: i64 = 604_800;
+
+/// What the forwarder is currently doing, for the Sensor node's own status
+/// page.
+///
+/// The Sensor used to report only whether the Standalone's listener answered
+/// a `/sensor/health` GET. That is a property of the network, not of
+/// forwarding, so a sensor whose batches were all failing still showed
+/// "connected" while the Standalone showed it offline -- the exact
+/// contradiction that made this class of failure so hard to read. This
+/// reports what the forwarding loop actually achieved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForwardState {
+    /// No usable sensor config (no key/host/port yet, or an invalid key).
+    Paused,
+    /// Registered but not yet approved by the Standalone's operator.
+    Enrolling,
+    /// Approved; batches are being sent.
+    Forwarding,
+}
+
+/// A point-in-time view of [`ForwarderHealth`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ForwarderSnapshot {
+    pub state: ForwardState,
+    /// Last time the Standalone answered anything at all (enroll or ingest).
+    pub last_contact_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Last time a batch was actually accepted.
+    pub last_delivery_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Emissions ACKed since this process started.
+    pub delivered_since_start: u64,
+    /// Why the last cycle failed, if it did. Cleared by a success, so a
+    /// non-null value here means forwarding is broken *right now*.
+    pub last_error: Option<String>,
+}
+
+/// Shared, live forwarding status. Written by the forwarding loop, read by
+/// `GET /api/sensor/status`.
+///
+/// A `std::sync::Mutex` rather than a tokio one: every critical section is a
+/// field assignment with no `.await` inside, so an async lock would buy
+/// nothing.
+#[derive(Debug)]
+pub struct ForwarderHealth {
+    inner: std::sync::Mutex<ForwarderSnapshot>,
+}
+
+impl Default for ForwarderHealth {
+    fn default() -> Self {
+        Self {
+            inner: std::sync::Mutex::new(ForwarderSnapshot {
+                state: ForwardState::Paused,
+                last_contact_at: None,
+                last_delivery_at: None,
+                delivered_since_start: 0,
+                last_error: None,
+            }),
+        }
+    }
+}
+
+impl ForwarderHealth {
+    pub fn snapshot(&self) -> ForwarderSnapshot {
+        self.lock().clone()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ForwarderSnapshot> {
+        // A panic while holding this lock would only have left a status
+        // field half-written; recovering the data is strictly better than
+        // taking down forwarding over a display value.
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn set_state(&self, state: ForwardState) {
+        self.lock().state = state;
+    }
+
+    /// The Standalone answered. Clears `last_error` -- it describes the last
+    /// *failed* cycle, so leaving it set after a success would keep showing a
+    /// problem that has resolved.
+    fn record_contact(&self, delivered: usize) {
+        let now = chrono::Utc::now();
+        let mut guard = self.lock();
+        guard.last_contact_at = Some(now);
+        guard.last_error = None;
+        if delivered > 0 {
+            guard.last_delivery_at = Some(now);
+            guard.delivered_since_start += delivered as u64;
+        }
+    }
+
+    fn record_error(&self, err: String) {
+        self.lock().last_error = Some(err);
+    }
+}
 
 #[derive(Debug)]
 pub enum ForwardOutcome {
@@ -90,15 +206,20 @@ pub async fn load_target(pool: &PgPool) -> Option<ForwarderTarget> {
 pub struct SensorForwarder {
     pool: PgPool,
     client: reqwest::Client,
+    health: std::sync::Arc<ForwarderHealth>,
 }
 
 impl SensorForwarder {
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(pool: PgPool, health: std::sync::Arc<ForwarderHealth>) -> Self {
         let client = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        Self { pool, client }
+        Self {
+            pool,
+            client,
+            health,
+        }
     }
 
     /// One forward cycle against `target`. On 403 (not approved) it reports
@@ -180,15 +301,40 @@ impl SensorForwarder {
             .json(&serde_json::json!({ "sensor_id": target.sensor_id, "fingerprint": fingerprint }))
             .send()
             .await;
+        // Every non-approved outcome is still `Pending` (keep retrying), but
+        // record *which* one. Enrollment previously failed completely
+        // silently, so an operator debugging a sensor that never came online
+        // had no way to tell "waiting for you to click Approve" from "the
+        // window is shut" from "another node already claimed this
+        // sensor_id" from "the host is unreachable".
         match resp {
             Ok(r) if r.status().is_success() => match r.json::<EnrollResponse>().await {
-                Ok(body) if body.status == "approved" => EnrollResult::Approved,
-                _ => EnrollResult::Pending,
+                Ok(body) if body.status == "approved" => return EnrollResult::Approved,
+                Ok(body) => self.health.record_error(format!(
+                    "awaiting operator approval (status: {})",
+                    body.status
+                )),
+                Err(e) => self
+                    .health
+                    .record_error(format!("bad enroll response: {e}")),
             },
-            // Non-2xx (window closed / conflict / etc.) or a transport error:
-            // we're not approved yet — keep retrying.
-            _ => EnrollResult::Pending,
+            Ok(r) if r.status() == reqwest::StatusCode::FORBIDDEN => self.health.record_error(
+                "the Standalone's enrollment window is closed — open it on its Sensors page"
+                    .to_string(),
+            ),
+            Ok(r) if r.status() == reqwest::StatusCode::CONFLICT => {
+                self.health.record_error(format!(
+                    "sensor id \"{}\" is already approved on the Standalone under a different \
+                     key — rotate the key there or pick a different sensor id",
+                    target.sensor_id
+                ))
+            }
+            Ok(r) => self
+                .health
+                .record_error(format!("enroll status {}", r.status())),
+            Err(e) => self.health.record_error(format!("enroll: {e}")),
         }
+        EnrollResult::Pending
     }
 }
 
@@ -220,6 +366,8 @@ pub fn spawn_forwarder(forwarder: SensorForwarder) {
         // Last time we successfully reached the Standalone (enroll or forward);
         // drives the idle heartbeat so we stay "online" with nothing to send.
         let mut last_contact = std::time::Instant::now();
+        // Consecutive failed cycles, for the backoff jitter.
+        let mut failures: u32 = 0;
         loop {
             let Some(target) = load_target(&forwarder.pool).await else {
                 // No valid sensor config yet — pause (don't die). Log once per
@@ -232,6 +380,7 @@ pub fn spawn_forwarder(forwarder: SensorForwarder) {
                 }
                 approved = false;
                 last_ident = None;
+                forwarder.health.set_state(ForwardState::Paused);
                 tokio::time::sleep(FORWARD_BACKOFF).await;
                 continue;
             };
@@ -246,49 +395,113 @@ pub fn spawn_forwarder(forwarder: SensorForwarder) {
             }
 
             let delay = if !approved {
+                forwarder.health.set_state(ForwardState::Enrolling);
                 match forwarder.enroll(&target).await {
                     EnrollResult::Approved => {
                         approved = true;
+                        failures = 0;
                         last_contact = std::time::Instant::now();
+                        forwarder.health.set_state(ForwardState::Forwarding);
+                        forwarder.health.record_contact(0);
                         FORWARD_IDLE
                     }
-                    EnrollResult::Pending => FORWARD_BACKOFF,
+                    EnrollResult::Pending => {
+                        failures = failures.saturating_add(1);
+                        backoff_with_jitter(failures)
+                    }
                 }
             } else {
+                forwarder.health.set_state(ForwardState::Forwarding);
                 match forwarder.forward_once(&target).await {
-                    ForwardOutcome::Delivered(_) => {
+                    ForwardOutcome::Delivered(n) => {
+                        failures = 0;
                         last_contact = std::time::Instant::now();
-                        FORWARD_IDLE
+                        forwarder.health.record_contact(n);
+                        // A full batch means more is queued behind it. Sleeping
+                        // the idle interval here caps the drain rate at
+                        // FORWARD_BATCH_LIMIT per FORWARD_IDLE regardless of how
+                        // fast the link and the Standalone actually are, so a
+                        // backlog built in a noisy environment could never be
+                        // worked off. Go straight back for the next batch and
+                        // let the round trip set the pace.
+                        if n as i64 >= FORWARD_BATCH_LIMIT {
+                            Duration::ZERO
+                        } else {
+                            FORWARD_IDLE
+                        }
                     }
                     ForwardOutcome::Nothing => {
-                        // Nothing to forward. Heartbeat if it's been a while so
-                        // the Standalone keeps us "online"; an approved re-enroll
-                        // just bumps last_seen (it bypasses the window).
-                        //
-                        // Best-effort: a failed heartbeat (a transient blip, or
-                        // a Standalone not yet running the approved-bypass code)
-                        // must NOT drop approval or stop forwarding. Only an
-                        // ingest 403 below authoritatively means we lost it.
-                        if last_contact.elapsed() >= HEARTBEAT_INTERVAL {
-                            if let EnrollResult::Approved = forwarder.enroll(&target).await {
-                                last_contact = std::time::Instant::now();
-                            }
-                        }
+                        failures = 0;
                         FORWARD_IDLE
                     }
                     ForwardOutcome::NotApproved => {
                         approved = false;
-                        FORWARD_BACKOFF
+                        failures = failures.saturating_add(1);
+                        forwarder.health.record_error(
+                            "the Standalone revoked or does not recognise this \
+                                           sensor — re-approve it there"
+                                .to_string(),
+                        );
+                        backoff_with_jitter(failures)
                     }
                     ForwardOutcome::Error(e) => {
                         eprintln!("SensorForwarder: {e}");
-                        FORWARD_BACKOFF
+                        forwarder.health.record_error(e);
+                        failures = failures.saturating_add(1);
+                        backoff_with_jitter(failures)
                     }
                 }
             };
+
+            // Heartbeat, evaluated every cycle rather than only when there was
+            // nothing to send.
+            //
+            // It used to live inside the `Nothing` arm, which meant precisely
+            // the sensors that most needed to report in never did: one with a
+            // backlog never returns `Nothing`, and one whose batches are
+            // failing never gets there either. Both went quiet, the Standalone
+            // aged them out at its 60s threshold, and it displayed "offline"
+            // for a sensor that was running and trying the whole time.
+            //
+            // An approved re-enroll only bumps `last_seen_at` (it bypasses the
+            // enrollment window), and it is best-effort: a failed heartbeat
+            // must not drop approval or interrupt forwarding. Only an ingest
+            // 403 authoritatively means approval is gone.
+            if approved && last_contact.elapsed() >= HEARTBEAT_INTERVAL {
+                if let EnrollResult::Approved = forwarder.enroll(&target).await {
+                    last_contact = std::time::Instant::now();
+                }
+            }
+
             tokio::time::sleep(delay).await;
         }
     });
+}
+
+/// [`FORWARD_BACKOFF`] with up to +50% of random jitter, and no growth beyond
+/// the base interval.
+///
+/// The jitter is what matters here, not the (deliberately absent) escalation.
+/// Several sensors reporting to one Standalone tend to fail together — the
+/// Standalone restarts, or the operator closes an enrollment window — and a
+/// fixed 30s retry then locks them into the same phase, so every future retry
+/// arrives as a simultaneous burst. Spreading them stops the fleet from
+/// synchronising.
+///
+/// The interval stays flat because these are operator-resolved conditions
+/// ("click Approve", "the host is back"): a sensor that backs off to minutes
+/// would take minutes to notice the fix. `failures` is taken so the seed
+/// varies per attempt.
+fn backoff_with_jitter(failures: u32) -> Duration {
+    // A cheap deterministic-per-process spread: the low bits of the current
+    // nanosecond clock mixed with the attempt count. Nothing here needs
+    // cryptographic randomness, and this avoids pulling in an RNG dependency.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let spread = (nanos ^ failures.wrapping_mul(2_654_435_761)) % 50;
+    FORWARD_BACKOFF + (FORWARD_BACKOFF * spread) / 100
 }
 
 /// Background loop: every 5 min, delete cached rows older than the TTL. The TTL

@@ -174,6 +174,29 @@ test('registered sensor shows online + real 24h emission count + rotate reveals 
   expect(screen.getByText(/shown once/i)).toBeInTheDocument();
 });
 
+test('a registered sensor shows the address it is reporting from', async () => {
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+    const url = typeof input === 'string' ? input : input.toString();
+    if (url.includes('/api/sensors')) return Promise.resolve(jsonResponse([APPROVED]));
+    if (url.includes('/api/data-sources')) return Promise.resolve(jsonResponse([]));
+    return Promise.reject(new Error(url));
+  }));
+  render(<Sensors />, { wrapper });
+  expect(await screen.findByTestId('sensor-ip-backlot')).toHaveTextContent('9.9.9.9');
+});
+
+test('a registered sensor with no address on file says so rather than rendering blank', async () => {
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+    const url = typeof input === 'string' ? input : input.toString();
+    if (url.includes('/api/sensors'))
+      return Promise.resolve(jsonResponse([{ ...APPROVED, source_ip: null }]));
+    if (url.includes('/api/data-sources')) return Promise.resolve(jsonResponse([]));
+    return Promise.reject(new Error(url));
+  }));
+  render(<Sensors />, { wrapper });
+  expect(await screen.findByTestId('sensor-ip-backlot')).toHaveTextContent('unknown IP');
+});
+
 test('Allow new Sensors is disabled when no running sensor datasource exists', async () => {
   vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
     const url = typeof input === 'string' ? input : input.toString();

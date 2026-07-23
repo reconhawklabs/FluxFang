@@ -42,7 +42,9 @@ async fn forward_once_delivers_cached_emissions_to_an_approved_listener() {
     let s = SensorRepo::insert_pending(&pool, ds.id, "frontgate", &fp, None)
         .await
         .unwrap();
-    SensorRepo::set_key(&pool, s.id, &key_b64, &fp).await.unwrap();
+    SensorRepo::set_key(&pool, s.id, &key_b64, &fp)
+        .await
+        .unwrap();
     SensorRepo::set_status(&pool, s.id, "approved", true)
         .await
         .unwrap();
@@ -68,7 +70,7 @@ async fn forward_once_delivers_cached_emissions_to_an_approved_listener() {
     }
 
     // Forward.
-    let fwd = SensorForwarder::new(pool.clone());
+    let fwd = SensorForwarder::new(pool.clone(), Default::default());
     let outcome = fwd.forward_once(&target("frontgate", &key, port)).await;
     assert!(
         matches!(outcome, ForwardOutcome::Delivered(2)),
@@ -128,7 +130,7 @@ async fn forward_once_returns_not_approved_for_a_pending_sensor() {
     .await
     .unwrap();
 
-    let fwd = SensorForwarder::new(pool.clone());
+    let fwd = SensorForwarder::new(pool.clone(), Default::default());
     let outcome = fwd.forward_once(&target("frontgate", &key, port)).await;
     assert!(
         matches!(outcome, ForwardOutcome::NotApproved),
@@ -173,12 +175,16 @@ async fn enroll_registers_pending_then_reports_approved_after_operator_approves(
     let key = fluxfang_sensor_proto::generate_key();
     let key_b64 = fluxfang_sensor_proto::encode_key(&key);
     let fp = fluxfang_sensor_proto::fingerprint("frontgate", &key);
-    let fwd = SensorForwarder::new(pool.clone());
+    let fwd = SensorForwarder::new(pool.clone(), Default::default());
     let tgt = target("frontgate", &key, port);
 
     // Proactive enrollment: the sensor transmits only {sensor_id, fingerprint}.
     let result = fwd.enroll(&tgt).await;
-    assert_eq!(result, EnrollResult::Pending, "first enroll is still pending");
+    assert_eq!(
+        result,
+        EnrollResult::Pending,
+        "first enroll is still pending"
+    );
 
     // A pending row now exists on the Standalone, with NO key (key arrives only
     // at approval) and the fingerprint the sensor claimed.
@@ -188,10 +194,15 @@ async fn enroll_registers_pending_then_reports_approved_after_operator_approves(
         .unwrap();
     assert_eq!(s.status, "pending");
     assert_eq!(s.key, "", "the key must never be transmitted at enrollment");
-    assert_eq!(s.fingerprint, fp, "stored fingerprint must match the sensor's");
+    assert_eq!(
+        s.fingerprint, fp,
+        "stored fingerprint must match the sensor's"
+    );
 
     // Operator approves server-side (types the key in → set_key, then approves).
-    SensorRepo::set_key(&pool, s.id, &key_b64, &fp).await.unwrap();
+    SensorRepo::set_key(&pool, s.id, &key_b64, &fp)
+        .await
+        .unwrap();
     SensorRepo::set_status(&pool, s.id, "approved", true)
         .await
         .unwrap();

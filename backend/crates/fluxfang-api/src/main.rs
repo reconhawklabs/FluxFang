@@ -83,6 +83,7 @@ async fn main() {
         fluxfang_api::forwarder::spawn_pruner(pool.clone());
         fluxfang_api::forwarder::spawn_forwarder(fluxfang_api::forwarder::SensorForwarder::new(
             pool.clone(),
+            state.forwarder_health.clone(),
         ));
     } else {
         // Standalone node: emitters only exist here (a Sensor caches raw
