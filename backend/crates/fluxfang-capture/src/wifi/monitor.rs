@@ -11,7 +11,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use tokio::sync::mpsc;
@@ -228,17 +228,40 @@ impl Capturer for WifiMonitorCapturer {
     }
 
     fn stop(&mut self) {
+        // Per-step timings: teardown latency is dominated by hardware and
+        // varies wildly by driver (a stop that outruns the HTTP request is
+        // the reported failure mode), and there's no way to tell which of
+        // these three steps is responsible from the outside. Logged
+        // unconditionally -- stop is a rare, operator-initiated action, so
+        // three lines per stop costs nothing and is the only evidence
+        // available when it misbehaves on hardware we can't reproduce on.
+        let started = Instant::now();
         self.running.store(false, Ordering::SeqCst);
         if let Some(handle) = self.handle.take() {
             // Block until the capture thread actually exits so the device
             // is released before we try to flip it back to managed mode.
             let _ = handle.join();
         }
+        let capture_joined = started.elapsed();
+
         if let Some(hop) = self.hop_handle.take() {
             // Stop retuning the radio before we restore managed mode.
             let _ = hop.join();
         }
-        if let Err(err) = self.restore_managed_mode() {
+        let hopper_joined = started.elapsed();
+
+        let restore_result = self.restore_managed_mode();
+        let total = started.elapsed();
+        eprintln!(
+            "wifi monitor {}: stop took {:.1?} (capture join {:.1?}, hopper join {:.1?}, \
+             restore managed {:.1?})",
+            self.interface,
+            total,
+            capture_joined,
+            hopper_joined - capture_joined,
+            total - hopper_joined,
+        );
+        if let Err(err) = restore_result {
             eprintln!(
                 "wifi monitor: failed to restore managed mode on {}: {err:#}",
                 self.interface

@@ -249,6 +249,10 @@ pub struct MockCapturerFactory {
     /// [`MockGps::looping`] instead of stopping once its fix list drains —
     /// see [`Self::looping_gps`].
     loop_gps: std::sync::atomic::AtomicBool,
+    /// Milliseconds every wifi `build()` call's `MockCapturer` blocks in
+    /// `stop()`, standing in for a slow hardware teardown — see
+    /// [`Self::slow_wifi_stop`].
+    wifi_stop_delay_ms: std::sync::atomic::AtomicU64,
 }
 
 impl MockCapturerFactory {
@@ -260,7 +264,17 @@ impl MockCapturerFactory {
             gps_fixes: std::sync::Mutex::new(Vec::new()),
             fail_wifi_start: std::sync::atomic::AtomicBool::new(false),
             loop_gps: std::sync::atomic::AtomicBool::new(false),
+            wifi_stop_delay_ms: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Make every wifi `build()` call's `MockCapturer` block `millis` in
+    /// `stop()`, so tests can exercise a slow hardware teardown without real
+    /// hardware. Runtime (`&self`) for the same reason
+    /// [`Self::set_wifi_observations`] is.
+    pub fn slow_wifi_stop(&self, millis: u64) {
+        self.wifi_stop_delay_ms
+            .store(millis, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Every wifi `build()` call replays `observations` once, a few
@@ -345,6 +359,12 @@ impl CapturerFactory for MockCapturerFactory {
                     .load(std::sync::atomic::Ordering::SeqCst)
                 {
                     capturer = capturer.failing();
+                }
+                let stop_delay = self
+                    .wifi_stop_delay_ms
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                if stop_delay > 0 {
+                    capturer = capturer.with_stop_delay(Duration::from_millis(stop_delay));
                 }
                 Ok(BuiltCapture::Wifi(Box::new(capturer)))
             }
@@ -1018,7 +1038,28 @@ impl CaptureSupervisor {
     /// capturer/pump, marks it `'stopped'`, clears the provider (for a
     /// location source), and — if this was the last running source — closes
     /// the shared session.
-    pub async fn stop(&self, data_source_id: Uuid) -> anyhow::Result<()> {
+    /// Stop a data source, tearing down its capturer and recording the new
+    /// status.
+    ///
+    /// The teardown runs in a **detached task** rather than inline, because
+    /// tearing down real wifi hardware can take longer than the HTTP request
+    /// that asked for it: `WifiMonitorCapturer::stop` joins its capture and
+    /// channel-hopper threads and then shells out to `ip`/`iw` to restore
+    /// managed mode. If that outruns nginx's `proxy_read_timeout` on `/api`,
+    /// nginx disconnects and axum drops this future -- and dropping it
+    /// part-way through would leave the handle already removed from
+    /// `running` but `status` never updated, i.e. a row stuck at `running`
+    /// with nothing behind it. `tokio::spawn` decouples the work from the
+    /// caller's lifetime so the status write always happens; awaiting the
+    /// handle keeps the caller's own semantics unchanged.
+    pub async fn stop(self: &Arc<Self>, data_source_id: Uuid) -> anyhow::Result<()> {
+        let this = self.clone();
+        tokio::spawn(async move { this.stop_inner(data_source_id).await })
+            .await
+            .map_err(|err| anyhow!("capturer stop task panicked: {err}"))?
+    }
+
+    async fn stop_inner(&self, data_source_id: Uuid) -> anyhow::Result<()> {
         let mut running = self.running.lock().await;
         let Some(handle) = running.remove(&data_source_id) else {
             // No in-memory handle. Usually the source is already stopped and
