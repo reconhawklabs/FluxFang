@@ -44,6 +44,11 @@ pub struct MockCapturer {
     running: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
     fail_start: bool,
+    /// How long `stop()` blocks before tearing down, standing in for real
+    /// hardware teardown (`WifiMonitorCapturer::stop` joins its capture and
+    /// channel-hopper threads, then shells out to `ip`/`iw` to restore
+    /// managed mode). Zero by default. See [`Self::with_stop_delay`].
+    stop_delay: Duration,
 }
 
 impl MockCapturer {
@@ -57,7 +62,16 @@ impl MockCapturer {
             running: Arc::new(AtomicBool::new(false)),
             handle: None,
             fail_start: false,
+            stop_delay: Duration::ZERO,
         }
+    }
+
+    /// Make `stop()` block for `delay` before tearing down, so tests can
+    /// exercise what happens while a slow hardware teardown is in flight --
+    /// e.g. a caller whose future is dropped part-way through.
+    pub fn with_stop_delay(mut self, delay: Duration) -> Self {
+        self.stop_delay = delay;
+        self
     }
 
     /// Set whether the observation list replays forever (`true`) or once
@@ -116,6 +130,13 @@ impl Capturer for MockCapturer {
     }
 
     fn stop(&mut self) {
+        // Blocking sleep, not `tokio::time::sleep`: `Capturer::stop` is a
+        // synchronous trait method that real hardware implements with thread
+        // joins and `Command::output()`, and callers are expected to run it
+        // on the blocking pool.
+        if !self.stop_delay.is_zero() {
+            std::thread::sleep(self.stop_delay);
+        }
         self.running.store(false, Ordering::SeqCst);
         if let Some(handle) = self.handle.take() {
             handle.abort();

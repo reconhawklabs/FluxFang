@@ -1001,6 +1001,57 @@ async fn resume_running_resumes_gps_and_wifi_regardless_of_list_order() {
     );
 }
 
+/// A Stop whose caller goes away mid-teardown must still finish and record
+/// the result.
+///
+/// The field symptom: stopping a wifi monitor source takes longer than
+/// nginx's 60s `proxy_read_timeout` on `/api`, nginx returns 504, axum drops
+/// the handler future -- and because `stop` removes the in-memory handle
+/// *before* the slow teardown but writes `status = 'stopped'` *after* it, the
+/// row is left stuck at `running` with no handle behind it. The next Stop
+/// then returns instantly via the phantom-running branch, which looks like
+/// "it stopped this time" while really just papering over the lost write.
+#[tokio::test]
+async fn stop_completes_even_when_its_caller_is_cancelled_mid_teardown() {
+    let pool = fresh_pool_shared().await;
+    let factory = Arc::new(MockCapturerFactory::new());
+    // Stand in for real hardware teardown (thread joins + `ip`/`iw`).
+    factory.slow_wifi_stop(1_500);
+    let state = state_with_factory(pool.clone(), factory);
+
+    let created = DataSourceRepo::insert(&pool, NewDataSource::wifi_monitor("wlan0"))
+        .await
+        .unwrap();
+    state.capture.start(created.id).await.expect("start");
+
+    // Drop the stop future while the teardown is still in flight -- exactly
+    // what axum does to the handler when nginx times out and disconnects.
+    let cancelled =
+        tokio::time::timeout(Duration::from_millis(200), state.capture.stop(created.id)).await;
+    assert!(
+        cancelled.is_err(),
+        "test is only meaningful if the teardown is still running when we drop the future"
+    );
+
+    // The teardown must still run to completion and record the new status.
+    let mut status = String::new();
+    for _ in 0..60 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        status = DataSourceRepo::get(&pool, created.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status;
+        if status == "stopped" {
+            break;
+        }
+    }
+    assert_eq!(
+        status, "stopped",
+        "a cancelled Stop must not leave the row stuck at 'running' with no handle behind it"
+    );
+}
+
 /// A Stop after a restart must take effect even though this fresh supervisor
 /// has no in-memory handle for the source: the DB's phantom `running` row is
 /// reconciled to `stopped`. This is the exact stuck-"running" symptom from the
