@@ -182,11 +182,32 @@ async fn ingest_handler(
     };
     // Body sensor_id must match the header/looked-up sensor.
     if batch.sensor_id != sensor.sensor_id {
+        eprintln!(
+            "sensor ingest from {peer}: REJECTED — batch claims sensor id {:?} but authenticated \
+             as {:?}",
+            batch.sensor_id, sensor.sensor_id
+        );
         return (StatusCode::BAD_REQUEST, "sensor_id mismatch").into_response();
     }
     // 3. Replay window.
     let now_ms = chrono::Utc::now().timestamp_millis();
     if !fluxfang_sensor_proto::within_replay_window(batch.sent_at_ms, now_ms, MAX_SKEW_MS) {
+        // Log the measured skew, not just the fact of rejection. A sensor
+        // whose clock is wrong authenticates and enrolls perfectly (neither
+        // carries a timestamp) and so shows as *online* here while delivering
+        // nothing -- an operator has no reason to suspect the clock unless
+        // told. The number also distinguishes a genuine replay attempt from
+        // an unsynced node: a just-booted Pi is typically hours or years off,
+        // a replay is seconds.
+        let skew_s = (now_ms - batch.sent_at_ms) / 1000;
+        eprintln!(
+            "sensor ingest from {peer} ({}): REJECTED — batch is outside the {}-minute replay \
+             window; its clock is {}s {} ours. Sync NTP on the sensor.",
+            sensor.sensor_id,
+            MAX_SKEW_MS / 60_000,
+            skew_s.abs(),
+            if skew_s > 0 { "behind" } else { "ahead of" },
+        );
         return (StatusCode::BAD_REQUEST, "stale batch").into_response();
     }
 

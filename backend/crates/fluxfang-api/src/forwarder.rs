@@ -285,7 +285,13 @@ impl SensorForwarder {
             return ForwardOutcome::NotApproved;
         }
         if !resp.status().is_success() {
-            return ForwardOutcome::Error(format!("ingest status {}", resp.status()));
+            // Carry the Standalone's own explanation through to the operator.
+            // It returns three different 400s -- `stale batch`, `sensor_id
+            // mismatch`, `missing X-Sensor-Id` -- and reporting only the
+            // status code collapsed them into one useless message.
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return ForwardOutcome::Error(describe_ingest_rejection(status, &body));
         }
         let accepted: AcceptResponse = match resp.json().await {
             Ok(a) => a,
@@ -348,6 +354,39 @@ impl SensorForwarder {
         EnrollResult::Pending
     }
 }
+
+/// Turn a rejected `/sensor/ingest` response into something an operator can
+/// act on.
+///
+/// `stale batch` gets special treatment because the phrase does not name its
+/// own cause: it means the two nodes' clocks disagree by more than the
+/// replay window, which is the ordinary state of a just-rebooted node with no
+/// RTC. The sensor enrolls fine and shows *online* -- enrollment carries no
+/// timestamp -- while every batch is refused, so without naming the clock the
+/// operator has no reason to suspect it.
+fn describe_ingest_rejection(status: reqwest::StatusCode, body: &str) -> String {
+    let body = body.trim();
+    if body.contains("stale batch") {
+        return format!(
+            "the Standalone rejected the batch as stale ({status}): this node's clock and the \
+             Standalone's differ by more than {} minutes. Check NTP/timezone on both — \
+             enrollment has no timestamp, which is why this node still shows as online while \
+             nothing is delivered.",
+            MAX_SKEW_MS / 60_000,
+        );
+    }
+    if body.is_empty() {
+        format!("ingest status {status}")
+    } else {
+        format!("ingest status {status}: {body}")
+    }
+}
+
+/// Mirrors the Standalone's `sensor_listener::MAX_SKEW_MS`, for the operator-
+/// facing message above. Kept as a plain constant rather than shared: this
+/// side only ever *describes* the window, and a Sensor may be talking to a
+/// Standalone on a different build.
+const MAX_SKEW_MS: i64 = 300_000;
 
 #[derive(serde::Deserialize)]
 struct EnrollResponse {
