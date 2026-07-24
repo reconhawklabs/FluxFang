@@ -105,31 +105,38 @@ export type MacPersistence = (typeof MAC_PERSISTENCE_CLASSES)[number];
 /** Human-readable blurb per class, for the retention dropdown and the badge
  * tooltip. Mirrors the doc comments on the Rust enum. */
 export const MAC_PERSISTENCE_LABELS: Record<MacPersistence, string> = {
-  stable: "Stable — real vendor MAC, never randomized",
-  per_network: "Per-network — randomized, persists per network for months",
-  session: "Session — randomized, persists until the device reboots",
-  ephemeral: "Ephemeral — randomized, rotates every few minutes",
-  unlinkable: "Unlinkable — randomized, cannot be correlated at all",
+  stable: "Stable: real vendor MAC, never randomized",
+  per_network: "Per-network: randomized, persists per network for months",
+  session: "Session: randomized, persists until the device reboots",
+  ephemeral: "Ephemeral: randomized, rotates every few minutes",
+  unlinkable: "Unlinkable: randomized, cannot be correlated at all",
 };
 
 /** Options for the `mac_persistence` filter dropdown on the Emitters and
- * Emissions pages, in menu order. The values must stay in step with
- * `fluxfang_core::classify::PERSISTENCE_FILTER_TOKENS` — the backend
- * rejects anything else with a 400 rather than matching nothing.
+ * Emissions pages, in menu order (most- to least-persistent, matching
+ * `MAC_PERSISTENCE_CLASSES`).
  *
- * The two badges come first (they're what the table shows), then the exact
- * classes for when badge granularity isn't enough. */
+ * Only the five real classes. The dropdown used to also carry two
+ * "randomized short-lived" / "randomized long-term" buckets, which are just
+ * unions of these classes; mixing the two schemes in one menu was confusing
+ * (the buckets overlap the classes, so it read as two filters glued
+ * together). The lifetime hint in each label carries the same
+ * short-vs-long-term signal the buckets did, so nothing is lost. The backend
+ * still accepts the bucket tokens, so an existing bookmarked URL keeps
+ * working; the menu just no longer offers them.
+ *
+ * Every value here is a `MacPersistence` class, so it is always a token the
+ * backend accepts (`fluxfang_core::classify::PERSISTENCE_FILTER_TOKENS`); the
+ * backend rejects anything else with a 400 rather than matching nothing. */
 export const MAC_PERSISTENCE_FILTER_OPTIONS: ReadonlyArray<{
-  value: string;
+  value: MacPersistence;
   label: string;
 }> = [
-  { value: "randomized", label: "Randomized — short-lived" },
-  { value: "randomized-longterm", label: "Randomized — long-term" },
-  { value: "stable", label: "Class: stable" },
-  { value: "per_network", label: "Class: per-network" },
-  { value: "session", label: "Class: session" },
-  { value: "ephemeral", label: "Class: ephemeral" },
-  { value: "unlinkable", label: "Class: unlinkable" },
+  { value: "stable", label: "Stable (real MAC)" },
+  { value: "per_network", label: "Per-network (persists for months)" },
+  { value: "session", label: "Session (until reboot)" },
+  { value: "ephemeral", label: "Ephemeral (rotates in minutes)" },
+  { value: "unlinkable", label: "Unlinkable (single-use)" },
 ];
 
 /** The badge an emitter shows for its persistence class, or `null` for

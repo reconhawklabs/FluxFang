@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import {
+  MAC_PERSISTENCE_CLASSES,
   MAC_PERSISTENCE_FILTER_OPTIONS,
   MacIdentityCell,
   macPersistenceBadge,
@@ -95,18 +96,26 @@ describe('MacIdentityCell', () => {
 });
 
 describe('MAC_PERSISTENCE_FILTER_OPTIONS', () => {
-  test('offers exactly the tokens the backend accepts', () => {
-    // Must stay in step with
-    // `fluxfang_core::classify::PERSISTENCE_FILTER_TOKENS` — anything else
-    // is a 400, not an empty result.
+  test('offers exactly the five classes, most- to least-persistent', () => {
+    // The two "randomized" buckets were removed: they overlap the classes,
+    // so mixing both schemes in one menu read as two filters glued together.
     expect(MAC_PERSISTENCE_FILTER_OPTIONS.map((o) => o.value)).toEqual([
-      'randomized',
-      'randomized-longterm',
-      'stable',
-      'per_network',
-      'session',
-      'ephemeral',
-      'unlinkable',
+      ...MAC_PERSISTENCE_CLASSES,
     ]);
+  });
+
+  test('every offered value is a class the backend accepts', () => {
+    // Each value is a `MacPersistence` class, which is always one of
+    // `fluxfang_core::classify::PERSISTENCE_FILTER_TOKENS`; anything else
+    // would be a 400 rather than an empty result.
+    for (const option of MAC_PERSISTENCE_FILTER_OPTIONS) {
+      expect(MAC_PERSISTENCE_CLASSES).toContain(option.value);
+    }
+  });
+
+  test('no label uses an em dash', () => {
+    for (const option of MAC_PERSISTENCE_FILTER_OPTIONS) {
+      expect(option.label).not.toContain('—');
+    }
   });
 });
