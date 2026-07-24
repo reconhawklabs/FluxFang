@@ -3,6 +3,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { useSensorStatus } from '../hooks/useSensorStatus';
 import type { ForwarderStatus } from '../api/client';
+import RequestApprovalButton from './RequestApprovalButton';
 import { queryKeys } from '../api/queryKeys';
 import { api } from '../api/client';
 import {
@@ -66,6 +67,25 @@ export default function SensorDashboard() {
           <div className="truncate font-mono text-sm text-slate-200">{s?.sensor ? `${s.sensor.host}:${s.sensor.port}` : '—'}</div>
         </div>
       </section>
+
+      {/* Visible until the Standalone has actually approved this node. While
+          "enrolling" the operator is waiting on an approval that has not
+          arrived; while "paused" the node is not configured yet and the
+          button explains that rather than silently doing nothing. Hidden once
+          forwarding is under way, when there is nothing left to request. */}
+      {s?.forwarding && s.forwarding.state !== 'forwarding' && (
+        <section
+          data-testid="approval-prompt"
+          className="space-y-2 rounded-lg border border-slate-800 bg-slate-900/40 p-4"
+        >
+          <h2 className="text-sm font-semibold text-slate-100">Approval</h2>
+          <p className="text-xs text-slate-400">
+            This node forwards only once the Standalone approves it. It retries on its own in the
+            background; use this to ask immediately and see the answer.
+          </p>
+          <RequestApprovalButton />
+        </section>
+      )}
 
       {s?.forwarding?.last_error && (
         <p

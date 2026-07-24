@@ -169,6 +169,19 @@ export interface ForwarderStatus {
   last_error: string | null;
 }
 
+/** `POST /api/sensor/request-approval` response.
+ *
+ * The operator-driven alternative to waiting on the forwarder's invisible
+ * ~30s retry. `detail` is always safe to show verbatim: the backend fills it
+ * from the same forwarding-health record the dashboard reads, so the button
+ * and the status tile never disagree. */
+export interface ApprovalRequestResult {
+  status: 'approved' | 'pending' | 'not_configured';
+  detail: string;
+  sensor_id?: string;
+  fingerprint?: string;
+}
+
 /** `GET /api/cached-emissions` row shape — an emission captured locally by a
  * Sensor node and cached pending delivery to its standalone target. */
 export interface CachedEmission {
@@ -193,6 +206,8 @@ export const api = {
   login: (password: string): Promise<void> => post<void>('/api/login', { password }),
   logout: (): Promise<void> => post<void>('/api/logout'),
   sensorStatus: (): Promise<SensorStatus> => get<SensorStatus>('/api/sensor/status'),
+  requestApproval: (): Promise<ApprovalRequestResult> =>
+    post<ApprovalRequestResult>('/api/sensor/request-approval'),
   cachedEmissions: (limit = 100): Promise<CachedEmission[]> =>
     get<CachedEmission[]>(`/api/cached-emissions?limit=${limit}`),
 };
