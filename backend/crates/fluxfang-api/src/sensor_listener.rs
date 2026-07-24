@@ -248,6 +248,15 @@ async fn ingest_handler(
         .into_response()
 }
 
+/// Every outcome is logged with the peer address and the reason.
+///
+/// A rejected enrollment used to be completely silent on this side, which is
+/// the worst possible place for silence: the operator watching an empty
+/// pending list had no way to distinguish "no sensor is reaching me" from
+/// "a sensor is knocking and I am turning it away", and the sensor's own
+/// retry loop is the only other party that knows. `docker logs` on the
+/// Standalone now answers that directly.
+///
 /// `POST /sensor/enroll` — a sensor self-registers `{sensor_id, key}` during
 /// an open enrollment window. Returns `{status, fingerprint}`; the sensor
 /// displays the fingerprint for out-of-band verification before an operator
@@ -263,9 +272,14 @@ async fn enroll(
     // 1. Slug + fingerprint validity (fail closed, no panic). The key is NOT
     // present in the request — only its one-way fingerprint.
     if !is_valid_sensor_id(&req.sensor_id) {
+        eprintln!("sensor enroll from {peer}: REJECTED — invalid sensor_id");
         return (StatusCode::BAD_REQUEST, "invalid sensor_id").into_response();
     }
     if !is_valid_fingerprint(&req.fingerprint) {
+        eprintln!(
+            "sensor enroll from {peer} (id {:?}): REJECTED — malformed fingerprint",
+            req.sensor_id
+        );
         return (StatusCode::BAD_REQUEST, "invalid fingerprint").into_response();
     }
     let fingerprint = req.fingerprint.clone();
@@ -297,6 +311,12 @@ async fn enroll(
                 )
                     .into_response();
             }
+            eprintln!(
+                "sensor enroll from {peer}: REJECTED — id {:?} is already approved under a \
+                 different key (its fingerprint is {}, this node presented {}). Rotate the key \
+                 or revoke the existing sensor.",
+                req.sensor_id, s.fingerprint, req.fingerprint
+            );
             return (
                 StatusCode::CONFLICT,
                 "sensor_id already approved with a different key",
@@ -310,6 +330,16 @@ async fn enroll(
     {
         let map = st.windows.lock().await;
         if !window_is_open(&map, st.data_source_id) {
+            // The single most likely reason an operator sees an empty pending
+            // list while a sensor insists it is enrolling. Note the window is
+            // in-memory, so restarting this backend closes it even though the
+            // UI countdown (a client-side timer) keeps running.
+            eprintln!(
+                "sensor enroll from {peer} (id {:?}): REJECTED — the enrollment window is \
+                 closed. Click \"Allow new Sensors\" on the Sensors page; note a backend \
+                 restart closes it.",
+                req.sensor_id
+            );
             return (StatusCode::FORBIDDEN, "enrollment window is closed").into_response();
         }
     }
@@ -347,18 +377,36 @@ async fn enroll(
         }
         // revoked / rejected -> refuse; do not resurrect. (approved is handled
         // above, before the window gate.)
-        Some(_) => {
-            return (StatusCode::FORBIDDEN, "sensor is not permitted to enroll").into_response()
+        Some(s) => {
+            eprintln!(
+                "sensor enroll from {peer}: REJECTED — id {:?} is {} and will not be \
+                 resurrected. Delete that row to let it enroll fresh.",
+                req.sensor_id, s.status
+            );
+            return (StatusCode::FORBIDDEN, "sensor is not permitted to enroll").into_response();
         }
     };
 
     match result {
-        Ok((code, status)) => (
-            code,
-            Json(serde_json::json!({ "status": status, "fingerprint": fingerprint })),
-        )
-            .into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Ok((code, status)) => {
+            eprintln!(
+                "sensor enroll from {peer}: ACCEPTED — id {:?} is now {status} \
+                 (fingerprint {fingerprint}); approve it on the Sensors page.",
+                req.sensor_id
+            );
+            (
+                code,
+                Json(serde_json::json!({ "status": status, "fingerprint": fingerprint })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            eprintln!(
+                "sensor enroll from {peer} (id {:?}): FAILED to persist: {e}",
+                req.sensor_id
+            );
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }
 
@@ -470,6 +518,18 @@ impl SensorListenerManager {
         DataSourceRepo::get(&self.pool, data_source_id)
             .await
             .ok()??;
+        // ...and that its listener is actually bound. A window is only
+        // meaningful if something is accepting connections: opening one for a
+        // stopped listener gives the operator a ticking countdown while every
+        // sensor gets connection-refused, which looks identical to "my sensor
+        // is broken" from the UI.
+        if !self.running.lock().await.contains_key(&data_source_id) {
+            eprintln!(
+                "refusing to open an enrollment window for data source {data_source_id}: its \
+                 listener is not running — start the Sensor data source first"
+            );
+            return None;
+        }
         let secs = DEFAULT_ENROLLMENT_WINDOW_SECS;
         let expiry = Instant::now() + std::time::Duration::from_secs(secs);
         self.windows.lock().await.insert(data_source_id, expiry);
