@@ -239,7 +239,14 @@ async fn approving_one_sensor_leaves_the_window_open_for_others_still_pending() 
     let listeners = state.sensor_listeners.clone();
     let app = fluxfang_api::app(state);
     let cookie = login(&app).await;
-    listeners.open_enrollment_window(ds_id).await;
+    // Bind the listener before opening a window: `open_enrollment_window`
+    // refuses when nothing is actually accepting connections, since a window
+    // over a stopped listener is a countdown that can never be used.
+    listeners.start(ds_id).await;
+    assert!(
+        listeners.open_enrollment_window(ds_id).await.is_some(),
+        "precondition: the window must open for a running listener",
+    );
 
     approve_via_api(&app, &cookie, first_id, "frontgate", &first_key).await;
     assert!(
@@ -253,6 +260,8 @@ async fn approving_one_sensor_leaves_the_window_open_for_others_still_pending() 
         0,
         "the last approval must still close the window",
     );
+
+    listeners.stop(ds_id).await;
 }
 
 /// Editing an emitter's rule must take effect on the very next emission.
