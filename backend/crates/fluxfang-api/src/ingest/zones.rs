@@ -417,7 +417,7 @@ mod tests {
             events: events_tx,
             secret_key: test_key(),
             node_sensor_id: "local".to_string(),
-            sensor_mode: false,
+            sensor_mode: false.into(),
             matcher: Default::default(),
         };
         (ctx, events_rx)
@@ -684,7 +684,7 @@ mod tests {
             events: events_tx,
             secret_key: test_key(),
             node_sensor_id: "local".to_string(),
-            sensor_mode: false,
+            sensor_mode: false.into(),
             matcher: Default::default(),
         };
 

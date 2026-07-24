@@ -190,7 +190,7 @@ impl AppState {
             events: events_tx,
             secret_key,
             node_sensor_id,
-            sensor_mode: false,
+            sensor_mode: false.into(),
             // Same index the capture supervisor uses: both paths auto-attach
             // against the node's one emitter rule set, so they should share
             // one parsed snapshot and one rebuild.

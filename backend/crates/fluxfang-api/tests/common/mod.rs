@@ -207,7 +207,7 @@ pub fn sensor_manager(pool: PgPool) -> SensorListenerManager {
         events,
         secret_key: TEST_SECRET_KEY,
         node_sensor_id: "local".to_string(),
-        sensor_mode: false,
+        sensor_mode: false.into(),
         matcher: Default::default(),
     };
     SensorListenerManager::new(pool, ingest)

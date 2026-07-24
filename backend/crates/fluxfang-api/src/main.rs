@@ -95,6 +95,40 @@ async fn main() {
     ));
     fluxfang_api::ageout::spawn_ageout(pool.clone());
 
+    // Keep the capture pipeline's sensor-mode flag in step with the database.
+    //
+    // Same startup-ordering trap as the loops above, on the capture side: the
+    // reader branches on this per observation to decide "cache for forwarding"
+    // vs "run the local analysis pipeline". Seeded from the role at boot -- so
+    // "none" on a fresh install -- a node configured as a Sensor afterwards
+    // ran the Standalone pipeline over its own captures and wrote nothing to
+    // `cached_emission`, for every data source, with no error, until it was
+    // restarted. Polling keeps the whole role change to one place rather than
+    // making every config write remember to update it.
+    let role_flag = state.capture.sensor_mode();
+    let role_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3));
+        loop {
+            ticker.tick().await;
+            if let Ok(node) = fluxfang_db::AppConfigRepo::node_config(&role_pool).await {
+                let is_sensor_now =
+                    matches!(node.map(|n| n.role), Some(fluxfang_db::NodeRole::Sensor));
+                if is_sensor_now != role_flag.get() {
+                    eprintln!(
+                        "node role changed: capture now {} (no restart needed)",
+                        if is_sensor_now {
+                            "caches for forwarding"
+                        } else {
+                            "runs the local analysis pipeline"
+                        }
+                    );
+                    role_flag.set(is_sensor_now);
+                }
+            }
+        }
+    });
+
     if !is_sensor {
         // Standalone node: rebind any sensor listeners the user left running
         // (mirrors the capture supervisor's resume_running for capture
