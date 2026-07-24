@@ -86,6 +86,7 @@ use crate::ingest::matcher::EmitterMatchIndex;
 use crate::ingest::pump::{LocationPump, OnExhausted};
 use crate::ingest::session::{HostZoneHook, SessionManager};
 use crate::ingest::zones::update_host_zones;
+use crate::ingest::SensorMode;
 use crate::ingest::{Event, IngestCtx};
 
 /// How often the recovery reconciler retries sources the user wants running
@@ -613,9 +614,10 @@ pub struct CaptureSupervisor {
     /// This node's own sensor id, threaded into every `IngestCtx` this
     /// supervisor builds — see `IngestCtx::node_sensor_id`.
     node_sensor_id: String,
-    /// Whether this node runs in sensor mode — threaded into every
-    /// `IngestCtx` this supervisor builds. See `IngestCtx::sensor_mode`.
-    sensor_mode: bool,
+    /// Whether this node currently runs in sensor mode — threaded into every
+    /// `IngestCtx` this supervisor builds. See `IngestCtx::sensor_mode`; it is
+    /// a shared live flag, not a boot-time snapshot.
+    sensor_mode: SensorMode,
     factory: Arc<dyn CapturerFactory>,
     /// The shared "where am I?" value, fed by the running location source's
     /// [`LocationPump`] and read by every ingest task + the gps status
@@ -659,7 +661,7 @@ impl CaptureSupervisor {
             events,
             secret_key,
             node_sensor_id,
-            sensor_mode,
+            sensor_mode: SensorMode::new(sensor_mode),
             factory,
             provider: Arc::new(LocationProvider::new()),
             session: Mutex::new(None),
@@ -667,6 +669,30 @@ impl CaptureSupervisor {
             failure_tx,
             failure_rx: StdMutex::new(Some(failure_rx)),
             matcher: EmitterMatchIndex::new(),
+        }
+    }
+
+    /// This supervisor's live sensor-mode flag, so the process can keep it in
+    /// step with the node config after first-run setup changes the role.
+    pub fn sensor_mode(&self) -> SensorMode {
+        self.sensor_mode.clone()
+    }
+
+    /// Re-read the node role and update [`Self::sensor_mode`].
+    ///
+    /// Called at the top of [`Self::start`], which is the moment it matters
+    /// most and the one place a stale value is guaranteed to produce wrong
+    /// behaviour for the whole life of the source: whichever branch the reader
+    /// takes on its first observation, it keeps taking. Doing it here (rather
+    /// than only from a background poller) also makes the guarantee
+    /// deterministic -- a data source added right after setup caches from its
+    /// very first observation, with no poll interval to lose a race against.
+    async fn refresh_sensor_mode(&self) {
+        if let Ok(node) = fluxfang_db::AppConfigRepo::node_config(&self.pool).await {
+            self.sensor_mode.set(matches!(
+                node.map(|n| n.role),
+                Some(fluxfang_db::NodeRole::Sensor)
+            ));
         }
     }
 
@@ -689,7 +715,7 @@ impl CaptureSupervisor {
             events: self.events.clone(),
             secret_key: self.secret_key,
             node_sensor_id: self.node_sensor_id.clone(),
-            sensor_mode: self.sensor_mode,
+            sensor_mode: self.sensor_mode.clone(),
             matcher: self.matcher.clone(),
         }
     }
@@ -719,7 +745,7 @@ impl CaptureSupervisor {
             events: self.events.clone(),
             secret_key: self.secret_key,
             node_sensor_id: self.node_sensor_id.clone(),
-            sensor_mode: self.sensor_mode,
+            sensor_mode: self.sensor_mode.clone(),
             matcher: self.matcher.clone(),
         }
     }
@@ -733,7 +759,7 @@ impl CaptureSupervisor {
                 // never runs locally -- per spec §7 that's a Standalone-only
                 // concern. Mirrors the `ingest`-vs-`cache_observation`
                 // branch in `start_wifi`'s reader task above.
-                if !ctx.sensor_mode {
+                if !ctx.sensor_mode.get() {
                     update_host_zones(&ctx, &fix).await;
                 }
             })
@@ -813,7 +839,7 @@ impl CaptureSupervisor {
                 // for the `SensorForwarder` to ship to the Standalone
                 // instead. Standalone behavior (`sensor_mode == false`) is
                 // unchanged.
-                let result = if ctx.sensor_mode {
+                let result = if ctx.sensor_mode.get() {
                     crate::ingest::cache_observation(&ctx, data_source_id, obs)
                         .await
                         .map(|_| ())
@@ -885,6 +911,10 @@ impl CaptureSupervisor {
     /// is set to `'error'` with `last_error` describing why, and this returns
     /// `Err` with the same message; it never panics.
     pub async fn start(&self, data_source_id: Uuid) -> anyhow::Result<()> {
+        // Pick up the node's current role before this source's reader task is
+        // spawned -- see `refresh_sensor_mode`.
+        self.refresh_sensor_mode().await;
+
         let mut running = self.running.lock().await;
         if running.contains_key(&data_source_id) {
             return Ok(());

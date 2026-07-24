@@ -77,6 +77,38 @@ pub mod pump;
 pub mod session;
 pub mod zones;
 
+/// A live "is this node a Sensor?" flag, shared by every `IngestCtx`.
+///
+/// Cheap to clone (one `Arc`) and to read (a relaxed atomic load), which
+/// matters because the capture reader consults it once per observation.
+/// `Relaxed` is the right ordering here: the flag guards no other memory, and
+/// a reader that sees a role change one observation late is harmless -- the
+/// alternative it replaced is a boot-time snapshot that is wrong forever.
+#[derive(Clone, Debug, Default)]
+pub struct SensorMode(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl SensorMode {
+    pub fn new(value: bool) -> Self {
+        Self(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            value,
+        )))
+    }
+
+    pub fn get(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set(&self, value: bool) {
+        self.0.store(value, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl From<bool> for SensorMode {
+    fn from(value: bool) -> Self {
+        Self::new(value)
+    }
+}
+
 use std::sync::Arc;
 
 use fluxfang_capture::RawObservation;
@@ -154,9 +186,18 @@ pub struct IngestCtx {
     /// This node's own sensor id (from app_config.settings.node_sensor_id,
     /// default "local") — every locally-captured emission is tagged with it.
     pub node_sensor_id: String,
-    /// True on a Sensor node — the capture reader caches observations for
-    /// forwarding instead of running the local analysis pipeline.
-    pub sensor_mode: bool,
+    /// Whether this node is currently a Sensor — the capture reader caches
+    /// observations for forwarding instead of running the local analysis
+    /// pipeline.
+    ///
+    /// A shared live flag, not a `bool` snapshot. The role is only known after
+    /// first-run setup, which happens over HTTP *after* the process starts, so
+    /// a value captured at boot is wrong on every fresh install: the node
+    /// would run the Standalone pipeline over its own captures and write
+    /// nothing to `cached_emission`, for every data source, until restarted.
+    /// `main.rs` keeps this in step with the database — see
+    /// `tests/sensor_mode_live.rs`.
+    pub sensor_mode: SensorMode,
     /// The node's parsed emitter auto-attach rule set (see
     /// [`matcher::EmitterMatchIndex`]). Shared, not per-`IngestCtx`: local
     /// capture and `/sensor/ingest` match against the same emitters, so they
@@ -886,7 +927,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
-            sensor_mode: false,
+            sensor_mode: false.into(),
             matcher: Default::default(),
         };
 
@@ -938,7 +979,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "base".to_string(),
-            sensor_mode: false,
+            sensor_mode: false.into(),
             matcher: Default::default(),
         };
 
@@ -977,7 +1018,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "frontgate".to_string(),
-            sensor_mode: true,
+            sensor_mode: true.into(),
             matcher: Default::default(),
         };
 
@@ -1025,7 +1066,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
-            sensor_mode: false,
+            sensor_mode: false.into(),
             matcher: Default::default(),
         };
 
@@ -1056,7 +1097,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
-            sensor_mode: false,
+            sensor_mode: false.into(),
             matcher: Default::default(),
         };
 
@@ -1105,7 +1146,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
-            sensor_mode: false,
+            sensor_mode: false.into(),
             matcher: Default::default(),
         };
 
@@ -1188,7 +1229,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
-            sensor_mode: false,
+            sensor_mode: false.into(),
             matcher: Default::default(),
         };
 
@@ -1256,7 +1297,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
-            sensor_mode: false,
+            sensor_mode: false.into(),
             matcher: Default::default(),
         };
 
@@ -1293,7 +1334,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
-            sensor_mode: false,
+            sensor_mode: false.into(),
             matcher: Default::default(),
         };
 
@@ -1361,7 +1402,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
-            sensor_mode: false,
+            sensor_mode: false.into(),
             matcher: Default::default(),
         };
 
@@ -1458,7 +1499,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
-            sensor_mode: false,
+            sensor_mode: false.into(),
             matcher: Default::default(),
         };
         (ctx, ds, base)
@@ -1549,7 +1590,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
-            sensor_mode: false,
+            sensor_mode: false.into(),
             matcher: Default::default(),
         };
 
@@ -1595,7 +1636,7 @@ mod tests {
                 events: events_tx,
                 secret_key: [0x11u8; 32],
                 node_sensor_id: "local".to_string(),
-                sensor_mode: false,
+                sensor_mode: false.into(),
                 matcher: Default::default(),
             };
 
@@ -1658,7 +1699,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
-            sensor_mode: false,
+            sensor_mode: false.into(),
             matcher: Default::default(),
         };
 
@@ -1702,7 +1743,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
-            sensor_mode: false,
+            sensor_mode: false.into(),
             matcher: Default::default(),
         };
 
@@ -1780,7 +1821,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
-            sensor_mode: false,
+            sensor_mode: false.into(),
             matcher: Default::default(),
         };
 
@@ -1819,7 +1860,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
-            sensor_mode: false,
+            sensor_mode: false.into(),
             matcher: Default::default(),
         };
 
@@ -1849,7 +1890,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
-            sensor_mode: false,
+            sensor_mode: false.into(),
             matcher: Default::default(),
         };
 
@@ -1880,7 +1921,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
-            sensor_mode: false,
+            sensor_mode: false.into(),
             matcher: Default::default(),
         };
 
@@ -1927,7 +1968,7 @@ mod tests {
             events: events_tx,
             secret_key: [0x11u8; 32],
             node_sensor_id: "local".to_string(),
-            sensor_mode: false,
+            sensor_mode: false.into(),
             matcher: Default::default(),
         };
 
