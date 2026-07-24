@@ -46,6 +46,17 @@ const FORWARD_IDLE: Duration = Duration::from_secs(2);
 /// there for why the jitter matters with more than one sensor.
 const FORWARD_BACKOFF: Duration = Duration::from_secs(30);
 
+/// How often to re-read the node config while the loop is paused for lack of
+/// one.
+///
+/// Deliberately much shorter than [`FORWARD_BACKOFF`]. "No sensor config yet"
+/// is not a failure to back off from -- it is the state a node sits in while
+/// an operator is actively running first-run setup or typing a key into
+/// Settings, watching for it to appear on the Standalone. Re-reading every
+/// 30s there makes a working system feel broken. The poll is a single
+/// indexed row read, so a few seconds costs nothing.
+const PAUSED_POLL: Duration = Duration::from_secs(3);
+
 const PRUNE_INTERVAL: Duration = Duration::from_secs(300);
 /// How often an approved-but-idle sensor pings the Standalone so it keeps
 /// showing "online" even with nothing to forward. Comfortably under the
@@ -381,7 +392,7 @@ pub fn spawn_forwarder(forwarder: SensorForwarder) {
                 approved = false;
                 last_ident = None;
                 forwarder.health.set_state(ForwardState::Paused);
-                tokio::time::sleep(FORWARD_BACKOFF).await;
+                tokio::time::sleep(PAUSED_POLL).await;
                 continue;
             };
             paused_logged = false;

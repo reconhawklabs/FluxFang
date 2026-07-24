@@ -67,31 +67,35 @@ async fn main() {
         startup.capture.resume_running().await;
     });
 
-    if is_sensor {
-        // Sensor node: forward cached captures to the Standalone + prune by
-        // TTL. Sensor nodes don't run their own sensor listeners or TPMS
-        // correlation — that's the Standalone's job once it receives the
-        // forwarded emissions.
-        //
-        // Both tasks re-read the node config from the DB each cycle, so they
-        // run unconditionally for a Sensor node and self-heal live: the pruner
-        // (falling back to a 7-day TTL when unset) keeps `cached_emission`
-        // bounded even with no valid forwarder config, and the forwarder pauses
-        // until a valid key/host/port is saved in Settings — then picks it up
-        // within one cycle, no restart. (This is why an invalid key at boot no
-        // longer disables forwarding permanently.)
-        fluxfang_api::forwarder::spawn_pruner(pool.clone());
-        fluxfang_api::forwarder::spawn_forwarder(fluxfang_api::forwarder::SensorForwarder::new(
-            pool.clone(),
-            state.forwarder_health.clone(),
-        ));
-    } else {
-        // Standalone node: emitters only exist here (a Sensor caches raw
-        // observations and never classifies), so the ephemeral age-out
-        // sweep runs on this side. It no-ops until a data source opts in
-        // via `config.age_out_ephemeral`.
-        fluxfang_api::ageout::spawn_ageout(pool.clone());
+    // --- Role-independent background loops ---
+    //
+    // These three re-read what they need from the database every cycle and do
+    // nothing when it doesn't apply to them, so they are spawned regardless of
+    // the role this process booted with.
+    //
+    // That is not a stylistic choice. `is_sensor` is read once, before the
+    // HTTP listener is even up, but first-run setup happens over HTTP
+    // *afterwards* -- so on every fresh install the role at boot is "none".
+    // Gating on it meant a node the operator then provisioned as a Sensor
+    // never spawned a forwarder, never sent a single `/sensor/enroll`, and so
+    // could never appear in the Standalone's pending list -- with nothing in
+    // the logs, because nothing was running to report it. Only a restart fixed
+    // it. The same applied to switching role in Settings, and (via the
+    // age-out sweep) to a freshly provisioned Standalone.
+    //
+    // The forwarder pauses unless `load_target` finds `role == Sensor` with a
+    // valid key/host/port; the pruner falls back to a 7-day TTL and only ever
+    // touches `cached_emission`, which is empty on a Standalone; the age-out
+    // sweep no-ops until a data source opts in via `config.age_out_ephemeral`.
+    // See `tests/forwarder_startup.rs`.
+    fluxfang_api::forwarder::spawn_pruner(pool.clone());
+    fluxfang_api::forwarder::spawn_forwarder(fluxfang_api::forwarder::SensorForwarder::new(
+        pool.clone(),
+        state.forwarder_health.clone(),
+    ));
+    fluxfang_api::ageout::spawn_ageout(pool.clone());
 
+    if !is_sensor {
         // Standalone node: rebind any sensor listeners the user left running
         // (mirrors the capture supervisor's resume_running for capture
         // datasources).
