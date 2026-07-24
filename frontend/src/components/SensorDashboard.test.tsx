@@ -75,6 +75,22 @@ test('a reachable Standalone with failing batches reports Failing, not Deliverin
   expect(screen.getByText('Reachable')).toBeInTheDocument();
 });
 
+test('the approval prompt is offered while approval is still outstanding', async () => {
+  stubStatus(statusWith({ ...FORWARDING, state: 'enrolling', last_error: null }));
+  render(<SensorDashboard />, { wrapper });
+  expect(await screen.findByTestId('approval-prompt')).toBeInTheDocument();
+  expect(screen.getByTestId('request-approval')).toBeInTheDocument();
+});
+
+test('the approval prompt disappears once forwarding is under way', async () => {
+  // Nothing left to request at this point, so offering it would only invite
+  // pointless round trips.
+  stubStatus(statusWith(FORWARDING));
+  render(<SensorDashboard />, { wrapper });
+  expect(await screen.findByText('Delivering')).toBeInTheDocument();
+  expect(screen.queryByTestId('approval-prompt')).not.toBeInTheDocument();
+});
+
 test('a sensor still awaiting operator approval says so', async () => {
   stubStatus(
     statusWith({

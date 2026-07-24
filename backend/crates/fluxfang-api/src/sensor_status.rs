@@ -1,7 +1,7 @@
 //! Sensor-node UI endpoints: forwarding status + the local emission cache.
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -13,7 +13,66 @@ use crate::state::AppState;
 pub fn protected_routes() -> Router<AppState> {
     Router::new()
         .route("/api/sensor/status", get(status))
+        .route("/api/sensor/request-approval", post(request_approval))
         .route("/api/cached-emissions", get(cached))
+}
+
+/// `POST /api/sensor/request-approval` — enroll with the Standalone right
+/// now, and report what it said.
+///
+/// The background loop already retries on its own, but on a schedule the
+/// operator cannot see: after clicking Approve on the Standalone there is an
+/// unexplained pause before the sensor notices, which reads as a failure.
+/// This makes the round trip an action the operator takes deliberately, so
+/// they know exactly when to look and what the answer was. It does not
+/// replace the automatic retry -- an unattended sensor must still come back
+/// on its own after a Standalone restart or a window opened later.
+///
+/// Safe to press repeatedly: enrollment is idempotent while pending, and an
+/// already-approved sensor's re-enroll only refreshes its liveness.
+async fn request_approval(State(state): State<AppState>) -> Result<Json<Value>, StatusCode> {
+    let Some(target) = crate::forwarder::load_target(&state.pool).await else {
+        // Not a sensor, or no usable key/host/port yet. A 200 with an
+        // explanation beats an error status: this is a normal state for a
+        // half-configured node, and the UI wants to show the reason.
+        return Ok(Json(json!({
+            "status": "not_configured",
+            "detail": "This node has no usable Sensor configuration yet. Set the Standalone host, port and key in Settings first.",
+        })));
+    };
+
+    let fingerprint = fluxfang_sensor_proto::fingerprint(&target.sensor_id, &target.key);
+    let forwarder =
+        crate::forwarder::SensorForwarder::new(state.pool.clone(), state.forwarder_health.clone());
+    // Shares the process-wide health handle, so whatever this attempt learns
+    // also updates the dashboard's forwarding tile rather than being a
+    // separate, disagreeing source of truth.
+    let approved = matches!(
+        forwarder.enroll(&target).await,
+        crate::forwarder::EnrollResult::Approved
+    );
+
+    let detail = if approved {
+        "Approved. Forwarding will begin on the next cycle.".to_string()
+    } else {
+        // `enroll` records the specific reason (window closed, id conflict,
+        // unreachable, still pending) on the shared health handle; surface
+        // that rather than inventing a second message.
+        state
+            .forwarder_health
+            .snapshot()
+            .last_error
+            .unwrap_or_else(|| "Not approved yet. Approve this sensor on the Standalone.".into())
+    };
+
+    Ok(Json(json!({
+        "status": if approved { "approved" } else { "pending" },
+        "detail": detail,
+        // Shown so the operator can check it against the Standalone's
+        // approval dialog without hunting for it elsewhere.
+        "sensor_id": target.sensor_id,
+        "fingerprint": fingerprint,
+    })))
 }
 
 async fn status(State(state): State<AppState>) -> Result<Json<Value>, StatusCode> {

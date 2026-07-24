@@ -8,6 +8,7 @@ import { useConfig } from '../hooks/useConfig';
 import { api } from '../api/client';
 import type { ConfigPatch, NodeRole } from '../api/client';
 import { generateKey, isValidKey } from '../lib/sensorKey';
+import RequestApprovalButton from '../components/RequestApprovalButton';
 
 const SLUG_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -106,6 +107,21 @@ export default function Settings() {
                 </button>
               </div>
               <p className="text-xs text-slate-500">{config?.sensor ? 'Leave blank to keep the current key.' : 'Required when switching to Sensor role.'}</p></div>
+
+            {/* Always available here, unlike the dashboard prompt which hides
+                once forwarding is healthy: this is where an operator lands
+                after changing the key or host, and a key change resets
+                approval on the Standalone. Save first, then request. */}
+            {config?.sensor && (
+              <div className="space-y-1 border-t border-slate-800 pt-4">
+                <span className={label}>Standalone approval</span>
+                <p className="text-xs text-slate-500">
+                  Ask the Standalone to enrol this node now instead of waiting for the background
+                  retry. Save any changes above first.
+                </p>
+                <RequestApprovalButton />
+              </div>
+            )}
           </>
         )}
 
